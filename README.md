@@ -1,5 +1,5 @@
 # MadVoro - Massively distributed Construction of Voronoi Diagrams
-
+![C++ project](https://img.shields.io/badge/C++-3393ff)
 MadVoro is a C++ framework for construction of Voronoi diagrams of 3D points, in distributed memory (using MPI).
 
 ## Requirements
@@ -15,8 +15,8 @@ MadVoro is a C++ framework for construction of Voronoi diagrams of 3D points, in
 ## Build & Install
 First, clone this git repository and change the directory to the cloned
 ```
-git clone <repo>
-cd <repo>
+git clone https://github.com/maormizrachi/MadVoro.git
+cd MadVoro
 ```
 Then, run the configuration file, and compile:
 ```
@@ -66,6 +66,9 @@ The API is available to the user by using three classes:
 - `Voronoi3D`, representing a distributed three-dimensional Voronoi diagram.
 - `Face`, representing an area limited by points (composed by indices of local points as points).
 - `Vector3D`, representing a three-dimensional point containing x, y, z coordinates and basic operations.
+> [!IMPORTANT]
+> You can find the full API of each class in the include files generated after you install the library. Pay attantion to methods documentations.
+
 You should write your own C++ project, and include the three headers files (found in your include) allowing you to use the code. You can see examples in the examples directory.
 After that, you should add an include path link path to your compilation. Specifically, you should add the following flags in compilation:
 ```
@@ -83,11 +86,12 @@ It is recommended to add this line to your `~/.bashrc` file, in this case.
 You can find examples in the `examples` directory.
 
 ## Cleaning
-You can clean the project by writing the following make command
+You can clean the project by writing the following make command:
 ```
 make distclean
 ```
-**It is recommended to clean the project before compiling again.**
+> [!NOTE]
+> To recompile with different configuration (for example, add a support of HDF5 if you didn't have one currently), it is required to clean and reconfigure the project again.
 
 ## Reference
 If you wish to cite us, we'll be thankful if you'd used the following BibTeX format:
