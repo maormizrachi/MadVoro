@@ -19,15 +19,15 @@ MadVoro is a C++ framework for construction of Voronoi diagrams of 3D points, in
 ```
 git clone https://github.com/maormizrachi/MadVoro.git
 cd MadVoro
-/configure --with-mpi --with-boost(=BOOST DIR) --prefix=`pwd`/current
+./configure --with-mpi --with-boost(=BOOST DIR) --prefix=`pwd`/current
 make -j 8
 make install
 ```
 The latter will install a parallel version of library in `MadVoro/current`, assuming you give a correct path for the Boost library.
 You can run a simple example by:
 ```
-cd examples/faces_information/
-g++ main.cpp -o test -I ../../current/include -L ../../current/lib -lmadvoro
+cd examples/uniform_points/
+g++ parallel.cpp -o test -I ../../current/include -L ../../current/lib -lmadvoro
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:`realpath ../../current/lib/`
 ./test
 ``` 
