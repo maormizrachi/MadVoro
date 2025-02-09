@@ -15,7 +15,22 @@ MadVoro is a C++ framework for construction of Voronoi diagrams of 3D points, in
 - Recommended: [VCL](https://github.com/vectorclass/version2) for vectorization accelartion.
 - [HDF5](https://www.hdfgroup.org/solutions/hdf5/) (C++ binding) >= 1.8.0, for output.
 - [VTK](https://vtk.org/) >= 1.9.3, for visualization.
-
+## Quick Start (TL;DR)
+```
+git clone https://github.com/maormizrachi/MadVoro.git
+cd MadVoro
+/configure --with-mpi --with-boost(=BOOST DIR) --prefix=`pwd`/current
+make -j 8
+make install
+```
+The latter will install a parallel version of library in `MadVoro/current`, assuming you give a correct path for the Boost library.
+You can run a simple example by:
+```
+cd examples/faces_information/
+g++ main.cpp -o test -I ../../current/include -L ../../current/lib -lmadvoro
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:`realpath ../../current/lib/`
+./test
+``` 
 ## Build & Install
 First, clone this git repository and change the directory to the cloned
 ```
@@ -37,6 +52,7 @@ You can configure another prefix, where the project will be installed in, by usi
 ```
 For additional info, and for more flags and settings, you can always use `./configure --help`.
 
+### Boost Configuration
 One may not supply `--with-boost(=DIR)`, or supply `--with-boost` only, if the boost directory is defined in an environment variable called `BOOST_DIR` or `BOOST_ROOT`, assuming one of those contains boost's `include` (and `lib`, if exists) directories. If not, you must supply the lib directory and include directory apart:
 ```
 ./configure --with-boost-libdir(=LIBDIR) --with-boost-include(=INCDIR)
@@ -56,9 +72,11 @@ Or, alternatively:
 Where `DIR` is a directory containing `bin`, `include` and `lib` directory of the desired MPI package.
 Supplying `--with-mpi` with no argument, searches for the MPI implementation of the MPI that implements the command `mpicxx`.
 
-### Build with output
-MadVoro supports an output system, allowing you to extract the distributed Voronoi diagram into a 3-dimensional .pvtu file (parallel VTK). These files can be read by programs such as paraview.
+### With VTK or HDF5 support
+#### VTK
+MadVoro maintains an output system, allowing you to extract the distributed Voronoi diagram into a 3-dimensional `.pvtu` file (parallel VTK). These files can be read by programs such as paraview.
 Use `--with-vtk` to build with vtk support. You may supply your VTK path after the `=`.
+#### HDF5
 You can also use `--with-hdf5` to use HDF5.
 When adding VTK a new method will be added to the `Voronoi3D` class, called `ToVTK`. The latter method gets a filename to print the VTK file to. It may also get additional data to supply with each point (You may add double/float64 fields by specifying the field name and field values for each point, by giving each in a dedicated vector parameter to this method).  
 A similar method called `ToHDF5` will be added in case you compiled the project with HDF5.
@@ -66,7 +84,7 @@ A similar method called `ToHDF5` will be added in case you compiled the project 
 ## Running
 ### API
 MadVoro offers a wide API by merely giving the list of points to build and the construction zone (usually a box used to clip the Voronoi cells), including a cell's vertices, faces, the list of a cell's neighbors, cell's center of mass and faces center of mass.
-The API is available to the user by using three classes:
+The user API maintains three classes:
 - `Voronoi3D`, representing a distributed three-dimensional Voronoi diagram.
 - `Face`, representing an area limited by points (composed by indices of local points as points).
 - `Vector3D`, representing a three-dimensional point containing x, y, z coordinates and basic operations.
@@ -87,8 +105,34 @@ It is recommended to add this line to your `~/.bashrc` file, in this case.
 > [!TIP]  
 > You may use other techniques to run, avoiding the use of `LD_LIBRARY_PATH`. For example, using RUNPATH or different link-flags. Instructions are shown when running `make install`. 
 ### Examples
-You can find examples in the `examples` directory.
+To get familiar with the library and functions, several documented examples are available. These examples are available in the `examples` directory.
+You should follow the running instructions to compile and run the example. Pay attention that several examples are designed as parallel examples, and must be compiled using a MPI compiler. Additionaly, several examples assume you configured the package with a VTK support, as they finalize by writing a VTK file. Otherwise, you can remove the last line creating a VTK file (calling the `ToVTK()` function) in the example's `main.cpp` file.
+#### Serial Examples
+Serial examples should not be ran when compiled with MPI support.
 
+For example,
+```
+cd examples/faces_information/
+g++ main.cpp -o test -I /path/to/madvoro/include -L /path/to/madvoro/lib -lmadvoro
+```
+Where, instead of `/path/to/madvoro` you should use the prefix you gave in `./configure`.
+Then, to run, use:
+```
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/path/to/madvoro/lib
+```
+Again, use your installation path.
+You can run the above example, by running the executable `test` file created:
+```
+./test
+``` 
+#### Parallel Examples
+When compiling and executing a parallel example, you should compile with your MPI compiler (`mpicxx` or `mpic++`) and run with `mpiexec` or `mpirun`. For instance, to compile and run the example `examples/pentagon` with 16 processes, you should use the following commands:
+```
+cd examples/pentagon/
+mpicxx main.cpp -o test -I /path/to/madvoro/include -L /path/to/madvoro/lib -lmadvoro
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/path/to/madvoro/lib
+mpirun -n 16 ./test
+```
 ## Cleaning
 You can clean the project by writing the following make command:
 ```
