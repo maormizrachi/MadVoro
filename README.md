@@ -27,9 +27,9 @@ The latter will install a parallel version of library in `MadVoro/current`, assu
 You can run a simple example by:
 ```
 cd examples/uniform_points/
-g++ parallel.cpp -o test -I ../../current/include -L ../../current/lib -lmadvoro
+mpicxx parallel.cpp -o test -I ../../current/include -L ../../current/lib -lmadvoro
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:`realpath ../../current/lib/`
-./test
+mpirun -n 8 ./test
 ``` 
 ## Build & Install
 First, clone this git repository and change the directory to the cloned
