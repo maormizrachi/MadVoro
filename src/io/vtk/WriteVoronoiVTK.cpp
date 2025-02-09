@@ -85,20 +85,24 @@ VTU_Output WriteVoronoiVTKHelper(const std::string &filename, const MadVoro::Vor
         }
     }
 
-    Npoints = tri.GetFacePoints().size();
+    const std::vector<Vector3D> &facePoints = tri.GetFacePoints();
+
+    Npoints = facePoints.size();
     for(size_t i = 0; i < Npoints; ++i)
     {
-        vx.push_back(tri.GetFacePoints()[i].x);
-        vy.push_back(tri.GetFacePoints()[i].y);
-        vz.push_back(tri.GetFacePoints()[i].z);
+        vx.push_back(facePoints[i].x);
+        vy.push_back(facePoints[i].y);
+        vz.push_back(facePoints[i].z);
     }
+
     Npoints = tri.GetTotalFacesNumber();
     for(size_t i = 0; i < Npoints; ++i)
     {
-        Nvert.push_back(tri.GetPointsInFace(i).size());
+        const point_vec &pointsInFace = tri.GetPointsInFace(i);
+        Nvert.push_back(pointsInFace.size());
         for(size_t j = 0; j < Nvert.back(); ++j)
         {
-            VerticesInFace.push_back(tri.GetPointsInFace(i)[j]);
+            VerticesInFace.push_back(pointsInFace[j]);
         }
     }
 
