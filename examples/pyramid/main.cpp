@@ -4,7 +4,7 @@
 #include <algorithm>
 #include <mpi.h>
 #include <madvoro/Voronoi3D.hpp>
-#include "frustum_helpers.hpp"
+#include "pyramid_helpers.hpp"
 
 using namespace MadVoro;
 
@@ -24,18 +24,16 @@ int main(int argc, char *argv[])
 
 
     Vector3D vec3(1, 0, 0), vec4(0, 1, 0);
-    Vector3D E = A + 0.5 * C - 0.5 * vec3 - 0.5 * vec4 + Vector3D(0, 0, height);
-    Vector3D F(E+vec3), G(E+vec3+vec4), H(E+vec4);
+    Vector3D S = A + 0.5 * C + Vector3D(0, 0, height);
 
     // it is important that the points of a face will be well-ordered
-    Face base1({E, F, G, H});
-    Face base2({A, B, C, D});
-    Face side1({E, F, B, A});
-    Face side2({F, G, C, B});
-    Face side3({G, H, D, C});
-    Face side4({H, E, A, D});
+    Face base({A, B, C, D});
+    Face side1({A, D, S});
+    Face side2({C, D, S});
+    Face side3({B, C, S});
+    Face side4({A, B, S});
+    std::vector<Face> box_faces = {base, side1, side2, side3, side4};
 
-    std::vector<Face> box_faces = {base1, base2, side1, side2, side3, side4};
     Voronoi3D diagram(box_faces);
     auto [ll, ur] = diagram.GetBoxCoordinates();
 
@@ -55,7 +53,7 @@ int main(int argc, char *argv[])
     {
         std::cout << "Starting VTK output" << std::endl;
     }
-    diagram.ToVTK("frustum_example.vtu");
+    diagram.ToVTK("pyramid_example.vtu");
     
     MPI_Finalize();
 
