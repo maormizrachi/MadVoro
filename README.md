@@ -19,11 +19,12 @@ MadVoro is a C++ framework for construction of Voronoi diagrams of 3D points, in
 ```
 git clone https://github.com/maormizrachi/MadVoro.git
 cd MadVoro
+./bootstrap.sh
 ./configure --with-mpi --with-boost(=BOOST DIR) --prefix=`pwd`/current
 make -j 8
 make install
 ```
-The latter will install a parallel version of library in `MadVoro/current`, assuming you give a correct path for the Boost library.
+The latter will install a parallel version of library in `MadVoro/current`, assuming you give a correct path for the Boost library instead of `(=BOOST DIR)`.
 You can run a simple example by:
 ```
 cd examples/uniform_points/
@@ -39,10 +40,13 @@ cd MadVoro
 ```
 Then, run the configuration file, and compile:
 ```
+./bootstrap.sh
 ./configure --with-boost(=DIR)
 make
 make install
 ```
+It is recommended to run the `./boostrap.sh` script as it can solve version differences and gaps problem.
+
 Follow the instructions printed in `make install` to install the library successfuly (in particular, it is possible that the path to library should be added to LD_LIBRARY_PATH).
 
 By default, running `make install` will install the binary files in /usr/local/bin, the libraries in /usr/local/lib and so on. That's probably not what you want if you don't have permissions to write in those directories (and the install phase will fail).

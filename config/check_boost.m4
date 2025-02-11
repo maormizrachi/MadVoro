@@ -77,7 +77,7 @@ AC_DEFUN([BOOST_CHECK_VERSION],
 
     
     BOOST_CXXFLAGS="$CXXFLAGS -I $with_boost_include"
-    BOOST_LDFLAGS="$LDFLAGS -L$with_boost_libdir -lboost_system"
+    BOOST_LDFLAGS="$LDFLAGS"
 
     CXXFLAGS_BEFORE=$CXXFLAGS
     LDFLAGS_BEFORE=$LDFLAGS
