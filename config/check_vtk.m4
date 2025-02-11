@@ -57,7 +57,7 @@ AC_DEFUN([FIND_INSTALLED_VTK], [
         fi
     done
     
-    installed_directory=`readlink -m "$first_dir/.."`
+    installed_directory=`realpath "$first_dir/.."`
     AC_MSG_RESULT([$installed_directory])
     with_vtk=$installed_directory
 ])
@@ -72,7 +72,7 @@ AC_DEFUN([VTK_CHECK_VERSION],
     fi
 
     if test "$with_vtk_include" = "no"; then
-      with_vtk_include=`readlink -m $with_vtk/include`
+      with_vtk_include=`realpath $with_vtk/include`
     fi
 
     major_required=`echo $1 | sed 's/\([[0-9]]*\).\([[0-9]]*\).\([[0-9]]*\)/\1/'`

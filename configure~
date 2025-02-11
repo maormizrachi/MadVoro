@@ -800,6 +800,7 @@ with_sysroot
 enable_libtool_lock
 with_mpi
 with_boost
+with_boost_libdir
 with_boost_include
 with_hdf5
 with_hdf5_libdir
@@ -1479,6 +1480,8 @@ Optional Packages:
   --with-boost(=DIR)      The prefix where Boost is installed (default is the
                           environment variable 'BOOST_DIR'), adding
                           DIR/include
+  --with-boost-libdir(=DIR)
+                          "Search path for boost libraries"
   --with-boost-include(=DIR)
                           "Search path for boost header files"
   --with-hdf5(=DIR)       The prefix where HDF5 With CPP support is installed
@@ -17174,7 +17177,7 @@ fi
       else
         # did not supply value for MPICXX, but did supply 'with-mpi'
 
-        MPICXX="`realpath $with_mpi`/bin/mpicxx"
+        MPICXX="`readlink -m $with_mpi`/bin/mpicxx"
       fi
     fi
 
@@ -17297,6 +17300,9 @@ printf "%s\n" "#define MADVORO_WITH_MPI 1" >>confdefs.h
   # third argument - what to do if failed
 
 
+  DEFAULT_PATH=/usr
+  DEFAULT_LIB_PATH=/usr/lib
+
 
 # Check whether --with-boost was given.
 if test ${with_boost+y}
@@ -17308,6 +17314,21 @@ then :
               fi
 else $as_nop
   with_boost="no"
+
+fi
+
+
+
+# Check whether --with-boost-libdir was given.
+if test ${with_boost_libdir+y}
+then :
+  withval=$with_boost_libdir; if test "$withval" = "yes"; then
+                with_boost_libdir="no"
+              else
+                with_boost_libdir=$withval
+              fi
+else $as_nop
+  with_boost_libdir="no"
 
 fi
 
@@ -17341,18 +17362,26 @@ printf %s "checking Boost's path... " >&6; }
           with_boost=`echo $BOOST_ROOT`
         fi
         if test -z "$with_boost"; then
-          # Use default
-          with_boost_include=/usr/include
+          as_fn_error $? "Boost not found" "$LINENO" 5
         fi
       fi
       { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $with_boost" >&5
 printf "%s\n" "$with_boost" >&6; }
     fi
 
-    if test "$with_boost_include" = "no"; then
-      # Determine by default as the boost dir
+    if test "$with_boost_libdir" = "no"; then
+      # Determine by default as the boost dir and then 'lib'
       if test -d "$with_boost"; then
-        with_boost_include=`realpath $with_boost/include`
+        with_boost_libdir=`readlink -m $with_boost/lib`
+      else
+        as_fn_error $? "Boost not found in $with_boost" "$LINENO" 5
+      fi
+    fi
+
+    if test "$with_boost_include" = "no"; then
+      # Determine by default as the boost dir and then 'lib'
+      if test -d "$with_boost"; then
+        with_boost_include=`readlink -m $with_boost/include`
       else
         as_fn_error $? "Boost not found in $with_boost" "$LINENO" 5
       fi
@@ -17360,7 +17389,7 @@ printf "%s\n" "$with_boost" >&6; }
 
 
     BOOST_CXXFLAGS="$CXXFLAGS -I $with_boost_include"
-    BOOST_LDFLAGS="$LDFLAGS"
+    BOOST_LDFLAGS="$LDFLAGS -L$with_boost_libdir -lboost_system"
 
     CXXFLAGS_BEFORE=$CXXFLAGS
     LDFLAGS_BEFORE=$LDFLAGS
@@ -17500,17 +17529,17 @@ fi
     if test "$with_hdf5" = "yes"; then
       h5dump=`command -v h5dump`
       hdf5_bin_dir=`dirname $h5dump`
-      with_hdf5=`realpath "$hdf5_bin_dir/.."`
+      with_hdf5=`readlink -m "$hdf5_bin_dir/.."`
     fi
 
     if test "$with_hdf5_libdir" = "no"; then
       # did not supply any value with 'with-hdf5-libdir', get by path
-      with_hdf5_libdir=`realpath "$with_hdf5/lib"`
+      with_hdf5_libdir=`readlink -m "$with_hdf5/lib"`
     fi
 
     if test "$with_hdf5_include" = "no"; then
       # did not supply any value with 'with-hdf5-include', get by path
-      with_hdf5_include=`realpath "$with_hdf5/include"`
+      with_hdf5_include=`readlink -m "$with_hdf5/include"`
     fi
 
     { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking HDF5 path" >&5
@@ -17842,7 +17871,7 @@ printf %s "checking Installed VTK path... " >&6; }
         fi
     done
 
-    installed_directory=`realpath "$first_dir/.."`
+    installed_directory=`readlink -m "$first_dir/.."`
     { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $installed_directory" >&5
 printf "%s\n" "$installed_directory" >&6; }
     with_vtk=$installed_directory
@@ -17850,7 +17879,7 @@ printf "%s\n" "$installed_directory" >&6; }
     fi
 
     if test "$with_vtk_include" = "no"; then
-      with_vtk_include=`realpath $with_vtk/include`
+      with_vtk_include=`readlink -m $with_vtk/include`
     fi
 
     major_required=`echo 9.3.0 | sed 's/\([0-9]*\).\([0-9]*\).\([0-9]*\)/\1/'`

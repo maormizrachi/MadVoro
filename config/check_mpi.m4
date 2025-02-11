@@ -28,7 +28,7 @@ AC_DEFUN([MPI_CHECK_VERSION],
       else
         # did not supply value for MPICXX, but did supply 'with-mpi'
 
-        MPICXX="`readlink -m $with_mpi`/bin/mpicxx"
+        MPICXX="`realpath $with_mpi`/bin/mpicxx"
       fi
     fi
 

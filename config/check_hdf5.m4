@@ -50,17 +50,17 @@ AC_DEFUN([HDF5_CHECK_VERSION],
     if test "$with_hdf5" = "yes"; then
       h5dump=`command -v h5dump`
       hdf5_bin_dir=`dirname $h5dump`
-      with_hdf5=`readlink -m "$hdf5_bin_dir/.."`
+      with_hdf5=`realpath "$hdf5_bin_dir/.."`
     fi
 
     if test "$with_hdf5_libdir" = "no"; then 
       # did not supply any value with 'with-hdf5-libdir', get by path
-      with_hdf5_libdir=`readlink -m "$with_hdf5/lib"`
+      with_hdf5_libdir=`realpath "$with_hdf5/lib"`
     fi
 
     if test "$with_hdf5_include" = "no"; then 
       # did not supply any value with 'with-hdf5-include', get by path
-      with_hdf5_include=`readlink -m "$with_hdf5/include"`
+      with_hdf5_include=`realpath "$with_hdf5/include"`
     fi
 
     AC_MSG_CHECKING([HDF5 path])

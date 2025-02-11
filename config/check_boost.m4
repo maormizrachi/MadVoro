@@ -47,7 +47,7 @@ AC_DEFUN([BOOST_CHECK_VERSION],
     if test "$with_boost_include" = "no"; then
       # Determine by default as the boost dir
       if test -d "$with_boost"; then
-        with_boost_include=`readlink -m $with_boost/include`
+        with_boost_include=`realpath $with_boost/include`
       else
         AC_MSG_ERROR([Boost not found in $with_boost])
       fi
