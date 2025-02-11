@@ -2,7 +2,7 @@ AC_DEFUN([WITH_BOOST_CONFIGURE],
 [  
   AC_ARG_WITH([boost],
               [AS_HELP_STRING([--with-boost(=DIR)],
-              [The prefix where Boost is installed (default is the environment variable 'BOOST_DIR'), adding DIR/include])],
+              [The prefix where Boost is installed (default is the environment variable 'BOOST_DIR' or 'BOOST_ROOT'), adding DIR/include])],
               [if test "$withval" = "yes"; then
                 with_boost="no"
               else
@@ -13,7 +13,7 @@ AC_DEFUN([WITH_BOOST_CONFIGURE],
 
   AC_ARG_WITH([boost-include],
               [AS_HELP_STRING([--with-boost-include(=DIR)],
-              ["Search path for boost header files"])],
+              ["Search path for boost header files (default is /usr/include)"])],
               [if test "$withval" = "yes"; then
                 with_boost_include="no"
               else

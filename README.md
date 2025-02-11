@@ -9,7 +9,7 @@ MadVoro is a C++ framework for construction of Voronoi diagrams of 3D points, in
 
 
 ## Requirements
-- Any C++ Compiler (tested with g++ and icpx) 
+- Any C++ Compiler (tested with `g++` and `icpx`) (version 17 and above is required)
 - Boost >= 1.74.0
 
 ### Optional
