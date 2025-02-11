@@ -1,8 +1,5 @@
 AC_DEFUN([WITH_BOOST_CONFIGURE],
-[
-  DEFAULT_PATH=/usr
-  DEFAULT_LIB_PATH=/usr/lib
-  
+[  
   AC_ARG_WITH([boost],
               [AS_HELP_STRING([--with-boost(=DIR)],
               [The prefix where Boost is installed (default is the environment variable 'BOOST_DIR'), adding DIR/include])],
@@ -12,17 +9,6 @@ AC_DEFUN([WITH_BOOST_CONFIGURE],
                 with_boost=$withval
               fi],
               [with_boost="no"]
-             )
-
-  AC_ARG_WITH([boost-libdir],
-              [AS_HELP_STRING([--with-boost-libdir(=DIR)],
-              ["Search path for boost libraries"])],
-              [if test "$withval" = "yes"; then
-                with_boost_libdir="no"
-              else
-                with_boost_libdir=$withval
-              fi],
-              [with_boost_libdir="no"]
              )
 
   AC_ARG_WITH([boost-include],
@@ -51,23 +37,15 @@ AC_DEFUN([BOOST_CHECK_VERSION],
           with_boost=`echo $BOOST_ROOT`
         fi
         if test -z "$with_boost"; then
-          AC_MSG_ERROR([Boost not found])
+          # Use default
+          with_boost_include=/usr/include
         fi
       fi
       AC_MSG_RESULT($with_boost)
     fi
 
-    if test "$with_boost_libdir" = "no"; then
-      # Determine by default as the boost dir and then 'lib'
-      if test -d "$with_boost"; then
-        with_boost_libdir=`readlink -m $with_boost/lib`
-      else
-        AC_MSG_ERROR([Boost not found in $with_boost])
-      fi
-    fi
-
     if test "$with_boost_include" = "no"; then
-      # Determine by default as the boost dir and then 'lib'
+      # Determine by default as the boost dir
       if test -d "$with_boost"; then
         with_boost_include=`readlink -m $with_boost/include`
       else

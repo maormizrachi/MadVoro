@@ -57,11 +57,11 @@ You can configure another prefix, where the project will be installed in, by usi
 For additional info, and for more flags and settings, you can always use `./configure --help`.
 
 ### Boost Configuration
-One may not supply `--with-boost(=DIR)`, or supply `--with-boost` only, if the boost directory is defined in an environment variable called `BOOST_DIR` or `BOOST_ROOT`, assuming one of those contains boost's `include` (and `lib`, if exists) directories. If not, you must supply the lib directory and include directory apart:
+One may not supply `--with-boost(=DIR)`, or supply `--with-boost` only, if the boost directory is defined in an environment variable called `BOOST_DIR` or `BOOST_ROOT`, assuming one of those contains boost's `include` directory. Altenatively, you can supply the boost `include` directory itself:
 ```
-./configure --with-boost-libdir(=LIBDIR) --with-boost-include(=INCDIR)
+./configure --with-boost-include(=INCDIR)
 ```
-Assuming `LIBDIR` contains boost's libraries (shared object files), and `INCDIR` contains boost's header files.
+Assuming `INCDIR` contains boost's header files (usually, /usr/include).
 
 ### With MPI
 To compile with MPI, two options are possible when running `./configure`:
