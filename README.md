@@ -1,5 +1,7 @@
 # MadVoro - Massively distributed Construction of Voronoi Diagrams
-![C++ project](https://img.shields.io/badge/C++-3393ff)
+![C++ project](https://img.shields.io/badge/C++-2874a6)
+![Linux](https://img.shields.io/badge/Linux-0e6655)
+![macOS](https://img.shields.io/badge/macOS-27ae60)
 
 MadVoro is a C++ framework for construction of Voronoi diagrams of 3D points, in distributed memory (using MPI).
 
