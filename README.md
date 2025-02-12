@@ -147,6 +147,9 @@ make distclean
 > [!NOTE]
 > To recompile with different configuration (for example, add a support of HDF5 if you didn't have one currently), it is required to clean and reconfigure the project again.
 
+## Support
+If you run into problems or difficulties in compiling or running, or have any questions or suggestions, feel free to contact me by mail: maor.mizrachi@mail.huji.ac.il.
+
 ## Reference
 If you wish to cite us, we'll be thankful if you'd used the following BibTeX format:
 ```
