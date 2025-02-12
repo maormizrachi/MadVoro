@@ -354,7 +354,7 @@ namespace MadVoro
             {
                 this->syncAmounts();
                 #ifdef TIMING
-                    std::chrono::_V2::system_clock::time_point now = std::chrono::system_clock::now();
+                    std::chrono::time_point<std::chrono::system_clock> now = std::chrono::system_clock::now();
                     queriesBatch.finishSubmittingTime = std::chrono::duration_cast<std::chrono::duration<double>>(now - queriesBatch.beginClockTime).count();
                 #endif // TIMING
             }
@@ -372,7 +372,7 @@ namespace MadVoro
                         // send the rest of the waiting (buffered) requests
                         this->flushAll();
                         #ifdef TIMING
-                            std::chrono::_V2::system_clock::time_point now = std::chrono::system_clock::now();
+                            std::chrono::time_point<std::chrono::system_clock> now = std::chrono::system_clock::now();
                             queriesBatch.finishSubmittingTime = std::chrono::duration_cast<std::chrono::duration<double>>(now - queriesBatch.beginClockTime).count();
                         #endif // TIMING
 
@@ -412,7 +412,7 @@ namespace MadVoro
             }
 
             #ifdef TIMING
-                std::chrono::_V2::system_clock::time_point now = std::chrono::system_clock::now();
+                std::chrono::time_point<std::chrono::system_clock> now = std::chrono::system_clock::now();
                 queriesBatch.finishTime = std::chrono::duration_cast<std::chrono::duration<double>>(now - queriesBatch.beginClockTime).count();
             #endif // TIMING
 

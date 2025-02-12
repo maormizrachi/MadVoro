@@ -46,7 +46,7 @@ int main(int argc, char *argv[])
 
     Voronoi3D voronoi(ll, ur);
 
-    std::chrono::_V2::system_clock::time_point start, end;
+    std::chrono::time_point<std::chrono::system_clock> start, end;
 
     start = std::chrono::system_clock::now();
     voronoi.Build(points);

@@ -58,7 +58,7 @@ namespace MadVoro
             std::vector<AnswerType> result;
             std::vector<std::vector<AnswerType>> dataByRanks;
             #ifdef TIMING
-                std::chrono::_V2::system_clock::time_point beginClockTime; 
+                std::chrono::time_point<std::chrono::system_clock> beginClockTime; 
                 double finishSubmittingTime;
                 double receivedAllTime;
             #endif // TIMING
