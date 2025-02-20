@@ -116,7 +116,6 @@ The way of doing that differs by different shells. In bash, you can run:
 ```
 export LD_LIBRARY_PATH=/path/to/madvoro/lib:$LD_LIBRARY_PATH
 ``` 
-It is recommended to add this line to your `~/.bashrc` file, in this case. 
 For csh/tcsh, use:
 ```
 setenv LD_LIBRARY_PATH /path/to/madvoro/lib:$LD_LIBRARY_PATH
@@ -125,6 +124,8 @@ And for zsh, use:
 ```
 export LD_LIBRARY_PATH=/path/to/madvoro/lib:$LD_LIBRARY_PATH
 ```
+To make this change permanent, add the respective command to your shell’s startup file (e.g., `~/.bashrc` for bash, `~/.zshrc` for zsh, or `~/.cshrc` for csh/tcsh).
+
 > [!TIP]  
 > You may use other techniques to run, avoiding the use of `LD_LIBRARY_PATH`. For example, using RUNPATH or different link-flags. Instructions are shown when running `make install`. 
 ### Examples
