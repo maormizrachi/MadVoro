@@ -9,8 +9,10 @@ MadVoro is a C++ framework for construction of Voronoi diagrams of 3D points, in
 
 
 ## Requirements
-- Any C++ Compiler (tested with `g++` and `icpx`) (C++ version 17 and above is required)
+- Any C++ Compiler (tested with `g++` and `icpx`)
 - Boost >= 1.74.0
+> [!NOTE]
+> C++ version of 17 and above is required for compilation.
 
 ### Optional
 - For parallel support: Any MPI implementation (tested with openmpi, IntelMPI and MPICH). 
@@ -38,7 +40,7 @@ mpirun -n 8 ./test
 > In case you are not using bash, see below how to change the `export` command accordingly.
 
 ## Build & Install
-First, clone this git repository and change the directory to the cloned
+First, clone this git repository and change the directory to the cloned repository:
 ```
 git clone https://github.com/maormizrachi/MadVoro.git
 cd MadVoro
@@ -177,7 +179,15 @@ make distclean
 If you run into problems or difficulties in compiling or running, or have any questions or suggestions, feel free to contact me by email: maor.mizrachi@mail.huji.ac.il.
 
 ## Reference
-If you wish to cite us, we'll be thankful if you'd used the following BibTeX format:
+If you wish to cite our work, we would appreciate it if you used the following BibTeX citation:
 ```
-TODO
+@misc{mizrachi2025madvoroparallelconstructionvoronoi,
+      title={MadVoro: Parallel Construction of Voronoi Diagrams in Distributed Memory Systems}, 
+      author={Maor Mizrachi and Barak Raveh and Elad Steinberg},
+      year={2025},
+      eprint={2502.14825},
+      archivePrefix={arXiv},
+      primaryClass={astro-ph.IM},
+      url={https://arxiv.org/abs/2502.14825}, 
+}
 ```
