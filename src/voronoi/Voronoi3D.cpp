@@ -248,7 +248,7 @@ namespace MadVoro
 
         const vector<Point3D>& GetAllFaceCM(void) const;
 
-        Point3D FaceCM(std::size_t index)const;
+        const Point3D &FaceCM(std::size_t index)const;
 
         Voronoi3DImpl(Point3D const& ll, Point3D const& ur);
 
@@ -287,7 +287,7 @@ namespace MadVoro
 
         std::size_t GetPointNo(void) const;
 
-        Point3D GetMeshPoint(std::size_t index) const;
+        const Point3D &GetMeshPoint(std::size_t index) const;
 
         double GetArea(std::size_t index) const;
 
@@ -361,7 +361,7 @@ namespace MadVoro
 
         point_vec const& GetPointsInFace(std::size_t index) const;
 
-        std::pair<std::size_t, std::size_t> GetFaceNeighbors(std::size_t face_index) const;
+        const std::pair<std::size_t, std::size_t> &GetFaceNeighbors(std::size_t face_index) const;
 
         #ifdef MADVORO_WITH_MPI
         vector<vector<std::size_t> > const& GetGhostIndeces(void) const;
@@ -1739,7 +1739,7 @@ void MadVoro::Voronoi3D::Voronoi3DImpl::PreparePoints(const std::vector<Point3D>
             if(matchingPointIdx >= originalPointsNum)
             {
                 // the point is a new, but we take its initial radius to be the same as the closest point's radius
-                size_t closestPointIdx = oldPointsTree.closestPoint(points[i]).getIndex();
+                size_t closestPointIdx = oldPointsTree.closestPoint(points[i], false /* Dont include self */).getIndex();
                 radius = this->radiuses.at(closestPointIdx);
             }
             else
@@ -3356,7 +3356,7 @@ std::size_t MadVoro::Voronoi3D::Voronoi3DImpl::GetPointNo(void) const
     return Norg_;
 }
 
-Point3D MadVoro::Voronoi3D::Voronoi3DImpl::GetMeshPoint(std::size_t index) const
+const Point3D &MadVoro::Voronoi3D::Voronoi3DImpl::GetMeshPoint(std::size_t index) const
 {
     return del_.points_[index];
 }
@@ -3607,7 +3607,7 @@ bool MadVoro::Voronoi3D::Voronoi3DImpl::IsGhostPoint(std::size_t index) const
     return index >= Norg_;
 }
 
-Point3D MadVoro::Voronoi3D::Voronoi3DImpl::FaceCM(std::size_t index) const
+const Point3D &MadVoro::Voronoi3D::Voronoi3DImpl::FaceCM(std::size_t index) const
 {
     return Face_CM_[index];
 }
@@ -3713,7 +3713,7 @@ point_vec const &MadVoro::Voronoi3D::Voronoi3DImpl::GetPointsInFace(std::size_t 
     return PointsInFace_[index];
 }
 
-std::pair<std::size_t, std::size_t> MadVoro::Voronoi3D::Voronoi3DImpl::GetFaceNeighbors(std::size_t face_index) const
+const std::pair<std::size_t, std::size_t> &MadVoro::Voronoi3D::Voronoi3DImpl::GetFaceNeighbors(std::size_t face_index) const
 {
     return std::pair<std::size_t, std::size_t>(FaceNeighbors_[face_index]);
 }
@@ -3933,7 +3933,7 @@ std::size_t MadVoro::Voronoi3D::GetContainingCell(const Vector3D &point) const
     return this->pImpl->GetContainingCell(vectorToPoint(point));
 }
 
-Vector3D MadVoro::Voronoi3D::FaceCM(std::size_t index) const
+const Vector3D &MadVoro::Voronoi3D::FaceCM(std::size_t index) const
 {
     return pointToVector(this->pImpl->FaceCM(index));
 }
@@ -3943,7 +3943,7 @@ std::size_t MadVoro::Voronoi3D::GetPointNo(void) const
     return this->pImpl->GetPointNo();
 }
 
-Vector3D MadVoro::Voronoi3D::GetMeshPoint(std::size_t index) const
+const Vector3D &MadVoro::Voronoi3D::GetMeshPoint(std::size_t index) const
 {
     return pointToVector(this->pImpl->GetMeshPoint(index));
 }
@@ -4086,7 +4086,7 @@ const point_vec &MadVoro::Voronoi3D::GetPointsInFace(std::size_t index) const
     return this->pImpl->GetPointsInFace(index);
 }
 
-std::pair<std::size_t, std::size_t> MadVoro::Voronoi3D::GetFaceNeighbors(std::size_t face_index) const
+const std::pair<std::size_t, std::size_t> &MadVoro::Voronoi3D::GetFaceNeighbors(std::size_t face_index) const
 {
     return this->pImpl->GetFaceNeighbors(face_index);
 }

@@ -163,7 +163,7 @@ namespace MadVoro
     {
         this->x = other.x;
         this->y = other.y;
-        this->z = other.y;
+        this->z = other.z;
         return (*this);
     };
 
