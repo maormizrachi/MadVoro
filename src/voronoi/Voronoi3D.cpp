@@ -1914,7 +1914,7 @@ void MadVoro::Voronoi3D::Voronoi3DImpl::UpdateRadiuses(const std::vector<Point3D
         if(this->radiuses[pointIndexAmongAll] <= 0)
         {
             // point does not have a radius from a previous timestep. Initialize a radius
-            this->radiuses[pointIndexAmongAll] = Utils::fastsqrt(this->allMyPointsTree->closestPointDistance(point)); // todo second closest
+            this->radiuses[pointIndexAmongAll] = Utils::fastsqrt(this->allMyPointsTree->closestPointDistance(point, false)); // todo second closest
         }
     }
 }
@@ -3715,7 +3715,7 @@ point_vec const &MadVoro::Voronoi3D::Voronoi3DImpl::GetPointsInFace(std::size_t 
 
 const std::pair<std::size_t, std::size_t> &MadVoro::Voronoi3D::Voronoi3DImpl::GetFaceNeighbors(std::size_t face_index) const
 {
-    return std::pair<std::size_t, std::size_t>(FaceNeighbors_[face_index]);
+    return FaceNeighbors_[face_index];
 }
 
 #ifdef MADVORO_WITH_MPI
@@ -3933,7 +3933,7 @@ std::size_t MadVoro::Voronoi3D::GetContainingCell(const Vector3D &point) const
     return this->pImpl->GetContainingCell(vectorToPoint(point));
 }
 
-const Vector3D &MadVoro::Voronoi3D::FaceCM(std::size_t index) const
+Vector3D MadVoro::Voronoi3D::FaceCM(std::size_t index) const
 {
     return pointToVector(this->pImpl->FaceCM(index));
 }
@@ -3943,7 +3943,7 @@ std::size_t MadVoro::Voronoi3D::GetPointNo(void) const
     return this->pImpl->GetPointNo();
 }
 
-const Vector3D &MadVoro::Voronoi3D::GetMeshPoint(std::size_t index) const
+Vector3D MadVoro::Voronoi3D::GetMeshPoint(std::size_t index) const
 {
     return pointToVector(this->pImpl->GetMeshPoint(index));
 }

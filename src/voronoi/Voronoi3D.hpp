@@ -87,7 +87,7 @@ namespace MadVoro
         \param index Face index
         \return Face centre of mass
     */
-    const Vector3D &FaceCM(std::size_t index) const;
+    Vector3D FaceCM(std::size_t index) const;
 
     /**
      * @brief Retrieves the number of points assigned to the current processor in the Voronoi tessellation.
@@ -99,7 +99,7 @@ namespace MadVoro
         \param index Index
         \return Position of point
     */
-    const Vector3D &GetMeshPoint(std::size_t index) const;
+    Vector3D GetMeshPoint(std::size_t index) const;
 
     /**
      * @brief Retrieves the area of a specific face in the 3D Voronoi tessellation.
