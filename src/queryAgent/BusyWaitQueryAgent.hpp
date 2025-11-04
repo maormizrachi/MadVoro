@@ -263,11 +263,10 @@ namespace MadVoro
                 queriesBatch.receivedAllTime = std::chrono::duration_cast<std::chrono::duration<double>>(now - queriesBatch.beginClockTime).count();
             #endif // TIMING
 
-            int dummy;
             for(int _rank = 0; _rank < this->size; _rank++)
             {
                 this->requests.push_back(MPI_REQUEST_NULL);
-                MPI_Isend(&dummy, 1, MPI_BYTE, _rank, TAG_FINISHED, this->comm, &this->requests.back());
+                MPI_Isend(NULL, 0, MPI_BYTE, _rank, TAG_FINISHED, this->comm, &this->requests.back());
             }
         }
 
@@ -279,8 +278,7 @@ namespace MadVoro
             MPI_Iprobe(MPI_ANY_SOURCE, TAG_FINISHED, this->comm, &arrived, &status);
             if(arrived)
             {
-                int dummy = 0;
-                MPI_Recv(&dummy, 1, MPI_BYTE, MPI_ANY_SOURCE, TAG_FINISHED, this->comm, MPI_STATUS_IGNORE);
+                MPI_Recv(NULL, 0, MPI_BYTE, MPI_ANY_SOURCE, TAG_FINISHED, this->comm, MPI_STATUS_IGNORE);
                 return 1;
             }
             return 0;

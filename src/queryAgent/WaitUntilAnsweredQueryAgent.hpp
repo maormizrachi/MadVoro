@@ -265,8 +265,7 @@ namespace MadVoro
             MPI_Iprobe(MPI_ANY_SOURCE, TAG_FINISHED, this->comm, &arrived, &status);
             if(arrived)
             {
-                int dummy = 0;
-                MPI_Recv(&dummy, 1, MPI_BYTE, MPI_ANY_SOURCE, TAG_FINISHED, this->comm, MPI_STATUS_IGNORE);
+                MPI_Recv(NULL, 0, MPI_BYTE, MPI_ANY_SOURCE, TAG_FINISHED, this->comm, MPI_STATUS_IGNORE);
                 return 1;
             }
             return 0;
