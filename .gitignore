@@ -1,0 +1,34 @@
+# Build artifacts
+*.Plo
+*.o
+*.lo
+*.a
+*.la
+*.lai
+*.so
+.dirstamp
+.deps/
+.libs/
+Makefile
+Makefile.in
+
+# Autotools generated
+aclocal.m4
+ar-lib
+autom4te.cache/
+compile
+config.guess
+config.log
+config.status
+config.sub
+configure
+configure~
+depcomp
+install-sh
+libtool
+ltmain.sh
+missing
+INSTALL
+
+# Install prefix
+current/

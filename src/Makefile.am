@@ -4,7 +4,10 @@ AM_CPPFLAGS = -I$(top_srcdir)/include
 lib_LTLIBRARIES = libmadvoro.la
 libmadvoro_la_LDFLAGS = -version-info 1 -no-undefined
 
-libmadvoro_la_SOURCES = delaunay/Delaunay3D.cpp \
+libmadvoro_la_SOURCES = loadBalancing/LoadBalancer.cpp \
+                        loadBalancing/CurveLoadBalancer.cpp \
+                        loadBalancing/HilbertLoadBalancer.cpp \
+                        delaunay/Delaunay3D.cpp \
                         elementary/Face.cpp \
                         elementary/Face3D.cpp \
                         elementary/Tetrahedron.cpp \
@@ -30,7 +33,10 @@ libmadvoro_la_SOURCES = delaunay/Delaunay3D.cpp \
                         voronoi/pointsManager/HilbertPointsManager.cpp \
                         voronoi/pointsManager/PointsManager.cpp
 
-dist_noinst_HEADERS = delaunay/Delaunay3D.hpp \
+dist_noinst_HEADERS = loadBalancing/LoadBalancer.hpp \
+                        loadBalancing/CurveLoadBalancer.hpp \
+                        loadBalancing/HilbertLoadBalancer.hpp \
+                        delaunay/Delaunay3D.hpp \
                         ds/BinaryTree.hpp \
                         ds/DistributedOctTree/DistributedOctTree.hpp \
                         ds/DistributedOctTree/RankedValue.hpp \
@@ -74,6 +80,7 @@ dist_noinst_HEADERS = delaunay/Delaunay3D.hpp \
                         io/vtk/WriteVoronoiVTK.hpp \
                         io/vtk/write_vtu_3d.hpp \
                         mpi/balance/balance.hpp \
+                        mpi/balance/weightedBalance2.hpp \
                         mpi/exchange/exchange.hpp \
                         mpi/serialize/mpi_commands.hpp \
                         mpi/serialize/Serializable.hpp \
@@ -96,7 +103,6 @@ dist_noinst_HEADERS = delaunay/Delaunay3D.hpp \
                         range/SentPointsContainer.hpp \
                         range/SmallRangeAgent.hpp \
                         utils/compiler.h \
-                        utils/point/3DPoint.hpp \
                         utils/Predicates3D.hpp \
                         utils/print/all.hpp \
                         utils/print/printTuples.hpp \
