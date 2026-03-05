@@ -42,7 +42,6 @@ namespace MadVoro
 			{
 				totalSize += recvCounts[_rank];
 				if(_rank > 0)
-				if(_rank > 0)
 				{
 					recvDisplacements[_rank] = recvDisplacements[_rank - 1] + recvCounts[_rank - 1];
 				}
@@ -57,7 +56,7 @@ namespace MadVoro
 			for(rank_t _rank = 0; _rank < size; _rank++)
 			{
 				size_t bytesRead = recv.extract(result[_rank], recvDisplacements[_rank], recvCounts[_rank]);
-				assert(bytesRead != static_cast<size_t>(recvCounts[_rank]));
+				assert(bytesRead == static_cast<size_t>(recvCounts[_rank]));
 			}
 
 			return result;

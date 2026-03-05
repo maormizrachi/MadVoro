@@ -31,7 +31,7 @@ namespace MadVoro
             return stream >> query.maxPointsToGet >> query.center >> query.radius;
         }
 
-        SmallRangeQueryData(size_t pointIdx, const _3DPoint &center, typename _3DPoint::coord_type radius, size_t maxPointsToGet):
+        SmallRangeQueryData(size_t pointIdx, const Point3D &center, typename Point3D::coord_type radius, size_t maxPointsToGet):
             RangeQueryData(pointIdx, center, radius), maxPointsToGet(maxPointsToGet)
         {};
 
@@ -71,7 +71,7 @@ namespace MadVoro
     private:
         class SmallRangeAnswerAgent
             #ifdef MADVORO_WITH_MPI
-                : public QueryAgent::AnswerAgent<SmallRangeQueryData, _3DPoint>
+                : public QueryAgent::AnswerAgent<SmallRangeQueryData, Point3D>
             #endif // MADVORO_WITH_MPI
         {
         public:
@@ -82,30 +82,30 @@ namespace MadVoro
             #endif // MADVORO_WITH_MPI
             {}
 
-            std::vector<size_t> selfAnswer(const SmallRangeQueryData &query, boost::container::flat_set<size_t> &ignore)
+            std::vector<size_t> selfAnswer(const SmallRangeQueryData &query, std::unordered_set<size_t> &ignore)
             {
                 // a small query, bring the requested number of points
-                std::vector<size_t> indicesResult = this->rangeFinder->range(Point3D(query.center.x, query.center.y, query.center.z), query.radius, query.maxPointsToGet, ignore);
+                std::vector<size_t> indicesResult = this->rangeFinder->range(query.center, query.radius, query.maxPointsToGet, ignore);
                 ignore.insert(indicesResult.begin(), indicesResult.end());
                 return indicesResult;
             }
 
             #ifdef MADVORO_WITH_MPI
-                std::vector<_3DPoint> answer(const SmallRangeQueryData &query, int _rank) override
+                std::vector<Point3D> answer(const SmallRangeQueryData &query, int _rank) override
                 {
-                    std::vector<_3DPoint> result;
+                    std::vector<Point3D> result;
                     std::vector<size_t> indicesResult;
 
                     const SentPointsContainer::PointsSet &ignore = this->pointsContainer.getSentDataSetRank(_rank);
 
                     // a small query, bring the requested number of points
-                    indicesResult = this->rangeFinder->range(Point3D(query.center.x, query.center.y, query.center.z), query.radius, query.maxPointsToGet, ignore);
+                    indicesResult = this->rangeFinder->range(query.center, query.radius, query.maxPointsToGet, ignore);
                     indicesResult = this->pointsContainer.addPointsAsSent(_rank, indicesResult);
 
                     result.reserve(indicesResult.size());
                     for(const size_t &pointIdx : indicesResult)
                     {
-                        result.push_back(_3DPoint(this->rangeFinder->getPoint(pointIdx)));
+                        result.push_back(this->rangeFinder->getPoint(pointIdx));
                     }
                     return result;
                 }
@@ -143,7 +143,7 @@ namespace MadVoro
                 inline EnvironmentAgent::RanksSet getTalkList(const SmallRangeQueryData &query) const override
                 {
                     // check if has 'smartAgent' (an agent that can caluclate distances of ranks as well)
-                    EnvironmentAgent::RanksSet intersectingRanks = this->envAgent->getIntersectingRanks(Point3D(query.center.x, query.center.y, query.center.z), query.radius);
+                    EnvironmentAgent::RanksSet intersectingRanks = this->envAgent->getIntersectingRanks(query.center, query.radius);
                     if(intersectingRanks.empty())
                     {
                         throw MadVoro::Exception::MadVoroException("In range talk agent, should not reach here: the intersecting ranks list should at least contain the rank itself");
@@ -159,7 +159,7 @@ namespace MadVoro
 
     public:
         template<typename T>
-        using _set = boost::container::flat_set<T>;
+        using _set = std::unordered_set<T>;
 
         #ifdef MADVORO_WITH_MPI
             SmallRangeAgent(const Range::RangeFinder *rangeFinder, const EnvironmentAgent *envAgent, SentPointsContainer &pointsContainer, const MPI_Comm &comm = MPI_COMM_WORLD): pointsContainer(pointsContainer)
@@ -170,9 +170,7 @@ namespace MadVoro
             #ifdef MADVORO_WITH_MPI
                 this->ansAgent = new SmallRangeAnswerAgent(rangeFinder, pointsContainer, comm);
                 this->talkAgent = new SmallRangeTalkAgent(envAgent, comm);
-                this->queryAgent = new QueryAgent::BusyWaitQueryAgent<SmallRangeQueryData, _3DPoint>(this->talkAgent, this->ansAgent, false /* dont send messages to self */, comm);
-                //this->queryAgent = new WaitUntilAnsweredQueryAgent<SmallRangeQueryData, _3DPoint>(this->talkAgent, this->ansAgent, false /* dont send messages to self */, comm);
-                // this->queryAgent = new ThreadsQueryAgent<SmallRangeQueryData, _3DPoint>(this->talkAgent, this->ansAgent, false /* dont send messages to self */, comm);
+                this->queryAgent = new QueryAgent::BusyWaitQueryAgent<SmallRangeQueryData, Point3D>(this->talkAgent, this->ansAgent, false /* dont send messages to self */, comm);
             #else // MADVORO_WITH_MPI
                 this->ansAgent = new SmallRangeAnswerAgent(rangeFinder);
             #endif // MADVORO_WITH_MPI
@@ -187,7 +185,7 @@ namespace MadVoro
             delete this->ansAgent;
         }
 
-        std::vector<std::vector<size_t>> selfBatchAnswer(const std::vector<SmallRangeQueryData> &smallQueriesBatch, boost::container::flat_set<size_t> &ignore)
+        std::vector<std::vector<size_t>> selfBatchAnswer(const std::vector<SmallRangeQueryData> &smallQueriesBatch, _set<size_t> &ignore)
         {
             std::vector<std::vector<size_t>> result;
             for(const SmallRangeQueryData &query : smallQueriesBatch)
@@ -198,7 +196,7 @@ namespace MadVoro
         }
 
         #ifdef MADVORO_WITH_MPI
-            inline QueryAgent::QueryBatchInfo<SmallRangeQueryData, _3DPoint> runBatch(const std::vector<SmallRangeQueryData> &queries)
+            inline QueryAgent::QueryBatchInfo<SmallRangeQueryData, Point3D> runBatch(const std::vector<SmallRangeQueryData> &queries)
             {
                 return this->queryAgent->runBatch(queries);
             };
@@ -214,7 +212,7 @@ namespace MadVoro
     private:
         SmallRangeAnswerAgent *ansAgent;
         #ifdef MADVORO_WITH_MPI
-            QueryAgent::QueryAgent<SmallRangeQueryData, _3DPoint> *queryAgent;
+            QueryAgent::QueryAgent<SmallRangeQueryData, Point3D> *queryAgent;
             SmallRangeTalkAgent *talkAgent;
             SentPointsContainer &pointsContainer;
         #endif // MADVORO_WITH_MPI

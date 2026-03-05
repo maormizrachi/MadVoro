@@ -2,11 +2,12 @@
 
 using namespace MadVoro;
 
-MadVoro::Tetrahedron::Tetrahedron(): points(), neighbors(), newTetra(true)
+MadVoro::Tetrahedron::Tetrahedron(): points(), neighbors(), checkBig(true), newTetra(true)
 {}
 
 MadVoro::Tetrahedron::Tetrahedron(Tetrahedron const & other)
 {
+	this->checkBig = other.checkBig;
 	this->newTetra = other.newTetra;
 #ifdef __INTEL_COMPILER
 #pragma omp simd
@@ -23,6 +24,7 @@ MadVoro::Tetrahedron::~Tetrahedron()
 
 Tetrahedron &MadVoro::Tetrahedron::operator=(Tetrahedron const & other)
 {
+	this->checkBig = other.checkBig;
 	this->newTetra = other.newTetra;
 	if (&other == this)
 		return *this;

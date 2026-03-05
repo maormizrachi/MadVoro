@@ -25,6 +25,10 @@ namespace MadVoro
     std::size_t Norg_; 
     //! \brief List of outside neighbours
     std::size_t outside_neighbor_;
+    //! \brief Tetras that were changed (old state saved before modification)
+    std::vector<std::pair<size_t, Tetrahedron>> changed_tetras_;
+    //! \brief Indices of newly created/modified tetras
+    std::vector<size_t> newTetras_;
 
     Delaunay3D();
 

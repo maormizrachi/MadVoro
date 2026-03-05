@@ -1,7 +1,10 @@
 #ifndef RANGE_QUERY_DATA
 #define RANGE_QUERY_DATA
 
-#include "utils/point/3DPoint.hpp"
+#include "elementary/Point3D.hpp"
+#ifdef MADVORO_WITH_MPI
+    #include "mpi/serialize/Serializer.hpp"
+#endif // MADVORO_WITH_MPI
 
 namespace MadVoro
 {
@@ -11,14 +14,14 @@ namespace MadVoro
                         #endif // MADVORO_WITH_MPI
     {
         size_t pointIdx;
-        _3DPoint center;
-        typename _3DPoint::coord_type radius;
+        Point3D center;
+        typename Point3D::coord_type radius;
 
-        RangeQueryData(size_t pointIdx, const _3DPoint &center, typename _3DPoint::coord_type radius):
+        RangeQueryData(size_t pointIdx, const Point3D &center, typename Point3D::coord_type radius):
             pointIdx(pointIdx), center(center), radius(radius)
         {};
 
-        RangeQueryData(): pointIdx(0), center(_3DPoint()), radius(0){};
+        RangeQueryData(): pointIdx(0), center(Point3D()), radius(0){};
         
         #ifdef MADVORO_WITH_MPI
             inline size_t dump(MadVoro::MPI::Serializer *serializer) const override

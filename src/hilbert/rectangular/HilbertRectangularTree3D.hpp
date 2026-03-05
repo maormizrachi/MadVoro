@@ -56,11 +56,12 @@ namespace MadVoro
             mutable std::vector<const Node*> nodes_stack;
             MPI_Comm comm;
             int rank, size;
+            size_t depth;
             #ifdef DEBUG_MODE
                 const HilbertConvertor3D *convertor;
             #endif // DEBUG_MODE
 
-            void buildTreeHelper(Node *currentNode, const typename HilbertRectangularConvertor3D::RecursionArguments &current_args, hilbert_index_t &current_d, const HilbertRectangularConvertor3D *convertor, const std::vector<hilbert_index_t> &responsibilityRange);
+            void buildTreeHelper(Node *currentNode, const typename HilbertRectangularConvertor3D::RecursionArguments &current_args, size_t currentDepth, hilbert_index_t &current_d, const HilbertRectangularConvertor3D *convertor, const std::vector<hilbert_index_t> &responsibilityRange);
             
             void buildTree(const HilbertRectangularConvertor3D *convertor, const std::vector<hilbert_index_t> &responsibilityRange);
 
@@ -76,6 +77,7 @@ namespace MadVoro
                 #ifdef DEBUG_MODE
                     this->convertor = convertor;
                 #endif // DEBUG_MODE
+                this->depth = 0;
                 this->buildTree(convertor, responsibilityRange);
             }
 
@@ -107,6 +109,8 @@ namespace MadVoro
             std::vector<std::vector<BoundingBox<Point3D>>> getBoundingBoxesOfRanks(void) const;
 
             std::vector<const Node*> getValuesIf(const std::function<bool(const Node*)> ifOpenFunction, const std::function<bool(const Node*)> &ifAddValueFunction) const;
+
+            inline size_t getDepth() const{return this->depth;};
         };
 
         template<int max_ranks_per_leaf>
@@ -183,7 +187,7 @@ namespace MadVoro
         #endif // DEUBG_MODE
 
         template<int max_ranks_per_leaf>
-        void HilbertTree3D<max_ranks_per_leaf>::buildTreeHelper(Node *currentNode, const typename HilbertRectangularConvertor3D::RecursionArguments &current_args, hilbert_index_t &current_d, const HilbertRectangularConvertor3D *convertor, const std::vector<hilbert_index_t> &responsibilityRange)
+        void HilbertTree3D<max_ranks_per_leaf>::buildTreeHelper(Node *currentNode, const typename HilbertRectangularConvertor3D::RecursionArguments &current_args, size_t currentDepth, hilbert_index_t &current_d, const HilbertRectangularConvertor3D *convertor, const std::vector<hilbert_index_t> &responsibilityRange)
         {
             using DirectionPoint3D = HilbertRectangularConvertor3D::DirectionPoint3D;
             using RecursionArguments = HilbertRectangularConvertor3D::RecursionArguments;
@@ -193,6 +197,8 @@ namespace MadVoro
             {
                 return;
             }
+
+            this->depth = std::max(this->depth, currentDepth);
 
             const DirectionPoint3D &startPoint = current_args.startPoint;
             const DirectionPoint3D &a = current_args.a;
@@ -301,7 +307,7 @@ namespace MadVoro
                     for(int i = 0; i < baseCaseLength; i++)
                     {
                         currentNode->children.push_back(new Node(currentNode));
-                        this->buildTreeHelper(currentNode->children.back(), {{x, y, z}, {dax, day, daz}, {dbx, dby, dbz}, {dcx, dcy, dcz}}, current_d, convertor, responsibilityRange);
+                        this->buildTreeHelper(currentNode->children.back(), {{x, y, z}, {dax, day, daz}, {dbx, dby, dbz}, {dcx, dcy, dcz}}, currentDepth + 1, current_d, convertor, responsibilityRange);
                         x += baseCaseUnitDirection.x;
                         y += baseCaseUnitDirection.y;
                         z += baseCaseUnitDirection.z;
@@ -309,10 +315,11 @@ namespace MadVoro
                 }
                 else
                 {
-                    for(const RecursionArguments &nextArgs : convertor->getRecursionArguments(current_args))
+                    convertor->setRecursionArguments(current_args, currentDepth);
+                    for(const RecursionArguments &nextArgs : convertor->argumentsBuffer[currentDepth + 1])
                     {
                         currentNode->children.push_back(new Node(currentNode));
-                        this->buildTreeHelper(currentNode->children.back(), nextArgs, current_d, convertor, responsibilityRange);
+                        this->buildTreeHelper(currentNode->children.back(), nextArgs, currentDepth + 1, current_d, convertor, responsibilityRange);
                     }      
 
                     for(const Node *child : currentNode->children)
@@ -342,7 +349,7 @@ namespace MadVoro
             hilbert_index_t d = 0;
 
             this->root = new Node(nullptr);
-            this->buildTreeHelper(this->root, {{0, 0, 0}, {convertor->div.x, 0, 0}, {0, convertor->div.y, 0}, {0, 0, convertor->div.z}}, d, convertor, responsibilityRange);
+            this->buildTreeHelper(this->root, {{0, 0, 0}, {convertor->div.x, 0, 0}, {0, convertor->div.y, 0}, {0, 0, convertor->div.z}}, 0, d, convertor, responsibilityRange);
 
             if(d != convertor->total_points_num)
             {

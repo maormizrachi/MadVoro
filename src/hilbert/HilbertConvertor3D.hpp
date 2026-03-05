@@ -7,6 +7,7 @@
 #include "elementary/Point3D.hpp" // for Point3D
 #include "ds/utils/geometry.hpp" // for BoundingBox<Point3D>
 #include "hilbertTypes.h"
+#include <memory>
 
 #define MAX_HILBERT_ORDER 19
 
@@ -22,6 +23,10 @@ namespace MadVoro
 
     public:
         explicit HilbertConvertor3D(const Point3D &ll, const Point3D &ur, size_t order);
+
+        virtual ~HilbertConvertor3D() = default;
+
+        virtual std::shared_ptr<HilbertConvertor3D> clone(void) const = 0;
         
         virtual void changeOrder(size_t order) = 0;
         
@@ -32,6 +37,10 @@ namespace MadVoro
         virtual Point3D d2xyz(hilbert_index_t d) const = 0;
         
         inline size_t getOrder() const{return this->order;};
+
+        inline const Point3D &getLowerLeft() const{return this->ll;};
+
+        inline const Point3D &getUpperRight() const{return this->ur;};
     };
 
     inline HilbertConvertor3D::HilbertConvertor3D(const Point3D &ll, const Point3D &ur, size_t order)

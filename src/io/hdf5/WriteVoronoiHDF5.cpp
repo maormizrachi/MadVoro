@@ -83,7 +83,7 @@ namespace MadVoro
         }
 
         #ifdef MADVORO_WITH_MPI
-            void WriteVoronoiHDF5_Parallel(MadVoro::Voronoi3D const &tri, std::string const &filename, const std::vector<std::vector<double>> &data, const std::vector<std::string> &names)
+            void WriteVoronoiHDF5_Parallel(MadVoro::Voronoi3D const &tri, std::string const &filename, const std::vector<std::vector<double>> &data, const std::vector<std::string> &names, bool write_vtu)
             {
                 int rank = 0;
                 int ws = 0;
@@ -152,7 +152,7 @@ namespace MadVoro
             }
         #endif // MADVORO_WITH_MPI
 
-        void WriteVoronoiHDF5(MadVoro::Voronoi3D const &tri, std::string const &filename, const std::vector<std::vector<double>> &data, const std::vector<std::string> &names)
+        void WriteVoronoiHDF5(MadVoro::Voronoi3D const &tri, std::string const &filename, const std::vector<std::vector<double>> &data, const std::vector<std::string> &names, bool write_vtu)
         {
             #ifdef MADVORO_WITH_MPI
                 int rank = 0;
@@ -221,7 +221,7 @@ namespace MadVoro
             #endif
         }
 
-        void WriteVoronoiHDF5_Serial(MadVoro::Voronoi3D const &tri, std::string const &filename, const std::vector<std::vector<double>> &data, const std::vector<std::string> &names)
+        void WriteVoronoiHDF5_Serial(MadVoro::Voronoi3D const &tri, std::string const &filename, const std::vector<std::vector<double>> &data, const std::vector<std::string> &names, bool write_vtu)
         {
             H5File file(H5std_string(filename), H5F_ACC_TRUNC);
             std::vector<double> box(6);

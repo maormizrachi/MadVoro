@@ -1,20 +1,61 @@
 #ifdef MADVORO_WITH_MPI
 
 #include "voronoi/pointsManager/HilbertPointsManager.hpp"
+#include <memory>
 
-MadVoro::PointsExchangeResult MadVoro::HilbertPointsManager::exchange(const std::vector<Point3D> &allPoints, const std::vector<double> &allWeights, const std::vector<size_t> &indicesToWorkWith, const std::vector<double> &radiuses, const std::vector<Point3D> &previous_CM)
+MadVoro::HilbertPointsManager::HilbertPointsManager(const Point3D &ll, const Point3D &ur, const MPI_Comm &comm)
+    : PointsManager(ll, ur, comm)
+{}
+
+std::shared_ptr<MadVoro::PointsManager> MadVoro::HilbertPointsManager::clone(void) const
 {
-    PointsExchangeResult exchangeResult;
+    auto cloned = std::make_shared<HilbertPointsManager>(this->ll, this->ur, this->comm);
+
+    if(this->convertor != nullptr)
+    {
+        cloned->convertor = this->convertor->clone();
+    }
+
+    if(this->loadBalancer != nullptr)
+    {
+        cloned->loadBalancer = std::dynamic_pointer_cast<HilbertLoadBalancer>(
+            this->loadBalancer->clone(cloned->convertor));
+    }
+
     if(this->envAgent != nullptr)
     {
-        exchangeResult = this->pointsExchange([this](const _3DPointData &_point)
+        cloned->envAgent = this->envAgent->clone(cloned->loadBalancer);
+    }
+    return cloned;
+}
+
+MadVoro::PointsExchangeResult MadVoro::HilbertPointsManager::exchange(const std::vector<Point3D> &allPoints, const std::vector<double> &allWeights, const std::vector<size_t> &indicesToWorkWith, const std::vector<double> &radiuses, const std::vector<Point3D> &previous_CM, bool noExchange)
+{
+    PointsExchangeResult exchangeResult;
+
+    if(this->envAgent != nullptr)
+    {
+        const std::vector<hilbert_index_t> &responsibilityRange = this->loadBalancer->boundaries;
+
+        if(noExchange)
         {
-            hilbert_index_t d = this->convertor->xyz2d(_point.point.x, _point.point.y, _point.point.z);
-            size_t index = std::distance(this->responsibilityRange.cbegin(), std::upper_bound(this->responsibilityRange.cbegin(), this->responsibilityRange.cend(), d));
-            return std::min<hilbert_index_t>(index, (this->size - 1));
-        },
-        allPoints, allWeights, indicesToWorkWith, radiuses, previous_CM); // exchange
-        this->envAgent->updatePoints(exchangeResult.newPoints);
+            exchangeResult = this->pointsExchange([this](const PointData &_point)
+            {
+                return this->rank;
+            },
+            allPoints, allWeights, indicesToWorkWith, radiuses, previous_CM);
+        }
+        else
+        {
+            exchangeResult = this->pointsExchange([this, &responsibilityRange](const PointData &_point)
+            {
+                hilbert_index_t d = this->convertor->xyz2d(_point.point.x, _point.point.y, _point.point.z);
+                size_t index = std::distance(responsibilityRange.cbegin(), std::upper_bound(responsibilityRange.cbegin(), responsibilityRange.cend(), d));
+                return std::min<hilbert_index_t>(index, (this->size - 1));
+            },
+            allPoints, allWeights, indicesToWorkWith, radiuses, previous_CM);
+        }
+        this->envAgent->onExchange(exchangeResult.newPoints);
     }
     else
     {
@@ -27,48 +68,50 @@ MadVoro::PointsExchangeResult MadVoro::HilbertPointsManager::exchange(const std:
         }
         exchangeResult = this->initialize(allPoints, allWeights, radiuses, previous_CM);
     }
+
     return exchangeResult;
+}
+
+void MadVoro::HilbertPointsManager::setLoadBalancer(std::shared_ptr<LoadBalancer> newLoadBalancer)
+{
+    HilbertLoadBalancer *hilbertLoadBalancer = dynamic_cast<HilbertLoadBalancer*>(newLoadBalancer.get());
+    if(hilbertLoadBalancer == nullptr)
+    {
+        throw MadVoro::Exception::MadVoroException("HilbertPointsManager::setLoadBalancer: given load balancer is not a HilbertLoadBalancer");
+    }
+    if(this->rank == 0)
+    {
+        std::cout << "Restoring Load Balancer" << std::endl;
+    }
+
+    this->loadBalancer = std::dynamic_pointer_cast<HilbertLoadBalancer>(newLoadBalancer);
+    this->loadBalancer->convertor = this->convertor;
+    this->envAgent->setLoadBalancer(this->loadBalancer);
+}
+
+std::shared_ptr<MadVoro::LoadBalancer> MadVoro::HilbertPointsManager::getLoadBalancer(void)
+{
+    return this->loadBalancer;
 }
 
 void MadVoro::HilbertPointsManager::rebalance(const std::vector<Point3D> &points, const std::vector<double> &weights)
 {
-    if(this->convertor == nullptr)
-    {
-        throw MadVoro::Exception::MadVoroException("HilbertPointsManager::rebalance: convertor was not initialized yet");
-    }
-
-    std::vector<hilbert_index_t> indices;
-    for(const Point3D &point : points)
-    {
-        indices.push_back(this->convertor->xyz2d(point));
-    }
-
-    if(weights.empty())
-    {
-        this->responsibilityRange = MadVoro::MPI::Balance::getBorders(indices);
-    }
-    else
-    {
-        this->responsibilityRange = MadVoro::MPI::Balance::getWeightedBorders(indices, weights);
-    }
-    
+    this->loadBalancer = std::dynamic_pointer_cast<HilbertLoadBalancer>(
+        this->loadBalancer->clone(this->convertor));
+    this->loadBalancer->rebalance(points, weights);
     if(this->envAgent != nullptr)
     {
-        this->envAgent->updateBorders(this->responsibilityRange, this->convertor->getOrder());
+        this->envAgent->setLoadBalancer(this->loadBalancer);
     }
 }
 
-/*
-heuristic to determine the hilbert order.
-Also initializes the convertor.
-*/
 void MadVoro::HilbertPointsManager::initializeHilbertParameters(const std::vector<Point3D> &points)
 {
     DataStructure::OctTree<Point3D> tree(this->ll, this->ur, points);
 
-    int depth = tree.getDepth(); // my own depth
+    int depth = tree.getDepth();
     int hilbertOrder;
-    MPI_Allreduce(&depth, &hilbertOrder, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD); // calculates maximal depth
+    MPI_Allreduce(&depth, &hilbertOrder, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
 
     MPI_Allreduce(MPI_IN_PLACE, &this->ll.x, 1, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE, &this->ll.y, 1, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
@@ -77,7 +120,6 @@ void MadVoro::HilbertPointsManager::initializeHilbertParameters(const std::vecto
     MPI_Allreduce(MPI_IN_PLACE, &this->ur.y, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE, &this->ur.z, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
 
-    // make a little bit space
     double x_length = this->ur.x - this->ll.x, y_length = this->ur.y - this->ll.y, z_length = this->ur.z - this->ll.z;
     this->ll.x -= std::abs(SPACE_FACTOR * x_length);
     this->ll.y -= std::abs(SPACE_FACTOR * y_length);
@@ -87,34 +129,31 @@ void MadVoro::HilbertPointsManager::initializeHilbertParameters(const std::vecto
     this->ur.z += std::abs(SPACE_FACTOR * z_length);
     
     hilbertOrder = std::min<size_t>(MAX_HILBERT_ORDER, hilbertOrder);
-    this->convertor = new HilbertRectangularConvertor3D(this->ll, this->ur, hilbertOrder);
+    this->convertor = std::make_shared<HilbertRectangularConvertor3D>(this->ll, this->ur, hilbertOrder);
 }
 
 MadVoro::PointsExchangeResult MadVoro::HilbertPointsManager::initialize(const std::vector<Point3D> &points, const std::vector<double> &weights, const std::vector<double> &radiuses, const std::vector<Point3D> &previous_CM)
 {
-    // if(this->rank == 0)
-    // {
-    //     std::cout << "initializes the points manager, and the environment agent" << std::endl;
-    // }
-
-    // calculate the first and initial order, and set it to the deepest hilbert order we have
     std::vector<size_t> allIndices(points.size());
     std::iota(allIndices.begin(), allIndices.end(), 0);
 
-    this->initializeHilbertParameters(points); // also initializes the convertor
+    this->initializeHilbertParameters(points);
 
-    this->rebalance(points, weights); // determines initial borders
+    this->loadBalancer = std::make_shared<HilbertLoadBalancer>(this->convertor);
 
-    // making exchange according to these borders
-    PointsExchangeResult exchangeResult = this->pointsExchange([this](const _3DPointData &_point)
+    this->rebalance(points, weights);
+
+    const std::vector<hilbert_index_t> &responsibilityRange = this->loadBalancer->boundaries;
+
+    PointsExchangeResult exchangeResult = this->pointsExchange([this, &responsibilityRange](const PointData &_point)
     {
         hilbert_index_t d = this->convertor->xyz2d(_point.point.x, _point.point.y, _point.point.z);
-        size_t index = std::distance(this->responsibilityRange.cbegin(), std::upper_bound(this->responsibilityRange.cbegin(), this->responsibilityRange.cend(), d));
-        return std::min<hilbert_index_t>(index, (this->size - 1));
+        size_t index = std::distance(responsibilityRange.cbegin(), std::upper_bound(responsibilityRange.cbegin(), responsibilityRange.cend(), d));
+        return std::min<size_t>(index, (this->size - 1));
     },
-    points, weights, allIndices, radiuses, previous_CM); // exchange
+    points, weights, allIndices, radiuses, previous_CM);
         
-    this->envAgent = new HilbertTreeEnvironmentAgent(this->ll, this->ur, exchangeResult.newPoints, this->responsibilityRange, this->convertor);
+    this->envAgent = std::make_shared<HilbertTreeEnvironmentAgent>(this->ll, this->ur, this->loadBalancer, this->comm);
 
     return exchangeResult;
 }

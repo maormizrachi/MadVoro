@@ -16,7 +16,7 @@ namespace MadVoro
         using Sphere = MadVoro::Geometry::Sphere<T>;
 
         template<typename T>
-        using _set = boost::container::flat_set<T>; // boost::unordered_set<T>; // std::unordered_set<T>; // boost::container::flat_set<T>;
+        using _set = std::unordered_set<T>;
     }
 }
 

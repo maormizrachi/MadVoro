@@ -1,7 +1,10 @@
 #ifndef HILBERT_RECTANGULAR_CONVERTOR_3D_HPP
 #define HILBERT_RECTANGULAR_CONVERTOR_3D_HPP
 
+#include <array>
 #include "../HilbertConvertor3D.hpp"
+
+#define MAX_HILBERT_DEPTH 54
 
 namespace MadVoro
 {
@@ -57,11 +60,18 @@ namespace MadVoro
         DirectionPoint3D div;
         hilbert_index_t total_points_num;
 
+        mutable std::array<std::vector<RecursionArguments>, MAX_HILBERT_DEPTH> argumentsBuffer;
+
     public:
         explicit HilbertRectangularConvertor3D(const Point3D &ll, const Point3D &ur, size_t order);
         
         inline hilbert_index_t getHilbertSize() const{return this->total_points_num;};
         
+        inline std::shared_ptr<HilbertConvertor3D> clone(void) const override
+        {
+            return std::make_shared<HilbertRectangularConvertor3D>(this->ll, this->ur, this->order);
+        }
+
         void changeOrder(size_t order) override;
         
         hilbert_index_t xyz2d(coord_t x, coord_t y, coord_t z) const override;
@@ -69,10 +79,10 @@ namespace MadVoro
         Point3D d2xyz(hilbert_index_t d) const override;
             
     private:
-        std::vector<RecursionArguments> getRecursionArguments(const RecursionArguments &args) const;
-        bool d2xyz_helper(const RecursionArguments &args, hilbert_index_t requested_d, hilbert_index_t &current_d, Point3D &result) const;
+        void setRecursionArguments(const RecursionArguments &args, size_t currentDepth) const;
+        bool d2xyz_helper(const RecursionArguments &args, size_t currentDepth, hilbert_index_t requested_d, hilbert_index_t &current_d, Point3D &result) const;
         bool xyz2d_helper_base(const DirectionPoint3D &startPoint, size_t steps, const DirectionPoint3D &direction, const DirectionPoint3D &requested_point, hilbert_index_t &current_d) const;
-        bool xyz2d_helper(const RecursionArguments &args, const DirectionPoint3D &requested_point, hilbert_index_t &current_d) const;
+        bool xyz2d_helper(const RecursionArguments &args, size_t currentDepth, const DirectionPoint3D &requested_point, hilbert_index_t &current_d) const;
         std::pair<DirectionPoint3D, DirectionPoint3D> getBoundingBox(const RecursionArguments &args) const;
         Point3D WidthHeightDepthToXYZ(direction_t width, direction_t height, direction_t depth) const;
     };

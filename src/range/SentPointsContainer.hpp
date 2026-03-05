@@ -4,7 +4,7 @@
 #ifdef MADVORO_WITH_MPI
 
 #include <vector>
-#include <boost/container/flat_set.hpp>
+#include <unordered_set>
 #include <algorithm>
 #include "exception/MadVoroException.hpp"
 
@@ -13,7 +13,7 @@ namespace MadVoro
     class SentPointsContainer
     {
     public:
-        using PointsSet = boost::container::flat_set<size_t>;
+        using PointsSet = std::unordered_set<size_t>;
 
         inline SentPointsContainer(const std::vector<int> &sentProc = std::vector<int>(), const std::vector<std::vector<size_t>> &sentData = std::vector<std::vector<size_t>>())
         {

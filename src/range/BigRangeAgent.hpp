@@ -20,7 +20,7 @@ namespace MadVoro
 {
     struct BigRangeQueryData : public RangeQueryData
     {
-        _3DPoint originalPoint;
+        Point3D originalPoint;
         bool askOnlyClose; // in a case of a big query, we can ask all the ranks, or only the close ranks 
 
         friend inline std::ostream &operator<<(std::ostream &stream, const BigRangeQueryData &query)
@@ -28,10 +28,10 @@ namespace MadVoro
             return stream << "[BIG, point is " << query.originalPoint << ", sphere is (center = " << query.center << ", r = " << query.radius << ")]";
         }
 
-        BigRangeQueryData(size_t pointIdx, const _3DPoint &center, typename _3DPoint::coord_type radius, const _3DPoint &originalPoint, bool askOnlyClose): RangeQueryData(pointIdx, center, radius), originalPoint(originalPoint), askOnlyClose(askOnlyClose)
+        BigRangeQueryData(size_t pointIdx, const Point3D &center, typename Point3D::coord_type radius, const Point3D &originalPoint, bool askOnlyClose): RangeQueryData(pointIdx, center, radius), originalPoint(originalPoint), askOnlyClose(askOnlyClose)
         {}
         
-        BigRangeQueryData(): RangeQueryData(), originalPoint(_3DPoint()), askOnlyClose(false)
+        BigRangeQueryData(): RangeQueryData(), originalPoint(Point3D()), askOnlyClose(false)
         {}
 
         #ifdef MADVORO_WITH_MPI
@@ -69,7 +69,7 @@ namespace MadVoro
     private:
         class BigRangeAnswerAgent
             #ifdef MADVORO_WITH_MPI
-                : public QueryAgent::AnswerAgent<BigRangeQueryData, _3DPoint>
+                : public QueryAgent::AnswerAgent<BigRangeQueryData, Point3D>
             #endif // MADVORO_WITH_MPI
         {
         public:
@@ -80,28 +80,28 @@ namespace MadVoro
             #endif // MADVORO_WITH_MPI
             {}
 
-            std::vector<size_t> selfAnswer(const BigRangeQueryData &query, boost::container::flat_set<size_t> &ignore)
+            std::vector<size_t> selfAnswer(const BigRangeQueryData &query, std::unordered_set<size_t> &ignore)
             {
                 // a big query, bring only the closest point
-                std::vector<size_t> indicesResult = this->rangeFinder->closestPointInSphere(Point3D(query.center.x, query.center.y, query.center.z), query.radius, Point3D(query.originalPoint.x, query.originalPoint.y, query.originalPoint.z), ignore);
+                std::vector<size_t> indicesResult = this->rangeFinder->closestPointInSphere(query.center, query.radius, query.originalPoint, ignore);
                 ignore.insert(indicesResult.begin(), indicesResult.end());
                 return indicesResult;
             }
 
             #ifdef MADVORO_WITH_MPI
-                std::vector<_3DPoint> answer(const BigRangeQueryData &query, int _rank) override
+                std::vector<Point3D> answer(const BigRangeQueryData &query, int _rank) override
                 {
                     const SentPointsContainer::PointsSet &ignore = this->pointsContainer.getSentDataSetRank(_rank);
 
                     // a big query, bring only the closest point
-                    std::vector<size_t> indicesResult = this->rangeFinder->closestPointInSphere(Point3D(query.center.x, query.center.y, query.center.z), query.radius, Point3D(query.originalPoint.x, query.originalPoint.y, query.originalPoint.z), ignore);
+                    std::vector<size_t> indicesResult = this->rangeFinder->closestPointInSphere(query.center, query.radius, query.originalPoint, ignore);
                     indicesResult = this->pointsContainer.addPointsAsSent(_rank, indicesResult);
 
-                    std::vector<_3DPoint> result;
+                    std::vector<Point3D> result;
                     result.reserve(indicesResult.size());
                     for(const size_t &pointIdx : indicesResult)
                     {
-                        result.push_back(_3DPoint(this->rangeFinder->getPoint(pointIdx)));
+                        result.push_back(this->rangeFinder->getPoint(pointIdx));
                     }
                     // std::cout << "answering to rank " << _rank << " " << result.size() << " points " << std::endl;            
                     return result;
@@ -150,13 +150,13 @@ namespace MadVoro
                     if(distribuedOctEnvAgent != nullptr)
                     {
                         this->supportsFurthestClosestRanks = true;
-                        this->getFurthestClosestRanks = [distribuedOctEnvAgent](const _3DPoint &point){return distribuedOctEnvAgent->getClosestFurthestPointsByRanks(point);};
+                        this->getFurthestClosestRanks = [distribuedOctEnvAgent](const Point3D &point){return distribuedOctEnvAgent->getClosestFurthestPointsByRanks(point);};
                     }
                     const HilbertTreeEnvironmentAgent *hilbertTreeEnvAgent = dynamic_cast<const HilbertTreeEnvironmentAgent*>(this->envAgent);
                     if(hilbertTreeEnvAgent != nullptr)
                     {
                         this->supportsFurthestClosestRanks = true;
-                        this->getFurthestClosestRanks = [hilbertTreeEnvAgent](const _3DPoint &point){return hilbertTreeEnvAgent->getClosestFurthestPointsByRanks(point);};
+                        this->getFurthestClosestRanks = [hilbertTreeEnvAgent](const Point3D &point){return hilbertTreeEnvAgent->getClosestFurthestPointsByRanks(point);};
                     }
                 };
 
@@ -174,7 +174,7 @@ namespace MadVoro
                     }
 
                     // std::cout << "rank " << this->rank << " calculates the talk list of query " << query << std::endl;
-                    EnvironmentAgent::RanksSet intersectingRanks = this->envAgent->getIntersectingRanks(Point3D(query.center.x, query.center.y, query.center.z), query.radius);
+                    EnvironmentAgent::RanksSet intersectingRanks = this->envAgent->getIntersectingRanks(query.center, query.radius);
                     if(intersectingRanks.empty())
                     {
                         throw MadVoro::Exception::MadVoroException("In range talk agent, should not reach here: the intersecting ranks list should at least contain the rank itself");
@@ -268,14 +268,14 @@ namespace MadVoro
                 int rank, size;
                 bool supportsFurthestClosestRanks;
                 #ifdef MADVORO_WITH_MPI
-                    std::function<HilbertCurveEnvironmentAgent::DistancesVector(const _3DPoint&)> getFurthestClosestRanks;
+                    std::function<HilbertCurveEnvironmentAgent::DistancesVector(const Point3D&)> getFurthestClosestRanks;
                 #endif // MADVORO_WITH_MPI
             };
         #endif // MADVORO_WITH_MPI
 
     public:
         template<typename T>
-        using _set = boost::container::flat_set<T>;
+        using _set = std::unordered_set<T>;
 
         #ifdef MADVORO_WITH_MPI
             BigRangeAgent(const Range::RangeFinder *rangeFinder, const EnvironmentAgent *envAgent, SentPointsContainer &pointsContainer, const MPI_Comm &comm = MPI_COMM_WORLD): pointsContainer(pointsContainer)
@@ -286,8 +286,7 @@ namespace MadVoro
             #ifdef MADVORO_WITH_MPI
                 this->ansAgent = new BigRangeAnswerAgent(rangeFinder, pointsContainer, comm);
                 this->talkAgent = new BigRangeTalkAgent(envAgent, comm);
-                this->queryAgent = new QueryAgent::BusyWaitQueryAgent<BigRangeQueryData, _3DPoint>(this->talkAgent, this->ansAgent, false /* dont send messages to self */, comm);
-                //this->queryAgent = new WaitUntilAnsweredQueryAgent<BigRangeQueryData, _3DPoint>(this->talkAgent, this->ansAgent, false /* dont send messages to self */, comm);
+                this->queryAgent = new QueryAgent::BusyWaitQueryAgent<BigRangeQueryData, Point3D>(this->talkAgent, this->ansAgent, false /* dont send messages to self */, comm);
             #else // MADVORO_WITH_MPI
                 this->ansAgent = new BigRangeAnswerAgent(rangeFinder);
             #endif // MADVORO_WITH_MPI
@@ -303,13 +302,13 @@ namespace MadVoro
         }
 
         #ifdef MADVORO_WITH_MPI
-            inline QueryAgent::QueryBatchInfo<BigRangeQueryData, _3DPoint> runBatch(const std::vector<BigRangeQueryData> &queries)
+            inline QueryAgent::QueryBatchInfo<BigRangeQueryData, Point3D> runBatch(const std::vector<BigRangeQueryData> &queries)
             {
                 return this->queryAgent->runBatch(queries);
             };
         #endif // MADVORO_WITH_MPI
 
-        std::vector<std::vector<size_t>> selfBatchAnswer(const std::vector<BigRangeQueryData> &bigQueriesBatch, boost::container::flat_set<size_t> &ignore)
+        std::vector<std::vector<size_t>> selfBatchAnswer(const std::vector<BigRangeQueryData> &bigQueriesBatch, _set<size_t> &ignore)
         {
             std::vector<std::vector<size_t>> result;
             for(const BigRangeQueryData &query : bigQueriesBatch)
@@ -330,7 +329,7 @@ namespace MadVoro
         BigRangeAnswerAgent *ansAgent;
         #ifdef MADVORO_WITH_MPI
             BigRangeTalkAgent *talkAgent;
-            QueryAgent::QueryAgent<BigRangeQueryData, _3DPoint> *queryAgent;
+            QueryAgent::QueryAgent<BigRangeQueryData, Point3D> *queryAgent;
             SentPointsContainer &pointsContainer;
         #endif // MADVORO_WITH_MPI
     };

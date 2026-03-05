@@ -172,7 +172,8 @@ namespace MadVoro
                     typename T::coord_type closestDistance = 0;
                     for(int i = 0; i < DIM; i++)
                     {
-                        closestDistance += (point[i] - closestPoint[i]);
+                        typename T::coord_type diff = point[i] - closestPoint[i];
+                        closestDistance += diff * diff;
                     }
                     return closestDistance;
                 #endif // MADVORO_WITH_VCL

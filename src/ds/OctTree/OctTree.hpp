@@ -130,7 +130,7 @@ namespace MadVoro
             inline OctTreeNode *tryFindParent(const U &point){return const_cast<OctTreeNode*>(std::as_const(*this).tryFindParent(point));};
 
             template<typename U>
-            OctTreeNode *tryInsert(const U &point);
+            OctTreeNode *tryInsert(const U &point, OctTreeNode *startHint = nullptr);
 
             #ifdef DEBUG_MODE
             void printHelper(const OctTreeNode *node, int indent) const;
@@ -527,7 +527,7 @@ namespace MadVoro
 
         template<typename T>
         template<typename U>
-        typename OctTree<T>::OctTreeNode *OctTree<T>::tryInsert(const U &point)
+        typename OctTree<T>::OctTreeNode *OctTree<T>::tryInsert(const U &point, OctTreeNode *startHint)
         {
             if(this->getRoot() == nullptr)
             {
@@ -540,7 +540,7 @@ namespace MadVoro
                 throw eo;
             }
 
-            OctTreeNode *current = this->getRoot();
+            OctTreeNode *current = (startHint == nullptr)? this->getRoot() : startHint;
             while(current != nullptr)
             {
                 // if we reached a leaf with the value `v`, start splitting until `v` and `point` are not in the same rectangle

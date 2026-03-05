@@ -15,41 +15,44 @@ namespace MadVoro
     public:
         using DistributedOctTree_Type = MadVoro::DataStructure::DistributedOctTree<Point3D, RANKS_IN_LEAF>;
 
-        inline DistributedOctEnvironmentAgent(const Point3D &ll, const Point3D &ur, const std::vector<Point3D> &points, const std::vector<hilbert_index_t> &ranges, const MPI_Comm &comm = MPI_COMM_WORLD): 
-                HilbertCurveEnvironmentAgent(ll, ur, ranges, convertor, comm)
+        inline DistributedOctEnvironmentAgent(const Point3D &ll, const Point3D &ur, const std::vector<Point3D> &points, const std::shared_ptr<HilbertLoadBalancer> &loadBalancer, const MPI_Comm &comm = MPI_COMM_WORLD): 
+                HilbertCurveEnvironmentAgent(ll, ur, loadBalancer, comm), points(points)
         {
-            DataStructure::OctTree<Point3D> myTree(this->ll, this->ur, points);
-            this->distributedOctTree = new DistributedOctTree_Type(&myTree, false /* no detailed nodes info */, this->comm);
+            DataStructure::OctTree<Point3D> myTree(this->ll, this->ur, this->points);
+            this->distributedOctTree = std::make_shared<DistributedOctTree_Type>(&myTree, false, this->comm);
         };
 
-        inline ~DistributedOctEnvironmentAgent(){delete this->distributedOctTree;};
+        ~DistributedOctEnvironmentAgent() override = default;
+
+        inline std::shared_ptr<HilbertCurveEnvironmentAgent> clone(const std::shared_ptr<HilbertLoadBalancer> newLoadBalancer) const override
+        {
+            return std::make_shared<DistributedOctEnvironmentAgent>(this->ll, this->ur, this->points, newLoadBalancer, this->comm);
+        }
 
         inline EnvironmentAgent::RanksSet getIntersectingRanks(const Point3D &center, double radius) const override
         {
             return this->distributedOctTree->getIntersectingRanks(center, radius);
         };
 
-        inline void updatePoints(const std::vector<Point3D> &newPoints) override
+        inline void onExchange(const std::vector<Point3D> &newPoints) override
         {
-            this->HilbertCurveEnvironmentAgent::updatePoints(newPoints);
-            delete this->distributedOctTree;
-            DataStructure::OctTree<Point3D> myTree(this->ll, this->ur, newPoints);
-            this->distributedOctTree = new DistributedOctTree_Type(&myTree, false, this->comm);
-        }
+            this->HilbertCurveEnvironmentAgent::onExchange(newPoints);
+            this->points = newPoints;
+            DataStructure::OctTree<Point3D> myTree(this->ll, this->ur, this->points);
+            this->distributedOctTree = std::make_shared<DistributedOctTree_Type>(&myTree, false, this->comm);
+        };
 
         inline int getOwner(const Point3D &point) const override
         {
-            return this->getCellOwner(this->convertor->xyz2d(point));
+            return this->getCellOwner(this->loadBalancer->convertor->xyz2d(point));
         };
 
-        inline void updateBorders(const std::vector<hilbert_index_t> &newRange, int newOrder) override
+        inline void onRebalance(void) override
         {
-            this->HilbertCurveEnvironmentAgent::updateBorders(newRange, newOrder);
+            this->HilbertCurveEnvironmentAgent::onRebalance();
         }
 
-        const DistributedOctTree_Type *getOctTree() const{return this->distributedOctTree;};
-
-        inline int getOrder() const{return this->order;};
+        const std::shared_ptr<DistributedOctTree_Type> &getOctTree() const{return this->distributedOctTree;};
         
         template<typename U>
         inline HilbertCurveEnvironmentAgent::DistancesVector getClosestFurthestPointsByRanks(const U &point) const
@@ -58,10 +61,8 @@ namespace MadVoro
         }
 
     private:
-        DistributedOctTree_Type *distributedOctTree = nullptr;
-        HilbertConvertor3D *convertor = nullptr;
-        std::vector<hilbert_index_t> range;
-        int order;
+        std::shared_ptr<DistributedOctTree_Type> distributedOctTree = nullptr;
+        std::vector<Point3D> points;
     };
 }
 

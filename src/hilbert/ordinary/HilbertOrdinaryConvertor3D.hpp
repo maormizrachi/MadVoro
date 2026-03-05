@@ -10,6 +10,11 @@ namespace MadVoro
     {
     public:
         explicit HilbertOrdinaryConvertor3D(const Point3D &ll, const Point3D &ur, size_t order);
+
+        inline std::shared_ptr<HilbertConvertor3D> clone(void) const override
+        {
+            return std::make_shared<HilbertOrdinaryConvertor3D>(this->ll, this->ur, this->order);
+        }
         
         void changeOrder(size_t order) override
         {

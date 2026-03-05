@@ -69,7 +69,7 @@ namespace MadVoro
             }
 
             inline size_t getIndex() const{return this->index;};
-            inline _3DPoint getData() const{return _3DPoint(values[0], values[1], values[2]);};
+            inline Point3D getData() const{return Point3D(values[0], values[1], values[2]);};
             inline Point3D getVector() const{return Point3D(values[0], values[1], values[2]);};
 
             #ifdef MADVORO_WITH_MPI

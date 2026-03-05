@@ -1,39 +1,82 @@
 #ifdef MADVORO_WITH_MPI
 
 #include "PointsManager.hpp"
+#include <chrono>
 
 using namespace MadVoro;
 
+void MadVoro::PointsManager::setImbalanceTolerance(double tolerance)
+{
+    this->imbalanceTolerance = tolerance;
+}
+
+void MadVoro::PointsManager::reportImbalance(void) const
+{
+    struct
+    {
+        double weight;
+        int rank;
+    } myWeightedRank, maxWeighted, minWeighted;
+    myWeightedRank.weight = this->totalWeight;
+    myWeightedRank.rank = this->rank;
+    MPI_Allreduce(&myWeightedRank, &maxWeighted, 1, MPI_DOUBLE_INT, MPI_MAXLOC, MPI_COMM_WORLD);
+    MPI_Allreduce(&myWeightedRank, &minWeighted, 1, MPI_DOUBLE_INT, MPI_MINLOC, MPI_COMM_WORLD);
+    double avgWeight;
+    MPI_Allreduce(&this->totalWeight, &avgWeight, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    avgWeight /= static_cast<double>(this->size);
+    if(this->rank == 0)
+    {
+        std::cout << "Imbalance report: max weight is " << maxWeighted.weight << " in rank " << maxWeighted.rank << ", min weight is " << minWeighted.weight << " in rank " << minWeighted.rank << ", average weight is " << avgWeight << std::endl;
+    }
+}
+
 bool MadVoro::PointsManager::checkForRebalance(double myWeight) const
 {
-    // checks if I have too many weight, and notify other ranks
+    struct
+    {
+        double weight;
+        int rank;
+    } myWeightRanked, maxWeight;
+
     double totalWeight;
     MPI_Allreduce(&myWeight, &totalWeight, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
     double idealWeight = totalWeight / this->size;
-    int I_say = (myWeight >= (BALANCE_FACTOR * idealWeight))? 1 : 0; // if I say 'rebalance' or not
-    int rebalance = 0; // if someone says 'rebalance' or not
-    MPI_Allreduce(&I_say, &rebalance, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
-    if((rebalance > 0) and (this->rank == 0))
+    myWeightRanked.weight = myWeight;
+    myWeightRanked.rank = this->rank;
+    MPI_Allreduce(&myWeightRanked, &maxWeight, 1, MPI_DOUBLE_INT, MPI_MAXLOC, MPI_COMM_WORLD);
+    if(this->rank == 0)
     {
-        std::cout << "doing rebalance" << std::endl;
+        std::cout << "Max weight in rank " << maxWeight.rank << ", its weight is " << maxWeight.weight << ", ideal is " << idealWeight << std::endl;
     }
-    return (rebalance > 0);
+    if(maxWeight.weight >= (this->imbalanceTolerance * idealWeight))
+    {
+        if(this->rank == 0)
+        {
+            std::cout << "Doing rebalance!" << std::endl;
+        }
+        return true;
+    }
+    return false;
 }
 
-MadVoro::PointsExchangeResult MadVoro::PointsManager::update(const std::vector<Point3D> &allPoints, const std::vector<double> &allWeights, const std::vector<size_t> &indicesToWorkWith, const std::vector<double> &radiuses, const std::vector<Point3D> &previous_CM, bool allowRebalance)
+bool MadVoro::PointsManager::shouldRebalance(const std::vector<double> &weights) const
 {
-    // if envAgent is null, the `exchange` will perform an initialization as well.
-    // `rebalance` is used only when the environment agent is initialized.
-    PointsExchangeResult result = this->exchange(allPoints, allWeights, indicesToWorkWith, radiuses, previous_CM);
+    double totalWeight = std::accumulate(weights.cbegin(), weights.cend(), 0.0);
+    return this->checkForRebalance(totalWeight);
+}
+
+MadVoro::PointsExchangeResult MadVoro::PointsManager::update(const std::vector<Point3D> &allPoints, const std::vector<double> &allWeights, const std::vector<size_t> &indicesToWorkWith, const std::vector<double> &radiuses, const std::vector<Point3D> &previous_CM, bool doRebalance, bool doExchange)
+{
+    PointsExchangeResult result = this->exchange(allPoints, allWeights, indicesToWorkWith, radiuses, previous_CM, not doExchange);
     this->totalWeight = std::accumulate(result.newWeights.cbegin(), result.newWeights.cend(), 0.0);
-    if(allowRebalance and this->checkForRebalance(this->totalWeight))
+    if(doRebalance and this->checkForRebalance(this->totalWeight))
     {
         assert(this->getEnvironmentAgent() != nullptr);
         this->rebalance(allPoints, allWeights);
-        result = this->exchange(allPoints, allWeights, indicesToWorkWith, radiuses, previous_CM);
+        result = this->exchange(allPoints, allWeights, indicesToWorkWith, radiuses, previous_CM, not doExchange);
         this->totalWeight = std::accumulate(result.newWeights.cbegin(), result.newWeights.cend(), 0.0);
+        this->reportImbalance();
     }
-    // std::cout << "total weight of rank " << this->rank << " is " << this->totalWeight << " with " << result.newPoints.size() << " points" << std::endl;
     return result;
 }
 

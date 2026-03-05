@@ -3,6 +3,7 @@
 
 #ifdef MADVORO_WITH_MPI
 
+#include <vector>
 #include <mpi.h>
 #include <boost/container/flat_set.hpp>
 
@@ -24,6 +25,10 @@ namespace MadVoro
         };
 
         virtual ~EnvironmentAgent() = default;
+
+        virtual void onExchange(const std::vector<Point3D> &newPoints) = 0;
+
+        virtual void onRebalance(void) = 0;
         
         virtual RanksSet getIntersectingRanks(const Point3D &center, double radius) const = 0;
 

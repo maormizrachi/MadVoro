@@ -6,13 +6,15 @@
 #define VORONOI3D_HPP 1
 
 #include <vector>
+#include <memory>
 #include <boost/container/small_vector.hpp>
 #include "elementary/Face.hpp"
 #include "elementary/Vector3D.hpp"
-// #include "exception/InvalidArgumentException.hpp"
 
 namespace MadVoro
 {
+  class LoadBalancer;
+
   //! \brief Container for points defining a face
   typedef boost::container::small_vector<size_t, 24> face_vec;
   //! \brief Container for neighbouring points
@@ -72,6 +74,30 @@ namespace MadVoro
      * @return int the rank number.
      */
     int GetOwner(const Vector3D &point) const;
+
+    /**
+     * @brief Rebuilds the mesh using neighbor information from the previous mesh,
+     *        avoiding a full ghost-point discovery. Used after points exchange.
+     */
+    void MockMesh(void);
+
+    /**
+     * @brief Sets a new load balancer, exchanges points accordingly, and rebuilds the mesh.
+     * @param loadBalancer The new load balancer to use.
+     */
+    void SetLoadBalancer(std::shared_ptr<LoadBalancer> loadBalancer);
+
+    /**
+     * @brief Rebalances the mesh using the given weights, then rebuilds.
+     * @param weights The weights for each point (must match the number of points).
+     */
+    void Rebalance(const std::vector<double> &weights);
+
+    /**
+     * @brief Sets the imbalance tolerance for load balancing decisions.
+     * @param tolerance The tolerance factor (e.g. 1.15 means 15% imbalance is acceptable).
+     */
+    void SetImbalanceTolerance(double tolerance);
     #endif // MADVORO_WITH_MPI
     /**
      * @brief Finds the local containing cell for a given point in the 3D Voronoi tessellation.

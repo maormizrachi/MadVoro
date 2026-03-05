@@ -10,6 +10,7 @@
 #include "environment/hilbert/HilbertTreeEnvAgent.hpp"
 #include "hilbert/rectangular/HilbertRectangularConvertor3D.hpp"
 #include "hilbert/ordinary/HilbertOrdinaryConvertor3D.hpp"
+#include "loadBalancing/HilbertLoadBalancer.hpp"
 
 #define SPACE_FACTOR 1e-5
 
@@ -18,35 +19,32 @@ namespace MadVoro
     class HilbertPointsManager : public PointsManager
     {
     public:
-        HilbertPointsManager(const Point3D &ll, const Point3D &ur, const MPI_Comm &comm = MPI_COMM_WORLD)
-            : PointsManager(ll, ur, comm), envAgent(nullptr), convertor(nullptr)
-        {}
+        HilbertPointsManager(const Point3D &ll, const Point3D &ur, const MPI_Comm &comm = MPI_COMM_WORLD);
 
-        inline ~HilbertPointsManager() override
-        {
-            delete this->envAgent;
-            delete this->convertor;
-        };
+        inline ~HilbertPointsManager() override = default;
 
-        inline const EnvironmentAgent *getEnvironmentAgent() const override
-        {
-            return this->envAgent;
-        }
+        std::shared_ptr<PointsManager> clone(void) const override;
+
+        inline const std::shared_ptr<EnvironmentAgent> getEnvironmentAgent() const override{return this->envAgent;}
 
         HilbertPointsManager &operator=(const HilbertPointsManager &other) = delete;
 
-        PointsExchangeResult exchange(const std::vector<Point3D> &allPoints, const std::vector<double> &allWeights, const std::vector<size_t> &indicesToWorkWith, const std::vector<double> &radiuses, const std::vector<Point3D> &previous_CM) override;
+        PointsExchangeResult exchange(const std::vector<Point3D> &allPoints, const std::vector<double> &allWeights, const std::vector<size_t> &indicesToWorkWith, const std::vector<double> &radiuses, const std::vector<Point3D> &previous_CM, bool noExchange = false) override;
 
         void rebalance(const std::vector<Point3D> &points, const std::vector<double> &weights = std::vector<double>()) override;
         
+        void setLoadBalancer(std::shared_ptr<LoadBalancer> loadBalancer) override;
+
+        std::shared_ptr<LoadBalancer> getLoadBalancer(void) override;
+
     private:
         void initializeHilbertParameters(const std::vector<Point3D> &points);
 
         PointsExchangeResult initialize(const std::vector<Point3D> &points, const std::vector<double> &weights, const std::vector<double> &radiuses, const std::vector<Point3D> &previous_CM);
 
-        HilbertCurveEnvironmentAgent *envAgent;
-        HilbertConvertor3D *convertor;
-        std::vector<hilbert_index_t> responsibilityRange;
+        std::shared_ptr<HilbertLoadBalancer> loadBalancer = nullptr;
+        std::shared_ptr<HilbertCurveEnvironmentAgent> envAgent = nullptr;
+        std::shared_ptr<HilbertConvertor3D> convertor = nullptr;
     };
 }
 
