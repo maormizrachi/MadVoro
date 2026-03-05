@@ -76,11 +76,18 @@ int main(int argc, char *argv[])
 
     MPI_Barrier(MPI_COMM_WORLD);
 
+#ifdef MADVORO_WITH_VTK
     if(rank == 0)
     {
         std::cout << "Starting VTK output" << std::endl;
     }
     diagram.ToVTK("pentagon_example.vtu");
+#else
+    if(rank == 0)
+    {
+        std::cout << "VTK support not enabled. Skipping VTK output." << std::endl;
+    }
+#endif
     
     MPI_Finalize();
 

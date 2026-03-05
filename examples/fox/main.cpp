@@ -50,6 +50,7 @@ int main(int argc, char *argv[])
     // we use a special function of Voronoi3D to help us recognize which points have moved, and where to.
     std::tie(myPoints, myIsInside) = GetPointsAfterBuildExchange(diag, myPoints, myIsInside);
 
+#ifdef MADVORO_WITH_VTK
     std::string vtkFilename = "fox.vtu";
     if(rank == 0)
     {
@@ -58,6 +59,12 @@ int main(int argc, char *argv[])
 
     // print to VTK, with a field of "isInside" to each point. When you want to see the VTK result, make sure you filter by 'isInside == 1'
     diag.ToVTK(vtkFilename, {"isInside"}, {myIsInside});
+#else
+    if(rank == 0)
+    {
+        std::cout << "VTK support not enabled. Skipping VTK output." << std::endl;
+    }
+#endif
 
     MPI_Finalize();
 }

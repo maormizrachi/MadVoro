@@ -34,10 +34,20 @@ int main(int argc, char *argv[])
     {
         std::cout << "Done with building!" << std::endl;
         std::cout << "Single build time with " << size << " processes, is " << time << std::endl;
-        std::cout << "Now writing to VTK" << std::endl;
     }
 
+#ifdef MADVORO_WITH_VTK
+    if(rank == 0)
+    {
+        std::cout << "Now writing to VTK" << std::endl;
+    }
     distriburedDiagram.ToVTK("output.vtk");
+#else
+    if(rank == 0)
+    {
+        std::cout << "VTK support not enabled. Skipping VTK output." << std::endl;
+    }
+#endif
 
     MPI_Finalize();
     return 0;
