@@ -5,10 +5,9 @@
 #include <boost/random/uniform_real_distribution.hpp>
 #include <mpi.h>
 #include <madvoro/Voronoi3D.hpp>
+#include "Vector3D.hpp"
 
 #define DEFAULT_N 10000
-
-using namespace MadVoro;
 
 std::vector<Vector3D> GenerateRandomPoints(size_t N, const Vector3D &ll, const Vector3D &ur)
 {
@@ -59,7 +58,7 @@ int main(int argc, char *argv[])
         std::cout << "Starting build" << std::endl;
     }
 
-    Voronoi3D voronoi(ll, ur);
+    MadVoro::Voronoi3D<Vector3D> voronoi(ll, ur);
 
     std::chrono::time_point<std::chrono::system_clock> start, end;
 

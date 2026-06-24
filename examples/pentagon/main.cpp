@@ -4,9 +4,10 @@
 #include <algorithm>
 #include <mpi.h>
 #include <madvoro/Voronoi3D.hpp>
+#include "Vector3D.hpp"
 #include "pentagon_helpers.hpp"
 
-using namespace MadVoro;
+using Face = MadVoro::Face<Vector3D>;
 
 #define SIDES 80
 
@@ -22,8 +23,6 @@ int main(int argc, char *argv[])
     double theta = 2*M_PI / SIDES;
     double height = 3;
 
-    Vector3D A(0, 0, 0), vec(R*cos(theta), R*sin(theta), 0);
-
     std::vector<Vector3D> points_bottom;
     std::vector<Vector3D> points_top;
 
@@ -35,8 +34,7 @@ int main(int argc, char *argv[])
         points_top.push_back(Vector3D(x, y, height));
     }
 
-    // it is important that the points of a face will be well-ordered
-    MadVoro::point_vec_v base1_points, base2_points;
+    Face::point_vec_v base1_points, base2_points;
     for(const Vector3D &p : points_bottom)
     {
         base1_points.push_back(p);
@@ -48,7 +46,6 @@ int main(int argc, char *argv[])
     Face base1(base1_points);
     Face base2(base2_points);
     
-    // make side faces
     std::vector<Face> box_faces = {base1, base2};
     for(size_t i = 0; i < SIDES; i++)
     {
@@ -56,7 +53,7 @@ int main(int argc, char *argv[])
         box_faces.push_back(side);
     }
 
-    Voronoi3D diagram(box_faces);
+    MadVoro::Voronoi3D<Vector3D> diagram(box_faces);
     auto [ll, ur] = diagram.GetBoxCoordinates();
 
     if(rank == 0)
@@ -64,8 +61,7 @@ int main(int argc, char *argv[])
         std::cout << "Generating points" << std::endl;
     }
 
-    // create a diagram with faces
-    size_t N = 1000; // per rank
+    size_t N = 1000;
     std::vector<Vector3D> points = GeneratePoints(box_faces, N, ll, ur);
 
     if(rank == 0)

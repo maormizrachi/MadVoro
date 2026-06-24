@@ -5,11 +5,12 @@
 #include <string>
 #include <algorithm>
 #include <fstream>
-#include <madvoro/Vector3D.hpp>
+#include <iostream>
+#include "Vector3D.hpp"
 
-inline std::vector<MadVoro::Vector3D> readPoints(const std::string &filename)
+inline std::vector<Vector3D> readPoints(const std::string &filename)
 {
-    std::vector<MadVoro::Vector3D> points;
+    std::vector<Vector3D> points;
     std::ifstream file(filename, std::ios::in);
 
     if(!file.good())

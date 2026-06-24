@@ -4,9 +4,10 @@
 #include <algorithm>
 #include <mpi.h>
 #include <madvoro/Voronoi3D.hpp>
+#include "Vector3D.hpp"
 #include "pyramid_helpers.hpp"
 
-using namespace MadVoro;
+using Face = MadVoro::Face<Vector3D>;
 
 int main(int argc, char *argv[])
 {
@@ -17,16 +18,12 @@ int main(int argc, char *argv[])
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
     double height = 15;
-    
 
     Vector3D A(0, 0, 0), vec1(5, 0, 0), vec2(0, 5, 0);
     Vector3D B(A+vec1), C(A+vec1+vec2), D(A+vec2);
 
-
-    Vector3D vec3(1, 0, 0), vec4(0, 1, 0);
     Vector3D S = A + 0.5 * C + Vector3D(0, 0, height);
 
-    // it is important that the points of a face will be well-ordered
     Face base({A, B, C, D});
     Face side1({A, D, S});
     Face side2({C, D, S});
@@ -34,11 +31,10 @@ int main(int argc, char *argv[])
     Face side4({A, B, S});
     std::vector<Face> box_faces = {base, side1, side2, side3, side4};
 
-    Voronoi3D diagram(box_faces);
+    MadVoro::Voronoi3D<Vector3D> diagram(box_faces);
     auto [ll, ur] = diagram.GetBoxCoordinates();
 
-    // create a diagram with faces
-    size_t N = 1000; // per rank
+    size_t N = 1000;
     std::vector<Vector3D> points = GeneratePoints(box_faces, N, ll, ur);
 
     if(rank == 0)

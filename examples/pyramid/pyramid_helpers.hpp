@@ -5,23 +5,22 @@
 #include <random>
 #include <algorithm>
 #include <mpi.h>
-#include <madvoro/Vector3D.hpp>
-#include <madvoro/Face.hpp>
+#include "Vector3D.hpp"
+#include <madvoro/Voronoi3D.hpp>
 
-using namespace MadVoro;
 using Hyperplane3D = std::pair<Vector3D, double>;
 
-Vector3D GetPointInsidePyramid(const std::vector<Face> &faces)
+Vector3D GetPointInsidePyramid(const std::vector<MadVoro::Face<Vector3D>> &faces)
 {
     Vector3D summit_height = Vector3D(0, 0, faces[1].vertices[2].z);
     Vector3D in_base = faces[0].vertices[0] + faces[0].vertices[2]; 
     return ((in_base + summit_height) / 2);
 }
 
-std::vector<Hyperplane3D> GetHyperplanes(const std::vector<Face> &faces, const Vector3D &pointInPoly)
+std::vector<Hyperplane3D> GetHyperplanes(const std::vector<MadVoro::Face<Vector3D>> &faces, const Vector3D &pointInPoly)
 {
     std::vector<Hyperplane3D> hyperplanes;
-    for(const Face &face : faces)
+    for(const auto &face : faces)
     {
         Vector3D normal = Normalize(CrossProduct(face.vertices[1] - face.vertices[0], face.vertices[2] - face.vertices[1]));
         double D = ScalarProduct(normal, face.vertices[0]);
@@ -47,9 +46,8 @@ bool PointInPolygon(const std::vector<Hyperplane3D> &planes, const Vector3D &poi
     return true;
 }
 
-std::vector<Vector3D> GeneratePoints(const std::vector<Face> &faces, size_t N, const Vector3D &ll, const Vector3D &ur)
+std::vector<Vector3D> GeneratePoints(const std::vector<MadVoro::Face<Vector3D>> &faces, size_t N, const Vector3D &ll, const Vector3D &ur)
 {
-    // std::vector<std::uniform_real_distribution<double>> distributions;
     std::vector<std::uniform_real_distribution<double>> distributions;
     for(int i = 0; i < 3; i++)
     {
@@ -77,7 +75,6 @@ std::vector<Vector3D> GeneratePoints(const std::vector<Face> &faces, size_t N, c
         }
     }
     return points;
-
 }
 
 #endif // PYRAMID_HELPERS
