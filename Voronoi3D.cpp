@@ -10,7 +10,7 @@
 #include "misc/int2str.hpp"
 
 #ifdef RICH_MPI
-#include <mpi_utils/mpi_commands.hpp>
+#include "mpi/mpi_commands.hpp"
 
 #include "3D/range/finders/BruteForce.hpp"
 #include "3D/range/finders/RangeTree.hpp"

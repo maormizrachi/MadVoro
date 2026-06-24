@@ -51,7 +51,7 @@
 #include "misc/io3D.hpp"
 
 #ifdef RICH_MPI
-#include <mpi_utils/mpi_commands.hpp>
+#include "mpi/mpi_commands.hpp"
 #endif
 
 // finders
