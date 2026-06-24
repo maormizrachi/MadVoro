@@ -8,9 +8,9 @@
 #include "misc/io3D.hpp"
 #include "geometry/Intersections.hpp"
 #include "misc/int2str.hpp"
-#include "mpi/mpi_commands.hpp"
 
 #ifdef RICH_MPI
+#include <mpi_utils/mpi_commands.hpp>
 
 #include "3D/range/finders/BruteForce.hpp"
 #include "3D/range/finders/RangeTree.hpp"
