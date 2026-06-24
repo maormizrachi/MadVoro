@@ -6,7 +6,7 @@
 #include <vector>
 #include <string>
 #include <filesystem>
-#include "voronoi/Voronoi3DFull.hpp"
+#include "../Voronoi3D.hpp"
 #include "write_vtu_3d.hpp"
 
 namespace fs = std::filesystem;
@@ -15,7 +15,7 @@ namespace MadVoro
 {
   namespace IO
   {
-    void WriteVoronoiVTK(const MadVoro::Voronoi3DFull &tri, const std::string &filename, const std::vector<std::vector<double>> &data = std::vector<std::vector<double>>(), const std::vector<std::string>& names = std::vector<std::string>());
+    void WriteVoronoiVTK(const Voronoi3D &tri, const std::string &filename, const std::vector<std::vector<double>> &data = std::vector<std::vector<double>>(), const std::vector<std::string>& names = std::vector<std::string>());
   }
 }
 

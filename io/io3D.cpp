@@ -2,7 +2,7 @@
 
 using namespace MadVoro;
 
-void MadVoro::IO::write_vec3d(std::vector<Point3D> const & vec, std::string const & fname)
+void MadVoro::IO::write_vec3d(std::vector<Vector3D> const & vec, std::string const & fname)
 {
 	std::ofstream file_handle(fname.c_str(), std::ios::out | std::ios::binary);
 	assert(file_handle.is_open());
@@ -17,9 +17,9 @@ void MadVoro::IO::write_vec3d(std::vector<Point3D> const & vec, std::string cons
 	file_handle.close();
 }
 
-std::vector<Point3D> MadVoro::IO::read_vec3d(std::string fname)
+std::vector<Vector3D> MadVoro::IO::read_vec3d(std::string fname)
 {
-	vector<Point3D> res;
+	std::vector<Vector3D> res;
 	std::ifstream fh(fname.c_str(), std::ios::binary);
 	int npoints;
 	fh.read(reinterpret_cast<char*>(&npoints), sizeof(int));
@@ -29,7 +29,7 @@ std::vector<Point3D> MadVoro::IO::read_vec3d(std::string fname)
 		fh.read(reinterpret_cast<char*>(&x), sizeof(double));
 		fh.read(reinterpret_cast<char*>(&y), sizeof(double));
 		fh.read(reinterpret_cast<char*>(&z), sizeof(double));
-		res.push_back(Point3D(x, y, z));
+		res.push_back(Vector3D(x, y, z));
 	}
 	fh.close();
 	return res;
@@ -59,7 +59,7 @@ void MadVoro::IO::write_vecint(std::vector<int> const & vec, std::string const &
 
 std::vector<size_t> MadVoro::IO::read_vecst(std::string fname)
 {
-	vector<size_t> res;
+	std::vector<size_t> res;
 	std::ifstream fh(fname.c_str(), std::ios::binary);
 	int npoints;
 	fh.read(reinterpret_cast<char*>(&npoints), sizeof(int));

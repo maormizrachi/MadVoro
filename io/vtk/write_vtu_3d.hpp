@@ -36,7 +36,7 @@
 	#include <vtkMPIController.h>
 #endif
 
-#include "voronoi/Voronoi3DFull.hpp"
+#include "../Voronoi3D.hpp"
 
 namespace MadVoro
 {
@@ -48,17 +48,17 @@ namespace MadVoro
 						std::vector<std::string> const& cell_variable_names,
 						std::vector<std::vector<double>> const& cell_variables,
 						std::vector<std::string> const& cell_vectors_names,
-						std::vector<std::vector<Point3D>> const& cell_vectors,
+						std::vector<std::vector<Vector3D>> const& cell_vectors,
 						double const time,
 						std::size_t cycle,
-						Voronoi3DFull const& tess);
+						Voronoi3D const& tess);
 
 			inline void write_vtu_3d(std::filesystem::path const& file_name,
 						std::vector<std::string> const& cell_variable_names,
 						std::vector<std::vector<double>> const& cell_variables,
 						std::vector<std::string> const& cell_vectors_names,
-						std::vector<std::vector<Point3D>> const& cell_vectors,
-						Voronoi3DFull const& tess)
+						std::vector<std::vector<Vector3D>> const& cell_vectors,
+						Voronoi3D const& tess)
 			{
 				write_vtu_3d(file_name, cell_variable_names, cell_variables, cell_vectors_names, cell_vectors, std::numeric_limits<double>::max(), std::numeric_limits<size_t>::max(), tess); 
 			}

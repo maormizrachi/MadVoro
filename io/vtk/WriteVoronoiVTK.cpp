@@ -9,23 +9,23 @@ struct VTU_Output
     std::vector<std::vector<double>> vtu_cell_variables;
     std::vector<std::string> vtu_cell_variable_names;
     std::vector<std::string> vtu_cell_vectors_names;
-    std::vector<std::vector<Point3D>> vtu_cell_vectors;
+    std::vector<std::vector<Vector3D>> vtu_cell_vectors;
 };
 
-void writeVTU(const std::string &filename, const MadVoro::Voronoi3DFull &tri, const VTU_Output &data)
+void writeVTU(const std::string &filename, const Voronoi3D &tri, const VTU_Output &data)
 {
     std::filesystem::path vtu_name(filename);
     vtu_name.replace_extension("vtu");
     MadVoro::IO::write_vtu3d::write_vtu_3d(vtu_name, data.vtu_cell_variable_names, data.vtu_cell_variables, data.vtu_cell_vectors_names, data.vtu_cell_vectors, tri);
 }
 
-VTU_Output WriteVoronoiVTKHelper(const std::string &filename, const MadVoro::Voronoi3DFull &tri, const std::vector<std::vector<double>> &data, const std::vector<std::string> &names)
+VTU_Output WriteVoronoiVTKHelper(const std::string &filename, const Voronoi3D &tri, const std::vector<std::vector<double>> &data, const std::vector<std::string> &names)
 {
     VTU_Output vtu;
     std::vector<std::vector<double>> &vtu_cell_variables = vtu.vtu_cell_variables;
     std::vector<std::string> &vtu_cell_variable_names = vtu.vtu_cell_variable_names;
     std::vector<std::string> &vtu_cell_vectors_names = vtu.vtu_cell_vectors_names;
-    std::vector<std::vector<Point3D>> &vtu_cell_vectors = vtu.vtu_cell_vectors;
+    std::vector<std::vector<Vector3D>> &vtu_cell_vectors = vtu.vtu_cell_vectors;
 
     for(size_t i = 0; i < data.size(); ++i)
     {
@@ -41,14 +41,14 @@ VTU_Output WriteVoronoiVTKHelper(const std::string &filename, const MadVoro::Vor
     size_t Npoints = tri.GetPointNo();
 
     vtu_cell_vectors_names.push_back("Coordinates");
-    std::vector<Point3D> vel(Npoints);
+    std::vector<Vector3D> vel(Npoints);
     for(size_t i = 0; i < Npoints; ++i)
         vel[i] = tri.GetMeshPoint(i);
     vtu_cell_vectors.push_back(vel);
 
     for(size_t i = 0; i < Npoints; ++i)
     {
-        const Point3D &point = tri.GetMeshPoint(i);
+        const Vector3D &point = tri.GetMeshPoint(i);
         x.push_back(point.x);
         y.push_back(point.y);
         z.push_back(point.z);
@@ -60,7 +60,7 @@ VTU_Output WriteVoronoiVTKHelper(const std::string &filename, const MadVoro::Vor
 
     for(size_t i = 0; i < tri.GetTotalPointNumber(); ++i)
     {
-        const Point3D &point = tri.GetMeshPoint(i);
+        const Vector3D &point = tri.GetMeshPoint(i);
         x.push_back(point.x);
         y.push_back(point.y);
         z.push_back(point.z);
@@ -85,7 +85,7 @@ VTU_Output WriteVoronoiVTKHelper(const std::string &filename, const MadVoro::Vor
         }
     }
 
-    const std::vector<Point3D> &facePoints = tri.GetFacePoints();
+    const std::vector<Vector3D> &facePoints = tri.GetFacePoints();
 
     Npoints = facePoints.size();
     for(size_t i = 0; i < Npoints; ++i)
@@ -109,7 +109,7 @@ VTU_Output WriteVoronoiVTKHelper(const std::string &filename, const MadVoro::Vor
     return vtu;
 }
 
-void MadVoro::IO::WriteVoronoiVTK(MadVoro::Voronoi3DFull const &tri, std::string const &filename, const std::vector<std::vector<double>> &data, const std::vector<std::string> &names)
+void MadVoro::IO::WriteVoronoiVTK(Voronoi3D const &tri, std::string const &filename, const std::vector<std::vector<double>> &data, const std::vector<std::string> &names)
 {
     VTU_Output vtu = WriteVoronoiVTKHelper(filename, tri, data, names);
     writeVTU(filename, tri, vtu);
