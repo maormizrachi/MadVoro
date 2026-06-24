@@ -2,7 +2,7 @@
 
 #ifdef MADVORO_WITH_HDF5
 
-void MadVoro::IO::WritePointsHDF5(const std::vector<Vector3D> &points, const std::string &filename, const std::vector<std::vector<double>> &data, const std::vector<std::string> &names)
+void MadVoro::IO::WritePointsHDF5(const std::vector<Point3D> &points, const std::string &filename, const std::vector<std::vector<double>> &data, const std::vector<std::string> &names)
 {
   int rank = 0;
   int ws = 0;
@@ -85,7 +85,7 @@ void MadVoro::IO::WritePointsHDF5(const std::vector<Vector3D> &points, const std
 }
 
 #ifdef MADVORO_WITH_MPI
-    void MadVoro::IO::WritePointsHDF5_Parallel(const std::vector<Vector3D> &points, const std::string &filename, const std::vector<std::vector<double>> &data, const std::vector<std::string> &names)
+    void MadVoro::IO::WritePointsHDF5_Parallel(const std::vector<Point3D> &points, const std::string &filename, const std::vector<std::vector<double>> &data, const std::vector<std::string> &names)
     {
         int rank = 0;
         int ws = 0;

@@ -6,12 +6,12 @@ void MadVoro::IO::write_vtu3d::write_vtu_3d(std::filesystem::path const& file_na
 				std::vector<std::string> const& cell_variable_names,
 				std::vector<std::vector<double>> const& cell_variables,
 				std::vector<std::string> const& cell_vectors_names,
-				std::vector<std::vector<Vector3D>> const& cell_vectors,
+				std::vector<std::vector<Point3D>> const& cell_vectors,
 				double const time,
 				std::size_t cycle,
-				Voronoi3D const& tess)
+				Voronoi3DFull const& tess)
 {
-	std::vector<Vector3D> const& vertices = tess.GetFacePoints();
+	std::vector<Point3D> const& vertices = tess.GetFacePoints();
 	std::size_t const num_vertices = vertices.size();
 	std::size_t const num_cells = tess.GetPointNo();
 
@@ -82,7 +82,7 @@ void MadVoro::IO::write_vtu3d::write_vtu_3d(std::filesystem::path const& file_na
 		ugrid->InsertNextCell(VTK_POLYHEDRON, point_array_in_cell.size(), ptIds, Nfaces, faces->GetPointer(0));
 	}
 
-	Vector3D mid_vertice = 0.5 * (tess.GetBoxCoordinates().first + tess.GetBoxCoordinates().second);
+	Point3D mid_vertice = 0.5 * (tess.GetBoxCoordinates().first + tess.GetBoxCoordinates().second);
 	for(std::size_t p=0; p<num_vertices; ++p){
 		if(real_vertices.count(p) > 0)
 			points->SetPoint(p, vertices[p].x, vertices[p].y, vertices[p].z);
@@ -196,14 +196,14 @@ void write_vtu_3d_points(std::filesystem::path const& file_name,
 			std::vector<std::string> const& point_variable_names,
 			std::vector<std::vector<double>> const& point_variables,
 			std::vector<std::string> const& point_vectors_names,
-			std::vector<std::vector<Vector3D>> const& point_vectors,
+			std::vector<std::vector<Point3D>> const& point_vectors,
 			double const time,
 			std::size_t cycle,
-			Voronoi3D const& tess){
-	std::vector<Vector3D> mesh_points = tess.getMeshPoints();
+			Voronoi3DFull const& tess){
+	std::vector<Point3D> mesh_points = tess.getMeshPoints();
 	std::size_t const num_points = tess.GetPointNo();
 	mesh_points.resize(num_points);
-	std::vector<Vector3D> cm_points = tess.GetAllCM();
+	std::vector<Point3D> cm_points = tess.GetAllCM();
 	cm_points.resize(num_points);
 
 	#ifdef MADVORO_WITH_MPI
