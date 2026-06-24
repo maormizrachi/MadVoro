@@ -1,0 +1,26 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+find_dependency(Boost 1.74.0)
+
+set(_madvoro_with_mpi  @MADVORO_WITH_MPI@)
+set(_madvoro_with_hdf5 @MADVORO_WITH_HDF5@)
+set(_madvoro_with_vtk  @MADVORO_WITH_VTK@)
+set(_madvoro_with_vcl  @MADVORO_WITH_VCL@)
+
+if(_madvoro_with_mpi)
+  find_dependency(MPI 2.0 COMPONENTS CXX)
+endif()
+
+if(_madvoro_with_hdf5)
+  find_dependency(HDF5 1.8.0 COMPONENTS CXX HL)
+endif()
+
+if(_madvoro_with_vtk)
+  find_dependency(VTK 9.3.0)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/MadVoroTargets.cmake")
+
+check_required_components(MadVoro)
