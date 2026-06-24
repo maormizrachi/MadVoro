@@ -35,3 +35,28 @@ if(MADVORO_WITH_MPI)
     target_include_directories(example_parallel_output_vtk PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   endif()
 endif()
+
+# ---------- CTest registration ----------
+if(BUILD_TESTING)
+  if(NOT MADVORO_WITH_MPI)
+    add_test(NAME faces_information COMMAND example_faces_information)
+    add_test(NAME uniform_serial    COMMAND example_uniform_serial)
+  endif()
+
+  if(MADVORO_WITH_MPI)
+    set(_NP 4)
+    add_test(NAME uniform_parallel
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${_NP} $<TARGET_FILE:example_uniform_parallel>)
+
+    add_test(NAME pentagon
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${_NP} $<TARGET_FILE:example_pentagon>)
+
+    add_test(NAME pyramid
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${_NP} $<TARGET_FILE:example_pyramid>)
+
+    add_test(NAME fox
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${_NP} $<TARGET_FILE:example_fox>)
+    set_tests_properties(fox PROPERTIES
+      WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/fox")
+  endif()
+endif()

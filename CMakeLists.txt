@@ -53,7 +53,11 @@ endif()
 # ---------- Library ----------
 add_subdirectory(src)
 
-# ---------- Examples ----------
+# ---------- Examples & Tests ----------
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND MADVORO_BUILD_EXAMPLES)
+  include(CTest)
+endif()
+
 if(MADVORO_BUILD_EXAMPLES)
   add_subdirectory(examples)
 endif()

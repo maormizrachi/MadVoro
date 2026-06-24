@@ -51,7 +51,6 @@ MadVoro is templated on a user-provided 3D vector type. Your type must have publ
 ```cpp
 #include <madvoro/Voronoi3D.hpp>
 
-// Your own 3D vector type
 struct Vec3 {
     double x, y, z;
 };
@@ -72,7 +71,7 @@ int main() {
 
 ### CMake Options
 
-Set these **before** `add_subdirectory()` (or pass as `-D` flags):
+Set these **before** `add_subdirectory()` (or pass as `-D` flags when building standalone):
 
 | Option | Default | Description |
 |---|---|---|
@@ -117,11 +116,14 @@ target_link_libraries(your_target PRIVATE MadVoro::madvoro)
 You may need to pass `-DMadVoro_DIR=/path/to/install/lib/cmake/MadVoro` if the install location is non-standard.
 
 ## Usage
+
 ### API
-MadVoro offers a wide API by merely giving the list of points to build and the construction zone (usually a box used to clip the Voronoi cells), including a cell's vertices, faces, the list of a cell's neighbors, cell's center of mass and faces center of mass.
+
+MadVoro offers a wide API for constructing Voronoi diagrams by providing a list of points and a construction zone (usually a box used to clip the Voronoi cells). The API gives access to cell vertices, faces, neighbor lists, cell center-of-mass, face center-of-mass, volumes, and areas.
+
 The user API is based on two class templates:
-- `Voronoi3D<Vec3>`, representing a distributed three-dimensional Voronoi diagram.
-- `Face<Vec3>`, representing a face defined by vertices of your vector type.
+- `Voronoi3D<Vec3>` -- a distributed three-dimensional Voronoi diagram.
+- `Face<Vec3>` -- a face defined by vertices of your vector type.
 
 These templates accept any 3D vector type with public `double x, y, z` members. MadVoro does **not** define its own vector type — you use your project's existing one.
 
@@ -137,7 +139,8 @@ Your vector type must satisfy:
 No operators, no math functions, no inheritance required.
 
 ### Examples
-To build and run examples:
+
+To build the examples:
 ```bash
 cmake -B build -DMADVORO_BUILD_EXAMPLES=ON -DMADVORO_WITH_MPI=ON
 cmake --build build -j$(nproc)
@@ -146,29 +149,49 @@ cmake --build build -j$(nproc)
 The examples include a simple `Vector3D` type (in `examples/Vector3D.hpp`) as a reference implementation.
 
 #### Serial Examples
+
+> [!WARNING]
+> Serial examples can only be run when MadVoro is compiled **without** MPI support (`-DMADVORO_WITH_MPI=OFF`).
+
 ```bash
 ./build/examples/example_faces_information
 ./build/examples/example_uniform_serial
 ```
-> [!WARNING]
-> Serial examples should not be run when your project is compiled with MPI support.
 
-#### Parallel Examples
+#### Parallel Examples (MPI)
+
 ```bash
-mpirun -n 16 ./build/examples/example_pentagon
-mpirun -n 8  ./build/examples/example_uniform_parallel
+mpirun -n 4 ./build/examples/example_uniform_parallel
+mpirun -n 4 ./build/examples/example_pentagon
+mpirun -n 4 ./build/examples/example_pyramid
+cd examples/fox && mpirun -n 4 ../../build/examples/example_fox
 ```
 
+## Testing
+
+MadVoro uses CTest to run the examples as integration tests. To build and run:
+```bash
+cmake -B build -DMADVORO_BUILD_EXAMPLES=ON -DMADVORO_WITH_MPI=ON
+cmake --build build -j$(nproc)
+cd build && ctest --output-on-failure
+```
+
+When built **with** MPI, this runs the parallel examples (`uniform_parallel`, `pentagon`, `pyramid`, `fox`) using 4 MPI processes each.  
+When built **without** MPI, this runs the serial examples (`faces_information`, `uniform_serial`).
+
 ## Cleaning
+
 To start fresh, simply remove the build directory:
 ```bash
 rm -rf build
 ```
 
 ## Support and Contact
+
 If you run into problems or difficulties in compiling or running, or have any questions or suggestions, feel free to contact me by email: maor.mizrachi@mail.huji.ac.il.
 
 ## Reference
+
 If you wish to cite our work, we would appreciate it if you used the following BibTeX citation:
 ```
 @article{10.1093/rasti/rzaf039,
