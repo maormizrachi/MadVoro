@@ -1,49 +1,77 @@
 ---
-description: C++ coding style for this header-only library submodule
+description: C++ coding style for RICH and all submodules
 alwaysApply: true
 ---
 
-# Coding Style
+# C++ Coding Style
 
-## Language & Build
+## Braces
 
-- **C++17** strict. No C++20 features.
-- **Header-only**: all template implementations live in `.hpp` files (out-of-class definitions below the class declaration).
-- Short one-liner methods may be defined inline in the class body.
+- **Always use braces** for `if`, `for`, `while`, `else`, etc. No single-line bodies without `{`.
+- **Opening brace on a new line** (Allman style):
+
+```cpp
+// GOOD
+if(x > 0)
+{
+    doSomething();
+}
+
+// BAD
+if(x > 0) {
+    doSomething();
+}
+
+// BAD
+if(x > 0)
+    doSomething();
+```
+
+## Reference & Pointer Symbols
+
+`&`, `*`, and `&&` are adjacent to the **variable name**, not the type:
+
+```cpp
+// GOOD
+int &x = y;
+const Vector3D &point = getPoint();
+int *ptr = &val;
+T &&rval = std::move(obj);
+void foo(const std::vector<int> &data);
+
+// BAD
+int& x = y;
+int * ptr = &val;
+```
+
+## `auto`
+
+Do **not** use `auto` unless it is genuinely needed (e.g. complex iterator types, lambda captures). Spell out the type explicitly.
+
+## Line Length & Breaking
+
+- Lines can be long. Do **not** add line breaks for nothing.
+- Only break a line if it is **really** too long, and break at a reasonable location (after a comma, after an operator).
+- No blank lines for no reason.
 
 ## Naming
 
-- **Namespace**: all code lives under the library namespace (e.g. `MadCart::`, `MadVoro::`, `MeshDecomposer3D::`). Sub-namespaces for subsystems (e.g. `MadVoro::IO::`, `MadVoro::Exception::`).
-- **Classes/Structs**: `CamelCase` (e.g. `CartesianMesh3D`, `Face3D`).
-- **Methods**: `CamelCase` matching the RICH `Tessellation3D` API where applicable (e.g. `GetPointNo`, `GetCellFaces`, `GetMeshPoint`).
-- **Private members**: trailing underscore (`nx_`, `lower_`, `face_neighbors_`).
-- **Template parameter**: `PointT` for the 3D point type (must have `.x`, `.y`, `.z` public members).
+- **Variables**: `camelCase` (`cellIndex`, `faceNeighbors`, `lowerLeft`).
+- **Free functions**: start with a capital letter (`GetNeighbors`, `CalcFaceVelocity`).
+- **Methods**: try to start with a capital letter as well (`BuildGrid`, `SetBox`).
 
-## Formatting
+## Keywords & Parentheses
 
-- 4-space indentation, no tabs.
-- Opening brace on **same line** for functions and control flow; **next line** for class/struct/namespace bodies.
-- `const T &param` style (space before `&`).
-- Section dividers: `// ---- Section Name ----`.
+No space between a keyword and its parenthesis:
 
-## Header Guards & Includes
+```cpp
+// GOOD
+if(condition)
+for(size_t i = 0; i < n; ++i)
+while(running)
+switch(val)
 
-- Traditional `#ifndef` / `#define` guards, format: `LIBNAME_FILENAME_HPP` (e.g. `MADCART_CARTESIAN_MESH_3D_HPP`). No `#pragma once`.
-- Include order: (1) standard library (alphabetical), (2) third-party (boost, MPI), (3) local project headers.
-
-## Dependencies & Portability
-
-- Core engine must **not** include RICH-specific headers. Keep the library standalone-capable.
-- Use `boost::container::small_vector` and `flat_map` for topology containers (`face_vec`, `point_vec`, `AllPointsMap`), defined in `types.hpp`.
-- MPI-dependent code is guarded with `#ifdef RICH_MPI`.
-
-## Architecture
-
-- **Engine** (inside submodule): generic, templated on `PointT`, no RICH coupling.
-- **Adapter** (outside submodule, in RICH): thin wrapper inheriting `Tessellation3D`, delegates to engine. Lives at `source/3D/tessellation/<Name>.hpp`.
-- **Standalone build**: `CMakeLists.txt` detects `CMAKE_SOURCE_DIR == CMAKE_CURRENT_SOURCE_DIR`; provides `install_deps.sh` for external deps.
-
-## Error Handling
-
-- Library-specific exception class (e.g. `MadCartError`, `MadVoroException`) inheriting `std::runtime_error`.
-- Use `addEntry(name, value)` for structured error context.
+// BAD
+if (condition)
+for (size_t i = 0; i < n; ++i)
+```
