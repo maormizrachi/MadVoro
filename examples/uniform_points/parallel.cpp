@@ -4,8 +4,8 @@
 #include <boost/random.hpp>
 #include <boost/random/uniform_real_distribution.hpp>
 #include <mpi.h>
-#include <madvoro/Voronoi3D.hpp>
-#include "Vector3D.hpp"
+#include <Voronoi3D.hpp>
+#include "../Vector3D.hpp"
 
 #define DEFAULT_N 10000
 

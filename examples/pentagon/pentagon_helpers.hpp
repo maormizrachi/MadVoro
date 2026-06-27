@@ -5,8 +5,10 @@
 #include <random>
 #include <algorithm>
 #include <mpi.h>
-#include "Vector3D.hpp"
-#include <madvoro/Voronoi3D.hpp>
+#include "../Vector3D.hpp"
+#include <Voronoi3D.hpp>
+#include <elementary/PointOps.hpp>
+using namespace MadVoro::fallback;
 
 using Hyperplane3D = std::pair<Vector3D, double>;
 
@@ -15,9 +17,9 @@ std::vector<Hyperplane3D> GetHyperplanes(const std::vector<MadVoro::Face<Vector3
     std::vector<Hyperplane3D> hyperplanes;
     for(const auto &face : faces)
     {
-        Vector3D normal = Normalize(CrossProduct(face.vertices[1] - face.vertices[0], face.vertices[2] - face.vertices[1]));
-        double D = ScalarProduct(normal, face.vertices[0]);
-        if(ScalarProduct(normal, pointInPoly) > D)
+        Vector3D normal = normalize(CrossProduct(face.vertices[1] - face.vertices[0], face.vertices[2] - face.vertices[1]));
+        double D = ScalarProd(normal, face.vertices[0]);
+        if(ScalarProd(normal, pointInPoly) > D)
         {
             normal *= -1;
             D *= -1;
@@ -31,7 +33,7 @@ bool PointInPolygon(const std::vector<Hyperplane3D> &planes, const Vector3D &poi
 {
     for(const Hyperplane3D &plane : planes)
     {
-        if(ScalarProduct(plane.first, point) > plane.second)
+        if(ScalarProd(plane.first, point) > plane.second)
         {
             return false;
         }

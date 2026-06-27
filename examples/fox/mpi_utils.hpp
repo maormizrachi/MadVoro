@@ -5,8 +5,8 @@
 #include <mpi.h>
 #include <cassert>
 #include <algorithm>
-#include <madvoro/Voronoi3D.hpp>
-#include "Vector3D.hpp"
+#include <Voronoi3D.hpp>
+#include "../Vector3D.hpp"
 
 std::pair<std::vector<Vector3D>, std::vector<double>> SpreadPointsToProcessors(const std::vector<Vector3D> &points, const std::vector<double> &isInside)
 {

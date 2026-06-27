@@ -3,8 +3,8 @@
 #include <random>
 #include <algorithm>
 #include <mpi.h>
-#include <madvoro/Voronoi3D.hpp>
-#include "Vector3D.hpp"
+#include <Voronoi3D.hpp>
+#include "../Vector3D.hpp"
 #include "pentagon_helpers.hpp"
 
 using Face = MadVoro::Face<Vector3D>;

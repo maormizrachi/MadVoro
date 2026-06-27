@@ -2,8 +2,8 @@
 #include <mpi.h>
 #include <algorithm>
 #include <tuple>
-#include <madvoro/Voronoi3D.hpp>
-#include "Vector3D.hpp"
+#include <Voronoi3D.hpp>
+#include "../Vector3D.hpp"
 #include "mpi_utils.hpp"
 #include "read_points.hpp"
 

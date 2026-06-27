@@ -1,8 +1,8 @@
 #include <iostream>
 #include <chrono>
 #include <mpi.h>
-#include <madvoro/Voronoi3D.hpp>
-#include "Vector3D.hpp"
+#include <Voronoi3D.hpp>
+#include "../Vector3D.hpp"
 #include "read_points.hpp"
 
 int main(int argc, char *argv[])

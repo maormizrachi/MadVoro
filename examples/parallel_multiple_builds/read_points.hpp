@@ -6,7 +6,7 @@
 #include <algorithm>
 #include <fstream>
 #include <iostream>
-#include "Vector3D.hpp"
+#include "../Vector3D.hpp"
 
 inline std::vector<Vector3D> readPoints(const std::string &filename)
 {

@@ -1,5 +1,5 @@
-#include <madvoro/Voronoi3D.hpp>
-#include "Vector3D.hpp"
+#include <Voronoi3D.hpp>
+#include "../Vector3D.hpp"
 
 int main(int argc, char *argv[])
 {
