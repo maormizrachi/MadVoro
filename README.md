@@ -1,8 +1,11 @@
-# MadVoro
-
-**Massively distributed construction of 3D Voronoi diagrams.**
+# MadVoro - Massively distributed Construction of Voronoi Diagrams
+![C++ project](https://img.shields.io/badge/C++-2874a6)
+![Linux](https://img.shields.io/badge/Linux-0e6655)
+![macOS](https://img.shields.io/badge/macOS-27ae60)
 
 MadVoro provides the core 3D Voronoi tessellation engine used by the [RICH](https://github.com/maormizrachi/RICH) astrophysical simulation code. It can also be used as a standalone library in other projects.
+
+<img src="examples/fox/fox.png?raw=true" alt="An example for a fox mesh, in a 16 processors construction." width="500"/><img src="examples/pyramid/pyramid.png?raw=true" alt="An example for a mesh construction of a pyramidal space." width="300"/>
 
 ## Directory Structure
 

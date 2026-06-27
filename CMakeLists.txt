@@ -26,9 +26,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 # into deps/, then pass -DMADVORO_DEPS_DIR=deps to CMake.
 if(DEFINED MADVORO_DEPS_DIR)
   get_filename_component(_deps "${MADVORO_DEPS_DIR}" ABSOLUTE)
-  include_directories("${_deps}/mpi_utils")
-  include_directories("${_deps}/spatial_ds")
-  include_directories("${_deps}/MeshDecomposer3D")
+  include_directories("${_deps}")
 endif()
 
 # ---------- Required dependencies ----------
@@ -61,32 +59,16 @@ if(MADVORO_WITH_VCL)
 endif()
 
 # ---------- Library sources ----------
-set(MADVORO_SOURCES
-  Voronoi3D.cpp
-  delaunay/Delaunay3D.cpp
-  geometry/Intersections.cpp
-  utils/Predicates3D.cpp
-  utils/Predicates3D_old.cpp
-)
+set(MADVORO_SOURCES "")
 
 set(MADVORO_IO_SOURCES "")
 if(MADVORO_WITH_HDF5)
   list(APPEND MADVORO_IO_SOURCES
     io/hdf5/hdf5_utils.cpp
-    io/hdf5/WriteVoronoiHDF5.cpp
-    io/hdf5/WritePointsHDF5.cpp
-  )
-endif()
-if(MADVORO_WITH_VTK)
-  list(APPEND MADVORO_IO_SOURCES
-    io/vtk/write_vtu_3d.cpp
-    io/vtk/WriteVoronoiVTK.cpp
   )
 endif()
 
 list(APPEND MADVORO_SOURCES
-  io/simple_io.cpp
-  io/io3D.cpp
   ${MADVORO_IO_SOURCES}
   exception/MadVoroException.cpp
   exception/InvalidArgumentException.cpp
@@ -94,10 +76,19 @@ list(APPEND MADVORO_SOURCES
 )
 
 add_library(madvoro ${MADVORO_SOURCES})
+add_library(MadVoro::madvoro ALIAS madvoro)
+
 target_include_directories(madvoro PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
+
+# range_finders sub-submodule
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/range/finders")
+  target_include_directories(madvoro PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/range/finders>
+  )
+endif()
 target_link_libraries(madvoro PUBLIC Boost::boost OpenMP::OpenMP_CXX)
 
 if(MADVORO_WITH_MPI)
