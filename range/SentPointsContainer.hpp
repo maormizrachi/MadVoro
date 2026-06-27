@@ -6,7 +6,7 @@
 #include <vector>
 #include <unordered_set>
 #include <algorithm>
-#include "misc/universal_error.hpp"
+#include "../exception/MadVoroException.hpp"
 
 class SentPointsContainer
 {
@@ -115,9 +115,7 @@ private:
     {
         if(std::find(this->sentProc.begin(), this->sentProc.end(), rank) != this->sentProc.end())
         {
-            UniversalError eo("Rank is already in the SentPointsContainer");
-            eo.addEntry("Rank", rank);
-            throw eo;
+            throw MadVoro::Exception::MadVoroException("Rank is already in the SentPointsContainer");
         }
         this->sentProc.push_back(rank);
         this->sentData.emplace_back(std::vector<size_t>());

@@ -1,18 +1,28 @@
 #ifndef VORONOI_PAYLOAD_HPP
 #define VORONOI_PAYLOAD_HPP
 
-#include "3D/elementary/Vector3D.hpp"
+#ifdef RICH_MPI
 #include <mpi_utils/serialize/Serializable.hpp>
 #include <mpi_utils/serialize/Serializer.hpp>
+#endif
 
-struct VoronoiPayload : public Serializable
+namespace MadVoro {
+
+template <typename PointT>
+struct VoronoiPayload
+#ifdef RICH_MPI
+    : public Serializable
+#endif
 {
-    double radius;
-    Vector3D CM;
+    using coord_type = typename PointT::coord_type;
+
+    coord_type radius;
+    PointT CM;
 
     VoronoiPayload() : radius(0), CM() {}
-    VoronoiPayload(double r, const Vector3D &cm) : radius(r), CM(cm) {}
+    VoronoiPayload(coord_type r, const PointT &cm) : radius(r), CM(cm) {}
 
+#ifdef RICH_MPI
     size_t dump(Serializer *serializer) const override
     {
         size_t count = serializer->insert(radius);
@@ -27,6 +37,9 @@ struct VoronoiPayload : public Serializable
         bytes += CM.load(serializer, byteOffset + bytes);
         return bytes;
     }
+#endif // RICH_MPI
 };
+
+} // namespace MadVoro
 
 #endif // VORONOI_PAYLOAD_HPP

@@ -1,11 +1,12 @@
-/*! \file universal_error.hpp
+/*! \file MadVoroException.hpp
   \brief A class for storing error and debug information
   \author Almog Yalinewich, Maor Mizrachi
  */
-#ifndef UNIVERSAL_ERROR_HPP
-#define UNIVERSAL_ERROR_HPP 1
+#ifndef MADVORO_EXCEPTION_HPP
+#define MADVORO_EXCEPTION_HPP 1
 
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 #include <any>
@@ -25,26 +26,37 @@ namespace MadVoro
     private:
       struct PrintableAny
       {
-        using PrintFunction = void(*)(std::ostream&, const std::any&);
+        std::string str_;
+
+        template<typename T>
+        static void toStream(std::ostream &os, const T &v) { os << v; }
+
+        template<typename T>
+        static void toStream(std::ostream &os, const std::vector<T> &v)
+        {
+          os << "[";
+          for (size_t i = 0; i < v.size(); ++i) { if (i) os << ", "; toStream(os, v[i]); }
+          os << "]";
+        }
+
+        template<typename A, typename B>
+        static void toStream(std::ostream &os, const std::pair<A,B> &p)
+        {
+          os << "("; toStream(os, p.first); os << ", "; toStream(os, p.second); os << ")";
+        }
 
         template<typename T>
         inline PrintableAny(const T &value)
         {
-          this->value_ = value;
-          this->printFunction_ = [](std::ostream &os, const std::any &value)
-                                  {
-                                    os << std::any_cast<T>(value);
-                                  };
+          std::ostringstream oss;
+          toStream(oss, value);
+          str_ = oss.str();
         }
 
         inline friend std::ostream &operator<<(std::ostream &os, const PrintableAny &p)
         {
-          p.printFunction_(os, p.value_);
-          return os;
+          return os << p.str_;
         }
-
-        std::any value_;
-        PrintFunction printFunction_;
       };
 
     public:
@@ -91,4 +103,4 @@ namespace MadVoro
     void reportError(MadVoroException const& eo, std::ostream& os = std::cout);
   }
 }
-#endif // UNIVERSAL_ERROR_HPP
+#endif // MADVORO_EXCEPTION_HPP

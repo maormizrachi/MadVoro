@@ -18,8 +18,11 @@
 
 #include "RangeQueryData.h"
 
-typedef struct SmallRangeQueryData : public RangeQueryData
+template <typename PointT>
+struct SmallRangeQueryData : public RangeQueryData<PointT>
 {
+    using coord_type = typename PointT::coord_type;
+
     size_t maxPointsToGet;
 
     friend inline std::ostream &operator<<(std::ostream &stream, const SmallRangeQueryData &query)
@@ -32,11 +35,11 @@ typedef struct SmallRangeQueryData : public RangeQueryData
         return stream >> query.maxPointsToGet >> query.center >> query.radius;
     }
 
-    SmallRangeQueryData(size_t pointIdx, const Vector3D &center, typename Vector3D::coord_type radius, size_t maxPointsToGet):
-        RangeQueryData(pointIdx, center, radius), maxPointsToGet(maxPointsToGet)
+    SmallRangeQueryData(size_t pointIdx, const PointT &center, coord_type radius, size_t maxPointsToGet):
+        RangeQueryData<PointT>(pointIdx, center, radius), maxPointsToGet(maxPointsToGet)
     {};
 
-    SmallRangeQueryData(): RangeQueryData(), maxPointsToGet(0){};
+    SmallRangeQueryData(): RangeQueryData<PointT>(), maxPointsToGet(0){};
     
     #ifdef RICH_MPI
         force_inline size_t dump(Serializer *serializer) const override
@@ -59,50 +62,50 @@ typedef struct SmallRangeQueryData : public RangeQueryData
             return bytes;
         }
     #endif // RICH_MPI
-
-} SmallRangeQueryData;
+};
 
 /**
  * The range agent is responsible for running batches of range queries. A batch is a collection of queries, and a range query is an instance of the `SmallRangeQueryData` class, containing a point and a requested radius.
  * The range agent switches between roles - sending queries, receiving answers, and answering for incoming queries. It also supports duplications removal, and returns the results rearranged by processes (what are the points that were received from each one, and what points I sent to each one).
  * In order to answer for incoming requests, a range finder is required. A range finder is an object which holds a list of points, and can answer for range queries.
 */
+template <typename PointT>
 class SmallRangeAgent
 {
+    using coord_type = typename PointT::coord_type;
+
 private:
     class SmallRangeAnswerAgent
         #ifdef RICH_MPI
-            : public AnswerAgent<SmallRangeQueryData, Vector3D>
+            : public AnswerAgent<SmallRangeQueryData<PointT>, PointT>
         #endif // RICH_MPI
     {
         friend class RangeAgent;
 
     public:
         #ifdef RICH_MPI
-            SmallRangeAnswerAgent(const RangeFinder<Vector3D> *rangeFinder, SentPointsContainer &pointsContainer, const MPI_Comm &comm = MPI_COMM_WORLD): rangeFinder(rangeFinder), pointsContainer(pointsContainer)
+            SmallRangeAnswerAgent(const RangeFinder<PointT> *rangeFinder, SentPointsContainer &pointsContainer, const MPI_Comm &comm = MPI_COMM_WORLD): rangeFinder(rangeFinder), pointsContainer(pointsContainer)
         #else // RICH_MPI
-            SmallRangeAnswerAgent(const RangeFinder<Vector3D> *rangeFinder): rangeFinder(rangeFinder)
+            SmallRangeAnswerAgent(const RangeFinder<PointT> *rangeFinder): rangeFinder(rangeFinder)
         #endif // RICH_MPI
         {}
 
-        std::vector<size_t> selfAnswer(const SmallRangeQueryData &query, std::unordered_set<size_t> &ignore)
+        std::vector<size_t> selfAnswer(const SmallRangeQueryData<PointT> &query, std::unordered_set<size_t> &ignore)
         {
-            // a small query, bring the requested number of points
-            std::vector<size_t> indicesResult = this->rangeFinder->range(Vector3D(query.center.x, query.center.y, query.center.z), query.radius, query.maxPointsToGet, ignore);
+            std::vector<size_t> indicesResult = this->rangeFinder->range(PointT(query.center.x, query.center.y, query.center.z), query.radius, query.maxPointsToGet, ignore);
             ignore.insert(indicesResult.begin(), indicesResult.end());
             return indicesResult;
         }
 
         #ifdef RICH_MPI
-            std::vector<Vector3D> answer(const SmallRangeQueryData &query, int _rank) override
+            std::vector<PointT> answer(const SmallRangeQueryData<PointT> &query, int _rank) override
             {
-                std::vector<Vector3D> result;
+                std::vector<PointT> result;
                 std::vector<size_t> indicesResult;
 
                 const SentPointsContainer::PointsSet &ignore = this->pointsContainer.getSentDataSetRank(_rank);
 
-                // a small query, bring the requested number of points
-                indicesResult = this->rangeFinder->range(Vector3D(query.center.x, query.center.y, query.center.z), query.radius, query.maxPointsToGet, ignore);
+                indicesResult = this->rangeFinder->range(PointT(query.center.x, query.center.y, query.center.z), query.radius, query.maxPointsToGet, ignore);
                 indicesResult = this->pointsContainer.addPointsAsSent(_rank, indicesResult);
 
                 result.reserve(indicesResult.size());
@@ -115,20 +118,20 @@ private:
         #endif // RICH_MPI
 
     private:
-        const RangeFinder<Vector3D> *rangeFinder;
+        const RangeFinder<PointT> *rangeFinder;
         #ifdef RICH_MPI
             SentPointsContainer &pointsContainer;
         #endif // RICH_MPI
     };
     
     #ifdef RICH_MPI
-        class SmallRangeTalkAgent : public TalkAgent<SmallRangeQueryData>
+        class SmallRangeTalkAgent : public TalkAgent<SmallRangeQueryData<PointT>>
         {
         public:
             template<typename K, typename V>
             using _map = boost::container::flat_map<K, V>;
 
-            SmallRangeTalkAgent(const std::shared_ptr<EnvironmentAgent<Vector3D>> envAgent,         
+            SmallRangeTalkAgent(const std::shared_ptr<EnvironmentAgent<PointT>> envAgent,         
                             #ifdef RICH_MPI
                                 const MPI_Comm &comm = MPI_COMM_WORLD
                             #endif // RICH_MPI
@@ -143,10 +146,9 @@ private:
                 #endif // RICH_MPI
             };
 
-            inline EnvironmentAgent<Vector3D>::RanksSet getTalkList(const SmallRangeQueryData &query) const override
+            inline typename EnvironmentAgent<PointT>::RanksSet getTalkList(const SmallRangeQueryData<PointT> &query) const override
             {
-                // check if has 'smartAgent' (an agent that can caluclate distances of ranks as well)
-                EnvironmentAgent<Vector3D>::RanksSet intersectingRanks = this->envAgent->getIntersectingRanks(Vector3D(query.center.x, query.center.y, query.center.z), query.radius);
+                typename EnvironmentAgent<PointT>::RanksSet intersectingRanks = this->envAgent->getIntersectingRanks(PointT(query.center.x, query.center.y, query.center.z), query.radius);
                 if(intersectingRanks.empty())
                 {
                     throw UniversalError("In range talk agent, should not reach here: the intersecting ranks list should at least contain the rank itself");
@@ -155,7 +157,7 @@ private:
             }
 
         private:
-            const std::shared_ptr<EnvironmentAgent<Vector3D>> envAgent;
+            const std::shared_ptr<EnvironmentAgent<PointT>> envAgent;
             int rank, size;
         };
     #endif // RICH_MPI
@@ -165,16 +167,16 @@ public:
     using _set = std::unordered_set<T>;
 
     #ifdef RICH_MPI
-        SmallRangeAgent(const RangeFinder<Vector3D> *rangeFinder, const std::shared_ptr<EnvironmentAgent<Vector3D>> &envAgent, SentPointsContainer &pointsContainer, const MPI_Comm &comm = MPI_COMM_WORLD): pointsContainer(pointsContainer)
+        SmallRangeAgent(const RangeFinder<PointT> *rangeFinder, const std::shared_ptr<EnvironmentAgent<PointT>> &envAgent, SentPointsContainer &pointsContainer, const MPI_Comm &comm = MPI_COMM_WORLD): pointsContainer(pointsContainer)
     #else // RICH_MPI
-        SmallRangeAgent(const RangeFinder<Vector3D> *rangeFinder)
+        SmallRangeAgent(const RangeFinder<PointT> *rangeFinder)
     #endif // RICH_MPI
     {
         #ifdef RICH_MPI
             this->ansAgent = new SmallRangeAnswerAgent(rangeFinder, pointsContainer, comm);
             this->talkAgent = new SmallRangeTalkAgent(envAgent, comm);
-            this->queryAgent = new BuffersManagerQueryAgent<SmallRangeQueryData, Vector3D>(this->talkAgent, this->ansAgent, false /* dont send messages to self */, comm);
-            // this->queryAgent = new BusyWaitQueryAgent<SmallRangeQueryData, Vector3D>(this->talkAgent, this->ansAgent, false /* dont send messages to self */, comm);
+            this->queryAgent = new BuffersManagerQueryAgent<SmallRangeQueryData<PointT>, PointT>(this->talkAgent, this->ansAgent, false /* dont send messages to self */, comm);
+            // this->queryAgent = new BusyWaitQueryAgent<SmallRangeQueryData<PointT>, PointT>(this->talkAgent, this->ansAgent, false /* dont send messages to self */, comm);
         #else // RICH_MPI
             this->ansAgent = new SmallRangeAnswerAgent(rangeFinder);
         #endif // RICH_MPI
@@ -189,10 +191,10 @@ public:
         delete this->ansAgent;
     }
 
-    std::vector<std::vector<size_t>> selfBatchAnswer(const std::vector<SmallRangeQueryData> &smallQueriesBatch, _set<size_t> &ignore)
+    std::vector<std::vector<size_t>> selfBatchAnswer(const std::vector<SmallRangeQueryData<PointT>> &smallQueriesBatch, _set<size_t> &ignore)
     {
         std::vector<std::vector<size_t>> result;
-        for(const SmallRangeQueryData &query : smallQueriesBatch)
+        for(const SmallRangeQueryData<PointT> &query : smallQueriesBatch)
         {
             result.emplace_back(this->ansAgent->selfAnswer(query, ignore));
         }
@@ -200,7 +202,7 @@ public:
     }
 
     #ifdef RICH_MPI
-        inline QueryBatchInfo<SmallRangeQueryData, Vector3D> runBatch(const std::vector<SmallRangeQueryData> &queries)
+        inline QueryBatchInfo<SmallRangeQueryData<PointT>, PointT> runBatch(const std::vector<SmallRangeQueryData<PointT>> &queries)
         {
             return this->queryAgent->runBatch(queries);
         };
@@ -216,7 +218,7 @@ public:
 private:
     SmallRangeAnswerAgent *ansAgent;
     #ifdef RICH_MPI
-        QueryAgent<SmallRangeQueryData, Vector3D> *queryAgent;
+        QueryAgent<SmallRangeQueryData<PointT>, PointT> *queryAgent;
         SmallRangeTalkAgent *talkAgent;
         SentPointsContainer &pointsContainer;
     #endif // RICH_MPI

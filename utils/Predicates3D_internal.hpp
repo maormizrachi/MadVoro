@@ -1,7 +1,10 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <math.h>
-#include "Predicates3D.hpp"
+#ifndef PREDICATES3D_INTERNAL_HPP
+#define PREDICATES3D_INTERNAL_HPP
+
+#include <cstdio>
+#include <cstdlib>
+#include <cmath>
+#include <array>
 
 #ifndef ATTRIBUTE_NO_SANITIZE_ADDRESS
 #if defined(__has_attribute) && __has_attribute(no_sanitize_address)
@@ -10,6 +13,8 @@
 #define ATTRIBUTE_NO_SANITIZE_ADDRESS
 #endif
 #endif
+
+namespace MadVoro {
 
 namespace {
 
@@ -470,8 +475,9 @@ namespace
 		return Q;
 	}
 
-ATTRIBUTE_NO_SANITIZE_ADDRESS
-	double orient3dadapt(std::array<Vector3D, 4> const& points, double permanent)
+	template <typename PointT>
+	ATTRIBUTE_NO_SANITIZE_ADDRESS
+	double orient3dadapt(std::array<PointT, 4> const& points, double permanent)
 	{
 		double pa[3], pb[3], pc[3], pd[3];
 		pa[0] = points[0].x;
@@ -1467,70 +1473,37 @@ ATTRIBUTE_NO_SANITIZE_ADDRESS
 
 } // end outer anonymous namespace
 
-double orient3d(std::array<Vector3D, 4> const& points)
-{
-	double adx, bdx, cdx, ady, bdy, cdy, adz, bdz, cdz;
-	double bdxcdy, cdxbdy, cdxady, adxcdy, adxbdy, bdxady;
-	double det;
-	double permanent, errbound;
+} // namespace MadVoro
 
-	adx = points[0].x - points[3].x;
-	bdx = points[1].x - points[3].x;
-	cdx = points[2].x - points[3].x;
-	ady = points[0].y - points[3].y;
-	bdy = points[1].y - points[3].y;
-	cdy = points[2].y - points[3].y;
-	adz = points[0].z - points[3].z;
-	bdz = points[1].z - points[3].z;
-	cdz = points[2].z - points[3].z;
+#undef Absolute
+#undef Fast_Two_Sum_Tail
+#undef Fast_Two_Sum
+#undef Fast_Two_Diff_Tail
+#undef Fast_Two_Diff
+#undef Two_Sum_Tail
+#undef Two_Sum
+#undef Two_Diff_Tail
+#undef Two_Diff
+#undef Split
+#undef Two_Product_Tail
+#undef Two_Product
+#undef Two_Product_Presplit
+#undef Two_Product_2Presplit
+#undef Square_Tail
+#undef Square
+#undef Two_One_Sum
+#undef Two_One_Diff
+#undef Two_Two_Sum
+#undef Two_Two_Diff
+#undef Four_One_Sum
+#undef Four_Two_Sum
+#undef Four_Four_Sum
+#undef Eight_One_Sum
+#undef Eight_Two_Sum
+#undef Eight_Four_Sum
+#undef Two_One_Product
+#undef Four_One_Product
+#undef Two_Two_Product
+#undef Two_Square
 
-	bdxcdy = bdx * cdy;
-	cdxbdy = cdx * bdy;
-
-	cdxady = cdx * ady;
-	adxcdy = adx * cdy;
-
-	adxbdy = adx * bdy;
-	bdxady = bdx * ady;
-
-	det = adz * (bdxcdy - cdxbdy)
-		+ bdz * (cdxady - adxcdy)
-		+ cdz * (adxbdy - bdxady);
-
-	permanent = (Absolute(bdxcdy) + Absolute(cdxbdy)) * Absolute(adz)
-		+ (Absolute(cdxady) + Absolute(adxcdy)) * Absolute(bdz)
-		+ (Absolute(adxbdy) + Absolute(bdxady)) * Absolute(cdz);
-	errbound = o3derrboundA * permanent;
-	if ((det > errbound) || (-det > errbound)) {
-		return det;
-	}
-
-	return orient3dadapt(points,permanent);
-}
-
-/*double orient2d(boost::array<Vector3D, 3> const& points)
-{
-	double pa[2], pb[2], pc[2];
-
-}*/
-
-double insphere(std::array<Vector3D, 5> const& points)
-{
-	double pa[3], pb[3], pc[3], pd[3],pe[3];
-	pa[0] = points[0].x;
-	pa[1] = points[0].y;
-	pa[2] = points[0].z;
-	pb[0] = points[1].x;
-	pb[1] = points[1].y;
-	pb[2] = points[1].z;
-	pc[0] = points[2].x;
-	pc[1] = points[2].y;
-	pc[2] = points[2].z;
-	pd[0] = points[3].x;
-	pd[1] = points[3].y;
-	pd[2] = points[3].z;
-	pe[0] = points[4].x;
-	pe[1] = points[4].y;
-	pe[2] = points[4].z;
-	return insphere(pa, pb, pc, pd, pe);
-}
+#endif // PREDICATES3D_INTERNAL_HPP
