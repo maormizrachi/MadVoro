@@ -3,15 +3,15 @@
 
 #include <cstddef>
 
-#ifdef RICH_MPI
+#ifdef MADVORO_WITH_MPI
     #include <mpi_utils/serialize/Serializer.hpp>
-#endif // RICH_MPI
+#endif // MADVORO_WITH_MPI
 
 template <typename PointT>
 struct RangeQueryData 
-#ifdef RICH_MPI
+#ifdef MADVORO_WITH_MPI
     : public Serializable
-#endif // RICH_MPI
+#endif // MADVORO_WITH_MPI
 {
     using coord_type = typename PointT::coord_type;
 
@@ -25,7 +25,7 @@ struct RangeQueryData
 
     RangeQueryData(): pointIdx(0), center(PointT()), radius(0){};
     
-    #ifdef RICH_MPI
+    #ifdef MADVORO_WITH_MPI
         inline size_t dump(Serializer *serializer) const override
         {
             size_t bytes = 0;
@@ -43,7 +43,7 @@ struct RangeQueryData
             bytes += serializer->extract(this->radius, byteOffset + bytes);
             return bytes;
         }
-    #endif // RICH_MPI
+    #endif // MADVORO_WITH_MPI
 };
 
 #endif // RANGE_QUERY_DATA

@@ -1,7 +1,7 @@
 #ifndef VORONOI_PAYLOAD_HPP
 #define VORONOI_PAYLOAD_HPP
 
-#ifdef RICH_MPI
+#ifdef MADVORO_WITH_MPI
 #include <mpi_utils/serialize/Serializable.hpp>
 #include <mpi_utils/serialize/Serializer.hpp>
 #endif
@@ -10,7 +10,7 @@ namespace MadVoro {
 
 template <typename PointT>
 struct VoronoiPayload
-#ifdef RICH_MPI
+#ifdef MADVORO_WITH_MPI
     : public Serializable
 #endif
 {
@@ -22,7 +22,7 @@ struct VoronoiPayload
     VoronoiPayload() : radius(0), CM() {}
     VoronoiPayload(coord_type r, const PointT &cm) : radius(r), CM(cm) {}
 
-#ifdef RICH_MPI
+#ifdef MADVORO_WITH_MPI
     size_t dump(Serializer *serializer) const override
     {
         size_t count = serializer->insert(radius);
@@ -37,7 +37,7 @@ struct VoronoiPayload
         bytes += CM.load(serializer, byteOffset + bytes);
         return bytes;
     }
-#endif // RICH_MPI
+#endif // MADVORO_WITH_MPI
 };
 
 } // namespace MadVoro

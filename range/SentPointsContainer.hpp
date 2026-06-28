@@ -1,7 +1,7 @@
 #ifndef SENT_CONTAINER_HPP
 #define SENT_CONTAINER_HPP
 
-#ifdef RICH_MPI
+#ifdef MADVORO_WITH_MPI
 
 #include <vector>
 #include <unordered_set>
@@ -123,6 +123,6 @@ private:
     }
 };
 
-#endif // RICH_MPI
+#endif // MADVORO_WITH_MPI
 
 #endif // SENT_CONTAINER_HPP

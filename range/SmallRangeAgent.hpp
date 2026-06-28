@@ -5,7 +5,7 @@
 #include "finders/utils/IndexedVector.hpp"
 #include <MeshDecomposer3D/environment/EnvironmentAgent.hpp>
 #include <MeshDecomposer3D/environment/hilbert/HilbertTreeEnvAgent.hpp>
-#ifdef RICH_MPI
+#ifdef MADVORO_WITH_MPI
     #include <mpi_utils/queryAgent/BusyWaitQueryAgent.hpp>
     #include <mpi_utils/queryAgent/ThreePhasesQueryAgent.hpp>
     #include <mpi_utils/queryAgent/WaitUntilAnsweredQueryAgent.hpp>
@@ -14,7 +14,7 @@
     #include <MeshDecomposer3D/environment/hilbert/DistributedOctEnvAgent.hpp> 
     #include <mpi_utils/serialize/Serializer.hpp>
     #include "SentPointsContainer.hpp"
-#endif // RICH_MPI
+#endif // MADVORO_WITH_MPI
 
 #include "RangeQueryData.h"
 
@@ -41,7 +41,7 @@ struct SmallRangeQueryData : public RangeQueryData<PointT>
 
     SmallRangeQueryData(): RangeQueryData<PointT>(), maxPointsToGet(0){};
     
-    #ifdef RICH_MPI
+    #ifdef MADVORO_WITH_MPI
         force_inline size_t dump(Serializer *serializer) const override
         {
             size_t bytes = 0;
@@ -61,7 +61,7 @@ struct SmallRangeQueryData : public RangeQueryData<PointT>
             bytes += serializer->extract(this->maxPointsToGet, byteOffset + bytes);
             return bytes;
         }
-    #endif // RICH_MPI
+    #endif // MADVORO_WITH_MPI
 };
 
 /**
@@ -76,18 +76,18 @@ class SmallRangeAgent
 
 private:
     class SmallRangeAnswerAgent
-        #ifdef RICH_MPI
+        #ifdef MADVORO_WITH_MPI
             : public AnswerAgent<SmallRangeQueryData<PointT>, PointT>
-        #endif // RICH_MPI
+        #endif // MADVORO_WITH_MPI
     {
         friend class RangeAgent;
 
     public:
-        #ifdef RICH_MPI
+        #ifdef MADVORO_WITH_MPI
             SmallRangeAnswerAgent(const RangeFinder<PointT> *rangeFinder, SentPointsContainer &pointsContainer, const MPI_Comm &comm = MPI_COMM_WORLD): rangeFinder(rangeFinder), pointsContainer(pointsContainer)
-        #else // RICH_MPI
+        #else // MADVORO_WITH_MPI
             SmallRangeAnswerAgent(const RangeFinder<PointT> *rangeFinder): rangeFinder(rangeFinder)
-        #endif // RICH_MPI
+        #endif // MADVORO_WITH_MPI
         {}
 
         std::vector<size_t> selfAnswer(const SmallRangeQueryData<PointT> &query, std::unordered_set<size_t> &ignore)
@@ -97,7 +97,7 @@ private:
             return indicesResult;
         }
 
-        #ifdef RICH_MPI
+        #ifdef MADVORO_WITH_MPI
             std::vector<PointT> answer(const SmallRangeQueryData<PointT> &query, int _rank) override
             {
                 std::vector<PointT> result;
@@ -115,16 +115,16 @@ private:
                 }
                 return result;
             }
-        #endif // RICH_MPI
+        #endif // MADVORO_WITH_MPI
 
     private:
         const RangeFinder<PointT> *rangeFinder;
-        #ifdef RICH_MPI
+        #ifdef MADVORO_WITH_MPI
             SentPointsContainer &pointsContainer;
-        #endif // RICH_MPI
+        #endif // MADVORO_WITH_MPI
     };
     
-    #ifdef RICH_MPI
+    #ifdef MADVORO_WITH_MPI
         class SmallRangeTalkAgent : public TalkAgent<SmallRangeQueryData<PointT>>
         {
         public:
@@ -132,18 +132,18 @@ private:
             using _map = boost::container::flat_map<K, V>;
 
             SmallRangeTalkAgent(const std::shared_ptr<EnvironmentAgent<PointT>> envAgent,         
-                            #ifdef RICH_MPI
+                            #ifdef MADVORO_WITH_MPI
                                 const MPI_Comm &comm = MPI_COMM_WORLD
-                            #endif // RICH_MPI
+                            #endif // MADVORO_WITH_MPI
                             ): envAgent(envAgent)
             {
-                #ifdef RICH_MPI
+                #ifdef MADVORO_WITH_MPI
                     MPI_Comm_rank(comm, &this->rank);
                     MPI_Comm_size(comm, &this->size);
                 #else
                     this->rank = 0;
                     this->size = 1;
-                #endif // RICH_MPI
+                #endif // MADVORO_WITH_MPI
             };
 
             inline typename EnvironmentAgent<PointT>::RanksSet getTalkList(const SmallRangeQueryData<PointT> &query) const override
@@ -160,34 +160,34 @@ private:
             const std::shared_ptr<EnvironmentAgent<PointT>> envAgent;
             int rank, size;
         };
-    #endif // RICH_MPI
+    #endif // MADVORO_WITH_MPI
 
 public:
     template<typename T>
     using _set = std::unordered_set<T>;
 
-    #ifdef RICH_MPI
+    #ifdef MADVORO_WITH_MPI
         SmallRangeAgent(const RangeFinder<PointT> *rangeFinder, const std::shared_ptr<EnvironmentAgent<PointT>> &envAgent, SentPointsContainer &pointsContainer, const MPI_Comm &comm = MPI_COMM_WORLD): pointsContainer(pointsContainer)
-    #else // RICH_MPI
+    #else // MADVORO_WITH_MPI
         SmallRangeAgent(const RangeFinder<PointT> *rangeFinder)
-    #endif // RICH_MPI
+    #endif // MADVORO_WITH_MPI
     {
-        #ifdef RICH_MPI
+        #ifdef MADVORO_WITH_MPI
             this->ansAgent = new SmallRangeAnswerAgent(rangeFinder, pointsContainer, comm);
             this->talkAgent = new SmallRangeTalkAgent(envAgent, comm);
             this->queryAgent = new BuffersManagerQueryAgent<SmallRangeQueryData<PointT>, PointT>(this->talkAgent, this->ansAgent, false /* dont send messages to self */, comm);
             // this->queryAgent = new BusyWaitQueryAgent<SmallRangeQueryData<PointT>, PointT>(this->talkAgent, this->ansAgent, false /* dont send messages to self */, comm);
-        #else // RICH_MPI
+        #else // MADVORO_WITH_MPI
             this->ansAgent = new SmallRangeAnswerAgent(rangeFinder);
-        #endif // RICH_MPI
+        #endif // MADVORO_WITH_MPI
     }
 
     ~SmallRangeAgent()
     {
-        #ifdef RICH_MPI
+        #ifdef MADVORO_WITH_MPI
             delete this->queryAgent;
             delete this->talkAgent;
-        #endif // RICH_MPI
+        #endif // MADVORO_WITH_MPI
         delete this->ansAgent;
     }
 
@@ -201,27 +201,27 @@ public:
         return result;
     }
 
-    #ifdef RICH_MPI
+    #ifdef MADVORO_WITH_MPI
         inline QueryBatchInfo<SmallRangeQueryData<PointT>, PointT> runBatch(const std::vector<SmallRangeQueryData<PointT>> &queries)
         {
             return this->queryAgent->runBatch(queries);
         };
-    #endif // RICH_MPI
+    #endif // MADVORO_WITH_MPI
 
-    #ifdef RICH_MPI
+    #ifdef MADVORO_WITH_MPI
         inline std::vector<std::vector<std::size_t>> &getSentPoints(){return this->pointsContainer.getSentData();};
         inline std::vector<std::vector<std::size_t>> &getRecvPoints(){return this->queryAgent->getRecvData();};
         inline std::vector<int> &getSentProc(){return this->pointsContainer.getSentProc();};
         inline std::vector<int> &getRecvProc(){return this->queryAgent->getRecvProc();};
-    #endif // RICH_MPI
+    #endif // MADVORO_WITH_MPI
 
 private:
     SmallRangeAnswerAgent *ansAgent;
-    #ifdef RICH_MPI
+    #ifdef MADVORO_WITH_MPI
         QueryAgent<SmallRangeQueryData<PointT>, PointT> *queryAgent;
         SmallRangeTalkAgent *talkAgent;
         SentPointsContainer &pointsContainer;
-    #endif // RICH_MPI
+    #endif // MADVORO_WITH_MPI
 };
 
 #endif // SMALL_RANGE_AGENT_HPP

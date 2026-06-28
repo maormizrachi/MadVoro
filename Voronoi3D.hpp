@@ -34,9 +34,9 @@
   #include <vectorclass.h>
 #endif // USE_VCL_VECTORIZATION
 
-#ifdef RICH_MPI
+#ifdef MADVORO_WITH_MPI
   #include <mpi.h>
-#endif // RICH_MPI
+#endif // MADVORO_WITH_MPI
 
 #include <optional>
 #include "VoronoiPayload.hpp"
@@ -53,7 +53,7 @@
 #include "exception/MadVoroException.hpp"
 #include "elementary/PointOps.hpp"
 
-#ifdef RICH_MPI
+#ifdef MADVORO_WITH_MPI
 #include <mpi_utils/mpi_exchange.hpp>
 #include <MeshDecomposer3D/kernels/Rectangle.hpp>
 #include <MeshDecomposer3D/kernels/SameRectangle.hpp>
@@ -66,13 +66,13 @@
 #include "range/finders/KDTreeFinder.hpp"
 #include "range/finders/GroupRangeTreeFinder.hpp"
 
-#ifdef RICH_MPI
+#ifdef MADVORO_WITH_MPI
   // env agents
   #include <MeshDecomposer3D/environment/hilbert/DistributedOctEnvAgent.hpp>
   #include <MeshDecomposer3D/environment/hilbert/HilbertTreeEnvAgent.hpp>
-#endif // RICH_MPI
+#endif // MADVORO_WITH_MPI
 
-#ifdef RICH_MPI
+#ifdef MADVORO_WITH_MPI
   #include <MeshDecomposer3D/points_manager/HilbertPointsManager.hpp>
   #define INITIAL_SENDRECV_TAG 1105
 #endif 
@@ -171,11 +171,11 @@ private:
                               boost::container::flat_map<size_t, size_t> &numOfResultsForSmallPoints,
                               std::unordered_set<size_t> &selfIgnorePoints);
     
-  #ifdef RICH_MPI
+  #ifdef MADVORO_WITH_MPI
     void BringGhostPointsToBuild(const MPI_Comm &comm);
   #else
     void BringGhostPointsToBuild();
-  #endif // RICH_MPI
+  #endif // MADVORO_WITH_MPI
 
   std::pair<std::vector<SmallRangeQueryData<PointT>>, std::vector<BigRangeQueryData<PointT>>> CreateBatches(boost::container::flat_set<size_t> &smallPoints, boost::container::flat_set<size_t> &largePoints, const boost::container::flat_map<size_t, size_t> &firstLargeIteration, std::vector<double> &currentRadiuses, size_t iterations);
 
@@ -195,7 +195,7 @@ private:
 
   void UpdatePointsTree(const std::vector<PointT> &activePoints);
   
-  #ifdef RICH_MPI
+  #ifdef MADVORO_WITH_MPI
     std::vector<PointT> PrepareToBuildParallel(const std::vector<PointT> &allPoints, const std::vector<double> &allWeights, const std::vector<size_t> &indicesToBuild, bool suppressRebalancing, bool suppressExchange);
     void FilterRealGhostPoints();
     void UpdateDuplicatedPoints(const std::vector<int> &sentProc, const std::vector<std::vector<size_t>> &sentPoints);
@@ -207,7 +207,7 @@ private:
                                       BigRangeAgent<PointT> &bigRangeAgent, SmallRangeAgent<PointT> &smallRangeAgent,
                                       boost::container::flat_map<size_t, size_t> &numOfResultsForBigPoints,
                                       boost::container::flat_map<size_t, size_t> &numOfResultsForSmallPoints);
-  #endif // RICH_MPI
+  #endif // MADVORO_WITH_MPI
 
   Delaunay3D<PointT> del_;
   //vector<vector<std::size_t> > PointTetras_; // The tetras containing each point
@@ -225,7 +225,7 @@ private:
   vector<double> volume_; // volumes of each one of the tetrahedra
   vector<double> area_; // surface area of each one of the tetrahedra
   
-  #ifdef RICH_MPI
+  #ifdef MADVORO_WITH_MPI
   vector<int> sentprocs_;
   vector<vector<std::size_t>> sentpoints_; // if rank `i` is inside index `j` in `sentprocs_`, then the points in sentpoints_[j] are the points I sent to rank `i` in the initial points exchange in build
   vector<int> duplicatedprocs_; 
@@ -234,7 +234,7 @@ private:
   vector<vector<std::size_t>> real_duplicated_points; // indices of points which are a real ghost points
   vector<vector<std::size_t>> Nghost_; // if rank `i` is inside index `j` in `duplicatedprocs_`, then Nghost_[j] includes all the points in my delaunay, which are belongs, originally, to i
   vector<std::size_t> self_index_; // indexes of the points which are truely mine (inside the points list)
-  #endif // RICH_MPI
+  #endif // MADVORO_WITH_MPI
 
   Voronoi3D();
 
@@ -248,10 +248,10 @@ private:
 
   std::shared_ptr<OctTree<IVec>> myPointsTree;
   std::shared_ptr<OctTree<IVec>> allMyPointsTree;
-  #ifdef RICH_MPI
+  #ifdef MADVORO_WITH_MPI
     std::shared_ptr<PointsManager<PointT, VoronoiPayload<PointT>>> pointsManager;
     std::shared_ptr<const Kernelization3D::IndexingKernel3D<PointT>> indexingToSave = std::shared_ptr<const Kernelization3D::IndexingKernel3D<PointT>>();
-  #endif // RICH_MPI
+  #endif // MADVORO_WITH_MPI
 
   std::shared_ptr<RangeFinder<PointT>> rangeFinder;
   std::vector<PointT> allMyPoints;
@@ -268,7 +268,7 @@ private:
 
 public:
 
-  #ifdef RICH_MPI
+  #ifdef MADVORO_WITH_MPI
     const std::vector<double> &GetPointsBuildWeights() const;
     
     const std::shared_ptr<EnvironmentAgent<PointT>> GetEnvironmentAgent() const;
@@ -279,15 +279,15 @@ public:
     std::shared_ptr<const Kernelization3D::IndexingKernel3D<PointT>> GetKernel() const;
     
     void SetBox(PointT const &ll, PointT const &ur, const std::shared_ptr<const Kernelization3D::IndexingKernel3D<PointT>> &newIndexing);
-  #endif // RICH_MPI
+  #endif // MADVORO_WITH_MPI
 
-  #ifdef RICH_MPI
+  #ifdef MADVORO_WITH_MPI
     vector<int> &GetSentProcs(void);
 
     vector<vector<size_t>> &GetSentPoints(void);
 
     vector<size_t> &GetSelfIndex(void);
-  #endif // RICH_MPI
+  #endif // MADVORO_WITH_MPI
 
   vector<PointT> &GetAllFaceCM(void);
 
@@ -323,7 +323,7 @@ public:
 
   bool IsPointInCell(const PointT &point, size_t cellIndex, bool verbose = false) const;
 
-#ifdef RICH_MPI
+#ifdef MADVORO_WITH_MPI
 
   void PreparePoints(const std::vector<PointT> &points, const std::vector<size_t> &mask);
 
@@ -376,7 +376,7 @@ public:
 
   void SetImbalanceTolerance(double tolerance);
 
-#endif // RICH_MPI
+#endif // MADVORO_WITH_MPI
 
   double GetMaxRadius(const size_t &index) const;
 
@@ -454,7 +454,7 @@ public:
    */
   bool BoundaryFace(std::size_t index) const;
 
-  #ifdef RICH_MPI
+  #ifdef MADVORO_WITH_MPI
   vector<vector<std::size_t> >& GetDuplicatedPoints(void);
 
   vector<vector<std::size_t> >const& GetDuplicatedPoints(void)const;
@@ -479,7 +479,7 @@ public:
    */
   vector<std::size_t> const& GetSelfIndex(void) const;
 
-  #endif // RICH_MPI
+  #endif // MADVORO_WITH_MPI
   std::size_t GetTotalPointNumber(void)const;
 
   vector<PointT> & GetAllCM(void);
@@ -534,7 +534,7 @@ public:
    */
   const std::pair<std::size_t, std::size_t> &GetFaceNeighbors(std::size_t face_index) const;
 
-  #ifdef RICH_MPI
+  #ifdef MADVORO_WITH_MPI
     /*! \brief Get the indices of ghost points
       \return List of list of ghost points
     */
@@ -544,7 +544,7 @@ public:
       \return List of list of ghost points
     */
     vector<vector<std::size_t> >& GetGhostIndeces(void);
-  #endif // RICH_MPI
+  #endif // MADVORO_WITH_MPI
 
   void GetNeighbors(size_t index, vector<size_t> &res)const;
 
@@ -607,9 +607,9 @@ public:
   std::vector<Face3D<PointT>>& ModifyBoxFaces(void) {return this->box_faces_;}
 };
 
-#ifdef RICH_MPI
+#ifdef MADVORO_WITH_MPI
 #include <mpi_utils/mpi_alltoall.hpp>
-#endif // RICH_MPI
+#endif // MADVORO_WITH_MPI
 
 template <typename PointT>
 point_vec_v_t<PointT> VectorValues(std::vector<PointT> const& v, point_vec const& index)
@@ -641,7 +641,7 @@ bool PointInPoly(std::vector<Face3D<PointT>> const& faces, PointT const &point)
 
 namespace
 {
-#ifdef RICH_MPI
+#ifdef MADVORO_WITH_MPI
     void GetPastDuplicate(size_t point, vector<size_t> &res, vector<vector<size_t>> const &sorted_to_duplicate,
                                                 vector<size_t> const &procs)
     {
@@ -760,7 +760,7 @@ namespace
         return res;
     }
 
-#ifdef RICH_MPI
+#ifdef MADVORO_WITH_MPI
     template <typename PointT>
     vector<PointT> GetBoxNormals(PointT const &ll, PointT const &ur, vector<Face3D<PointT>> const& box_faces_)
     {
@@ -1128,7 +1128,7 @@ size_t Voronoi3D<PointT>::SetPointTetras(void)
     // auto it = std::unique(newTetras.begin(), newTetras.end());
     // newTetras.resize(std::distance(newTetras.begin(), it));
     // size_t redundentNum = Ntetra - newTetras.size();
-    // #ifdef RICH_MPI
+    // #ifdef MADVORO_WITH_MPI
     //     int rank;
     //     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     //     MPI_Allreduce(MPI_IN_PLACE, &redundentNum, 1, MPI_UNSIGNED_LONG, MPI_MAX, MPI_COMM_WORLD);
@@ -1136,7 +1136,7 @@ size_t Voronoi3D<PointT>::SetPointTetras(void)
     //     {
     //         std::cout << "Redundent number max: " << redundentNum << std::endl;
     //     }
-    // #endif // RICH_MPI
+    // #endif // MADVORO_WITH_MPI
     
     // for (size_t i = 0; i < Ntetra; ++i)
     for(size_t i : newTetras)
@@ -1221,22 +1221,22 @@ Voronoi3D<PointT>::Voronoi3D(PointT const &ll, PointT const &ur) : ll_(ll), ur_(
                                                               FaceNeighbors_(vector<std::pair<std::size_t, std::size_t>>()),
                                                               CM_(vector<PointT>()), Face_CM_(vector<PointT>()),
                                                               volume_(vector<double>()), area_(vector<double>()), 
-                                                              #ifdef RICH_MPI
+                                                              #ifdef MADVORO_WITH_MPI
                                                                 sentprocs_(vector<int>()), sentpoints_(vector<vector<std::size_t>>()),  duplicatedprocs_(vector<int>()), 
                                                                 duplicated_points_(vector<vector<std::size_t>>()), Nghost_(vector<vector<std::size_t>>()), self_index_(vector<std::size_t>()), 
-                                                              #endif // RICH_MPI
+                                                              #endif // MADVORO_WITH_MPI
                                                               temp_points_(std::array<PointT, 4>()), temp_points2_(std::array<PointT, 5>()), box_faces_(std::vector<Face3D<PointT>>()),
-                                                              #ifdef RICH_MPI
+                                                              #ifdef MADVORO_WITH_MPI
                                                                 pointsManager(nullptr),
                                                                 allMyPoints(), 
-                                                              #endif // RICH_MPI
+                                                              #endif // MADVORO_WITH_MPI
                                                               indicesInAllMyPoints()
 {
     this->box_faces_ = BuildBox(this->ll_, this->ur_);
-    #ifdef RICH_MPI
+    #ifdef MADVORO_WITH_MPI
         // initialize points manager
         this->pointsManager = std::shared_ptr<HilbertPointsManager<PointT, VoronoiPayload<PointT>>>(new HilbertPointsManager<PointT, VoronoiPayload<PointT>>(this->ll_, this->ur_));
-    #endif // RICH_MPI
+    #endif // MADVORO_WITH_MPI
 }
 
 template <typename PointT>
@@ -1291,13 +1291,13 @@ vector<PointT> Voronoi3D<PointT>::CreateBoundaryPoints(vector<std::pair<std::siz
     return res;
 }
 
-#ifdef RICH_MPI
+#ifdef MADVORO_WITH_MPI
 template <typename PointT>
     vector<vector<std::size_t>> const &Voronoi3D<PointT>::GetGhostIndeces(void) const
     {
         return Nghost_;
     }
-#endif // RICH_MPI
+#endif // MADVORO_WITH_MPI
 
 /**
  * gets a point index, and returns the maximal radius of the tetrahedra containing that point.
@@ -1382,14 +1382,14 @@ void Voronoi3D<PointT>::BuildInitialize(size_t num_points)
     volume_.clear();
     area_.clear();
     Norg_ = num_points;
-    #ifdef RICH_MPI
+    #ifdef MADVORO_WITH_MPI
         duplicatedprocs_.clear();
         duplicated_points_.clear();
         Nghost_.clear();
-    #endif // RICH_MPI
+    #endif // MADVORO_WITH_MPI
 }
 
-#ifdef RICH_MPI
+#ifdef MADVORO_WITH_MPI
     #ifdef VORONOI_DEBUG
     namespace
     {
@@ -2543,7 +2543,7 @@ void Voronoi3D<PointT>::MockMesh(void)
     }
 
     this->UpdateCMs();
-#ifdef RICH_MPI
+#ifdef MADVORO_WITH_MPI
     {
         const std::vector<rank_t> &correspondents = this->GetDuplicatedProcs();
         const std::vector<std::vector<size_t>> &indices = this->GetDuplicatedPoints();
@@ -2557,7 +2557,7 @@ void Voronoi3D<PointT>::MockMesh(void)
                 this->volume_.at(ghost_indices.at(i).at(j)) = data[j];
         }
     }
-#endif // RICH_MPI
+#endif // MADVORO_WITH_MPI
 }
 
 template <typename PointT>
@@ -2641,7 +2641,7 @@ void Voronoi3D<PointT>::Rebalance(const std::vector<double> &weights)
     this->MockMesh();
 }
 
-#endif // RICH_MPI
+#endif // MADVORO_WITH_MPI
 
 /**
  * \author Maor Mizrachi
@@ -2916,11 +2916,11 @@ void Voronoi3D<PointT>::BringSelfGhostPoints(const std::vector<BigRangeQueryData
     this->del_.BuildExtra(newPoints);
     end3 = std::chrono::high_resolution_clock::now();
     #ifdef TIMING
-        #ifdef RICH_MPI
+        #ifdef MADVORO_WITH_MPI
             rank_t rank;
             MPI_Comm_rank(MPI_COMM_WORLD, &rank);
             if(rank == 0)
-        #endif // RICH_MPI
+        #endif // MADVORO_WITH_MPI
             {
                 std::cout << "Time for small: " << std::chrono::duration<double>(end1 - start1).count() << " seconds" <<
                     ", for large: " << std::chrono::duration<double>(end2 - start2).count() << " seconds" <<
@@ -2929,7 +2929,7 @@ void Voronoi3D<PointT>::BringSelfGhostPoints(const std::vector<BigRangeQueryData
     #endif // TIMING
 }
 
-#ifdef RICH_MPI
+#ifdef MADVORO_WITH_MPI
 template <typename PointT>
     void Voronoi3D<PointT>::BringRemoteGhostPoints(const std::vector<BigRangeQueryData<PointT>> &bigQueries, const std::vector<SmallRangeQueryData<PointT>> &smallQueries,
                                         BigRangeAgent<PointT> &bigRangeAgent, SmallRangeAgent<PointT> &smallRangeAgent,
@@ -2979,7 +2979,7 @@ template <typename PointT>
         }
         #endif // TIMING
     }
-#endif // RICH_MPI
+#endif // MADVORO_WITH_MPI
 
 /**
  * \author Maor Mizrachi
@@ -3048,16 +3048,16 @@ Voronoi3D<PointT>::DetermineNextIterationPoints(size_t iterations,
  * \author Maor Mizrachi
  * \brief The algorithm follows arepro paper (https://www.mpa-garching.mpg.de/~volker/arepo/arepo_paper.pdf), section 2.4.
 */
-#ifdef RICH_MPI
+#ifdef MADVORO_WITH_MPI
 template <typename PointT>
     void Voronoi3D<PointT>::BringGhostPointsToBuild(const MPI_Comm &comm)
-#else // RICH_MPI
+#else // MADVORO_WITH_MPI
 template <typename PointT>
     void Voronoi3D<PointT>::BringGhostPointsToBuild()
-#endif // RICH_MPI
+#endif // MADVORO_WITH_MPI
 {
     int rank = 0, size = 1;
-    #ifdef RICH_MPI
+    #ifdef MADVORO_WITH_MPI
     const bool serialMode = (this->pointsManager == nullptr); // TODO: fix - wrong!
     if(!serialMode)
     {
@@ -3068,7 +3068,7 @@ template <typename PointT>
     {
         std::cout << "In serial mode" << std::endl;
     }
-    #endif // RICH_MPI
+    #endif // MADVORO_WITH_MPI
 
     std::vector<Face3D<PointT>> box;
     std::vector<PointT> normals;
@@ -3097,7 +3097,7 @@ template <typename PointT>
         currentRadiuses[pointIndexInBuild] = this->radiuses[pointIndexInAll];
     }
 
-    #ifdef RICH_MPI
+    #ifdef MADVORO_WITH_MPI
     std::vector<int> alreadyRecvProcs;
     std::optional<SentPointsContainer> optPointsContainer;
     if (!serialMode)
@@ -3139,16 +3139,16 @@ template <typename PointT>
     const MPI_Comm &agentComm = serialMode ? MPI_COMM_SELF : comm;
     BigRangeAgent<PointT> bigRangeAgent(this->rangeFinder.get(), envAgent, pointsContainer, agentComm);
     SmallRangeAgent<PointT> smallRangeAgent(this->rangeFinder.get(), envAgent, pointsContainer, agentComm);
-#else // RICH_MPI
+#else // MADVORO_WITH_MPI
     BigRangeAgent<PointT> bigRangeAgent(this->rangeFinder.get());
     SmallRangeAgent<PointT> smallRangeAgent(this->rangeFinder.get());
-#endif // RICH_MPI
+#endif // MADVORO_WITH_MPI
 
 
-    #ifdef RICH_MPI
+    #ifdef MADVORO_WITH_MPI
         MPI_Request finishedReq;
         int I_finished = 0;
-    #endif // RICH_MPI
+    #endif // MADVORO_WITH_MPI
     int finished;
 
     // Use a set for O(1) lookup instead of O(n) linear search in the loop
@@ -3176,19 +3176,19 @@ template <typename PointT>
                 
         size_t smallPointsNum = smallPoints.size();
         size_t largePointsNum = largePoints.size();
-        #ifdef RICH_MPI
+        #ifdef MADVORO_WITH_MPI
         if (!serialMode)
         {
             MPI_Reduce((rank == 0)? MPI_IN_PLACE : &smallPointsNum, &smallPointsNum, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, 0, comm);
             MPI_Reduce((rank == 0)? MPI_IN_PLACE : &largePointsNum, &largePointsNum, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, 0, comm);
         }
-        #endif // RICH_MPI
+        #endif // MADVORO_WITH_MPI
         iterations++;
         size_t averageGP = this->del_.points_.size();
-        #ifdef RICH_MPI
+        #ifdef MADVORO_WITH_MPI
         if (!serialMode)
             MPI_Reduce((rank == 0)? MPI_IN_PLACE : &averageGP, &averageGP, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, 0, comm);
-        #endif // RICH_MPI
+        #endif // MADVORO_WITH_MPI
 
         averageGP /= size;
         totalBigQueries += largePointsNum;
@@ -3205,7 +3205,7 @@ template <typename PointT>
 
         VORONOI_REPORT_TIMING("Creating batches and mirrors", start1, end1);
 
-        #ifdef RICH_MPI
+        #ifdef MADVORO_WITH_MPI
         if (!serialMode)
         {
 
@@ -3216,19 +3216,19 @@ template <typename PointT>
         {
             finished = (smallQueries.empty() and bigQueries.empty())? 1 : 0;
         }
-        #else // RICH_MPI
+        #else // MADVORO_WITH_MPI
             finished = (smallQueries.empty() and bigQueries.empty())? 1 : 0;
-        #endif // RICH_MPI
+        #endif // MADVORO_WITH_MPI
 
         if(considerOwnPoints)
         {
             this->BringSelfGhostPoints(bigQueries, smallQueries, bigRangeAgent, smallRangeAgent, numOfResultsForBigPoints, numOfResultsForSmallPoints, selfIgnorePoints);
         }
 
-        #ifdef RICH_MPI
+        #ifdef MADVORO_WITH_MPI
         if (!serialMode)
             this->BringRemoteGhostPoints(bigQueries, smallQueries, bigRangeAgent, smallRangeAgent, numOfResultsForBigPoints, numOfResultsForSmallPoints);
-        #endif // RICH_MPI
+        #endif // MADVORO_WITH_MPI
 
         auto start2 = std::chrono::high_resolution_clock::now();
         std::vector<PointT> newPoints;
@@ -3271,7 +3271,7 @@ template <typename PointT>
         #endif // TIMING
 
         size_t new_points = 0;
-        #ifdef RICH_MPI        
+        #ifdef MADVORO_WITH_MPI        
         if (!serialMode)
         {
             size_t new_points_until_now = std::accumulate(this->Nghost_.cbegin(), this->Nghost_.cend(), 0, [](const size_t &a, const std::vector<size_t> &b){return a + b.size();});
@@ -3279,9 +3279,9 @@ template <typename PointT>
             total_new_points = new_points_until_now;
             MPI_Allreduce(MPI_IN_PLACE, &new_points, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, comm);
         }
-        #else // RICH_MPI
+        #else // MADVORO_WITH_MPI
             new_points = newPoints.size();
-        #endif // RICH_MPI
+        #endif // MADVORO_WITH_MPI
 
         auto end_iter = std::chrono::high_resolution_clock::now();
 
@@ -3289,15 +3289,15 @@ template <typename PointT>
 
         std::tie(smallPoints, largePoints) = this->DetermineNextIterationPoints(iterations, firstLargeIteration, currentRadiuses, numOfResultsForSmallPoints, numOfResultsForBigPoints);
 
-        // #ifdef RICH_MPI
+        // #ifdef MADVORO_WITH_MPI
         //     std::tie(smallPoints, largePoints) = this->DetermineNextIterationPoints(iterations, firstLargeIteration, currentRadiuses, selfSmallQueriesAnswers, selfBigQueriesAnswers, smallBatchInfo.queriesAnswers, bigBatchInfo.queriesAnswers);
-        // #else // RICH_MPI
-        // #endif // RICH_MPI
+        // #else // MADVORO_WITH_MPI
+        // #endif // MADVORO_WITH_MPI
 
-        #ifdef RICH_MPI
+        #ifdef MADVORO_WITH_MPI
         if (!serialMode)
             MPI_Wait(&finishedReq, MPI_STATUS_IGNORE);
-        #endif // RICH_MPI
+        #endif // MADVORO_WITH_MPI
 
         if(finished == size)
         {
@@ -3317,7 +3317,7 @@ template <typename PointT>
     }
     
     START_TIMER_PREEMPTIVE("Organizing sent/recv and ghosts arrays");
-    #ifdef RICH_MPI   
+    #ifdef MADVORO_WITH_MPI   
     if (!serialMode)
     {     
         const std::vector<std::vector<size_t>> &sentPoints = pointsContainer.getSentData();
@@ -3329,16 +3329,16 @@ template <typename PointT>
         // this->EnsureSymmetry(sentProc, {alreadyRecvProcs, smallRangeAgent.getRecvProc(), bigRangeAgent.getRecvProc()});    // todo: uncomment
         this->EnsureSymmetry(sentProc, {alreadyRecvProcs, smallRangeAgent.getRecvProc(), bigRangeAgent.getRecvProc()});    
     }
-    #endif // RICH_MPI
+    #endif // MADVORO_WITH_MPI
 }
 
-#ifdef RICH_MPI
+#ifdef MADVORO_WITH_MPI
 template <typename PointT>
     vector<vector<std::size_t>> &Voronoi3D<PointT>::GetGhostIndeces(void)
     {
         return Nghost_;
     }
-#endif // RICH_MPI
+#endif // MADVORO_WITH_MPI
 
 template <typename PointT>
 void Voronoi3D<PointT>::CalcAllCM(void)
@@ -3445,7 +3445,7 @@ void Voronoi3D<PointT>::ReleaseMemory(void)
     ContainerOps::release_container_memory(radiuses);
     ContainerOps::release_container_memory(indicesInAllMyPoints);
     del_.ReleaseMemory();
-#ifdef RICH_MPI
+#ifdef MADVORO_WITH_MPI
     ContainerOps::release_container_memory(sentprocs_);
     ContainerOps::release_container_memory(sentpoints_);
     ContainerOps::release_container_memory(duplicatedprocs_);
@@ -3477,11 +3477,11 @@ void Voronoi3D<PointT>::BuildNoBox(vector<PointT> const &points, vector<vector<P
     volume_.clear();
     area_.clear();
     Norg_ = points.size();
-    #ifdef RICH_MPI
+    #ifdef MADVORO_WITH_MPI
         duplicatedprocs_.clear();
         duplicated_points_.clear();
         Nghost_.clear();
-    #endif // RICH_MPI
+    #endif // MADVORO_WITH_MPI
 
     std::vector<size_t> order = HilbertOrder3D(points);
 
@@ -3648,11 +3648,11 @@ void Voronoi3D<PointT>::BuildPartially(const std::vector<PointT> &allPoints, con
 
     std::cout << "Time for data structures initialization: " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
 
-    #ifdef RICH_MPI
+    #ifdef MADVORO_WITH_MPI
         this->BringGhostPointsToBuild(MPI_COMM_SELF);
-    #else // RICH_MPI
+    #else // MADVORO_WITH_MPI
         this->BringGhostPointsToBuild(); 
-    #endif // RICH_MPI
+    #endif // MADVORO_WITH_MPI
 
     // vector<std::pair<std::size_t, std::size_t>> ghost_index = SerialFirstIntersections();
     // vector<vector<size_t>> past_duplicates;
@@ -4366,15 +4366,15 @@ Voronoi3D<PointT>::Voronoi3D(Voronoi3D<PointT> const &other) : ll_(other.ll_), u
                                                 set_temp_(other.set_temp_), stack_temp_(other.stack_temp_), del_(other.del_), PointTetras_(other.PointTetras_), R_(other.R_),
                                                 tetra_centers_(other.tetra_centers_), FacesInCell_(other.FacesInCell_), PointsInFace_(other.PointsInFace_),
                                                 FaceNeighbors_(other.FaceNeighbors_), CM_(other.CM_), Face_CM_(other.Face_CM_), volume_(other.volume_), area_(other.area_),
-                                                #ifdef RICH_MPI
+                                                #ifdef MADVORO_WITH_MPI
                                                     sentprocs_(other.sentprocs_), sentpoints_(other.sentpoints_), duplicatedprocs_(other.duplicatedprocs_), duplicated_points_(other.duplicated_points_),
                                                     Nghost_(other.Nghost_), self_index_(other.self_index_),
-                                                #endif // RICH_MPI
+                                                #endif // MADVORO_WITH_MPI
                                                 temp_points_(std::array<PointT, 4>()), temp_points2_(std::array<PointT, 5>()), box_faces_(other.box_faces_),
-                                                #ifdef RICH_MPI
+                                                #ifdef MADVORO_WITH_MPI
                                                     pointsManager(other.pointsManager->clone()), indexingToSave(other.indexingToSave),
                                                     rangeFinder(other.rangeFinder), radiuses(other.radiuses), allMyPoints(other.allMyPoints), allPointsWeights(other.allPointsWeights),
-                                                #endif // RICH_MPI
+                                                #endif // MADVORO_WITH_MPI
                                                 indicesInAllMyPoints(other.indicesInAllMyPoints)
                                                 {}
 
@@ -4447,7 +4447,7 @@ bool Voronoi3D<PointT>::IsPointInCell(const PointT &point, size_t cellIndex, boo
             {
                 neighborOwner = "me";
             }
-#ifdef RICH_MPI
+#ifdef MADVORO_WITH_MPI
             else
             {
                 for(size_t i = 0; i < this->Nghost_.size(); i++)
@@ -4460,7 +4460,7 @@ bool Voronoi3D<PointT>::IsPointInCell(const PointT &point, size_t cellIndex, boo
                     }
                 } 
             }
-#endif // RICH_MPI
+#endif // MADVORO_WITH_MPI
             verboseInfo->addEntry("face " + std::to_string(faceIdx) + ", neighbor " + std::to_string(neighbor) + " owner", neighborOwner);
             verboseInfo->addEntry("face " + std::to_string(faceIdx) + " dot", dot);
             verboseInfo->addEntry("face " + std::to_string(faceIdx) + " neighbor point", this->GetMeshPoint(neighbor));
@@ -4501,7 +4501,7 @@ bool Voronoi3D<PointT>::BoundaryFace(std::size_t index) const
 {
     if (FaceNeighbors_[index].first >= Norg_ || FaceNeighbors_[index].second >= Norg_)
     {
-#ifdef RICH_MPI
+#ifdef MADVORO_WITH_MPI
         if(box_faces_.empty())
         {
             if (PointInDomain(ll_, ur_, del_.points_[std::max(FaceNeighbors_[index].first, FaceNeighbors_[index].second)]))
@@ -4520,7 +4520,7 @@ bool Voronoi3D<PointT>::BoundaryFace(std::size_t index) const
         return false;
 }
 
-#ifdef RICH_MPI
+#ifdef MADVORO_WITH_MPI
 template <typename PointT>
 bool Voronoi3D<PointT>::CheckContinuityOfZone(void) const
 {
@@ -4549,9 +4549,9 @@ bool Voronoi3D<PointT>::CheckContinuityOfZone(void) const
     }
     return std::all_of(reached.cbegin(), reached.cend(), [](const bool &b){return b;});
 }
-#endif // RICH_MPI
+#endif // MADVORO_WITH_MPI
 
-#ifdef RICH_MPI
+#ifdef MADVORO_WITH_MPI
 template <typename PointT>
     vector<vector<std::size_t>> &Voronoi3D<PointT>::GetDuplicatedPoints(void)
     {
@@ -4563,7 +4563,7 @@ template <typename PointT>
     {
         return duplicated_points_;
     }
-#endif // RICH_MPI
+#endif // MADVORO_WITH_MPI
 
 template <typename PointT>
 std::size_t Voronoi3D<PointT>::GetTotalPointNumber(void) const
@@ -4784,7 +4784,7 @@ const std::pair<std::size_t, std::size_t> &Voronoi3D<PointT>::GetFaceNeighbors(s
     return FaceNeighbors_[face_index];
 }
 
-#ifdef RICH_MPI
+#ifdef MADVORO_WITH_MPI
 template <typename PointT>
     vector<int> Voronoi3D<PointT>::GetDuplicatedProcs(void) const
     {
@@ -4826,9 +4826,9 @@ template <typename PointT>
     {
         return self_index_;
     }
-#endif // RICH_MPI
+#endif // MADVORO_WITH_MPI
 
-#ifdef RICH_MPI
+#ifdef MADVORO_WITH_MPI
 template <typename PointT>
 void Voronoi3D<PointT>::SetKernel(const std::shared_ptr<const Kernelization3D::IndexingKernel3D<PointT>> &indexing)
 {
@@ -4848,7 +4848,7 @@ std::shared_ptr<const Kernelization3D::IndexingKernel3D<PointT>> Voronoi3D<Point
 {
     return this->indexingToSave;
 }
-#endif // RICH_MPI
+#endif // MADVORO_WITH_MPI
 
 template <typename PointT>
 void Voronoi3D<PointT>::SetBox(const PointT &ll, const PointT &ur)
@@ -4856,13 +4856,13 @@ void Voronoi3D<PointT>::SetBox(const PointT &ll, const PointT &ur)
     this->ll_ = ll;
     this->ur_ = ur;
     this->box_faces_ = BuildBox(this->ll_, this->ur_);
-    #ifdef RICH_MPI
+    #ifdef MADVORO_WITH_MPI
         this->pointsManager = std::make_shared<HilbertPointsManager<PointT, VoronoiPayload<PointT>>>(this->ll_, this->ur_, MPI_COMM_WORLD);
         // this->radiuses.clear();
-    #endif // RICH_MPI
+    #endif // MADVORO_WITH_MPI
 }
 
-#ifdef RICH_MPI
+#ifdef MADVORO_WITH_MPI
 template <typename PointT>
 void Voronoi3D<PointT>::SetBox(PointT const &ll, PointT const &ur, const std::shared_ptr<const Kernelization3D::IndexingKernel3D<PointT>> &newIndexing)
 {
@@ -4882,7 +4882,7 @@ const std::shared_ptr<EnvironmentAgent<PointT>> Voronoi3D<PointT>::GetEnvironmen
     return this->pointsManager->getEnvironmentAgent();
 }
 
-#endif // RICH_MPI
+#endif // MADVORO_WITH_MPI
 
 
 template <typename PointT>
@@ -4919,7 +4919,7 @@ void Voronoi3D<PointT>::SyncPartialBuildData(std::vector<T> &partialBuildData, s
       }
   }
 
-  #ifdef RICH_MPI
+  #ifdef MADVORO_WITH_MPI
       std::vector<std::vector<T>> incoming = MPI_exchange_data_indexed(this->GetDuplicatedProcs(), allBuildData, this->GetDuplicatedPoints());
       size_t incomingSize = incoming.size();
       const std::vector<std::vector<size_t>> &Nghost = this->GetGhostIndeces();
@@ -4934,7 +4934,7 @@ void Voronoi3D<PointT>::SyncPartialBuildData(std::vector<T> &partialBuildData, s
               partialBuildData[Nghost.at(i).at(j)] = incoming[i][j];
           }
       }
-  #endif // RICH_MPI
+  #endif // MADVORO_WITH_MPI
 }
 
 

@@ -23,10 +23,16 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 # ---------- External dependencies directory ----------
 # When building standalone, users run install_deps.sh to clone dependencies
-# into deps/, then pass -DMADVORO_DEPS_DIR=deps to CMake.
-if(DEFINED MADVORO_DEPS_DIR)
-  get_filename_component(_deps "${MADVORO_DEPS_DIR}" ABSOLUTE)
+# into deps/.  The directory is auto-detected; override with -DMADVORO_DEPS_DIR=...
+if(NOT DEFINED MADVORO_DEPS_DIR)
+  set(MADVORO_DEPS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/deps")
+endif()
+get_filename_component(_deps "${MADVORO_DEPS_DIR}" ABSOLUTE)
+if(IS_DIRECTORY "${_deps}")
+  message(STATUS "MadVoro deps: ${_deps}")
   include_directories("${_deps}")
+else()
+  message(STATUS "MadVoro deps directory not found: ${_deps} (standalone deps unavailable)")
 endif()
 
 # ---------- Required dependencies ----------
@@ -92,7 +98,7 @@ endif()
 target_link_libraries(madvoro PUBLIC Boost::boost OpenMP::OpenMP_CXX)
 
 if(MADVORO_WITH_MPI)
-  target_compile_definitions(madvoro PUBLIC MADVORO_WITH_MPI RICH_MPI)
+  target_compile_definitions(madvoro PUBLIC MADVORO_WITH_MPI)
   target_link_libraries(madvoro PUBLIC MPI::MPI_CXX)
 endif()
 

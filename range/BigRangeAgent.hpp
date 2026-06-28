@@ -5,14 +5,14 @@
 #include "finders/utils/IndexedVector.hpp"
 #include <MeshDecomposer3D/environment/EnvironmentAgent.hpp>
 #include <MeshDecomposer3D/environment/hilbert/HilbertTreeEnvAgent.hpp>
-#ifdef RICH_MPI
+#ifdef MADVORO_WITH_MPI
     #include <mpi_utils/queryAgent/BusyWaitQueryAgent.hpp>
     #include <mpi_utils/queryAgent/WaitUntilAnsweredQueryAgent.hpp>
     #include <mpi_utils/queryAgent/BuffersManagerQueryAgent.hpp>
     #include <MeshDecomposer3D/environment/hilbert/DistributedOctEnvAgent.hpp> 
     #include "SentPointsContainer.hpp"
     #include <mpi_utils/serialize/Serializer.hpp>
-#endif // RICH_MPI
+#endif // MADVORO_WITH_MPI
 
 #include "RangeQueryData.h"
 
@@ -35,7 +35,7 @@ struct BigRangeQueryData : public RangeQueryData<PointT>
     BigRangeQueryData(): RangeQueryData<PointT>(), originalPoint(PointT()), askOnlyClose(false)
     {}
 
-    #ifdef RICH_MPI
+    #ifdef MADVORO_WITH_MPI
         force_inline size_t dump(Serializer *serializer) const override
         {
             size_t bytes = 0;
@@ -57,7 +57,7 @@ struct BigRangeQueryData : public RangeQueryData<PointT>
             bytes += serializer->extract(this->askOnlyClose, byteOffset + bytes);
             return bytes;
         }
-    #endif // RICH_MPI
+    #endif // MADVORO_WITH_MPI
 };
 
 /**
@@ -72,18 +72,18 @@ class BigRangeAgent
 
 private:
     class BigRangeAnswerAgent
-        #ifdef RICH_MPI
+        #ifdef MADVORO_WITH_MPI
             : public AnswerAgent<BigRangeQueryData<PointT>, PointT>
-        #endif // RICH_MPI
+        #endif // MADVORO_WITH_MPI
     {
         friend class RangeAgent;
 
     public:
-        #ifdef RICH_MPI
+        #ifdef MADVORO_WITH_MPI
             BigRangeAnswerAgent(const RangeFinder<PointT> *rangeFinder, SentPointsContainer &pointsContainer, const MPI_Comm &comm = MPI_COMM_WORLD): rangeFinder(rangeFinder), pointsContainer(pointsContainer)
-        #else // RICH_MPI
+        #else // MADVORO_WITH_MPI
             BigRangeAnswerAgent(const RangeFinder<PointT> *rangeFinder): rangeFinder(rangeFinder)
-        #endif // RICH_MPI
+        #endif // MADVORO_WITH_MPI
         {}
 
         std::vector<size_t> selfAnswer(const BigRangeQueryData<PointT> &query, std::unordered_set<size_t> &ignore)
@@ -93,7 +93,7 @@ private:
             return indicesResult;
         }
 
-        #ifdef RICH_MPI
+        #ifdef MADVORO_WITH_MPI
             std::vector<PointT> answer(const BigRangeQueryData<PointT> &query, int _rank) override
             {
                 const SentPointsContainer::PointsSet &ignore = this->pointsContainer.getSentDataSetRank(_rank);
@@ -109,16 +109,16 @@ private:
                 }
                 return result;
             }
-        #endif // RICH_MPI
+        #endif // MADVORO_WITH_MPI
         
     private:
         const RangeFinder<PointT> *rangeFinder;
-        #ifdef RICH_MPI
+        #ifdef MADVORO_WITH_MPI
             SentPointsContainer &pointsContainer;
-        #endif // RICH_MPI
+        #endif // MADVORO_WITH_MPI
     };
 
-    #ifdef RICH_MPI
+    #ifdef MADVORO_WITH_MPI
         class BigRangeTalkAgent : public TalkAgent<BigRangeQueryData<PointT>>
         {
         public:
@@ -126,18 +126,18 @@ private:
             using _map = boost::container::flat_map<K, V>;
 
             BigRangeTalkAgent(const std::shared_ptr<EnvironmentAgent<PointT>> envAgent,         
-                            #ifdef RICH_MPI
+                            #ifdef MADVORO_WITH_MPI
                                 const MPI_Comm &comm = MPI_COMM_WORLD
-                            #endif // RICH_MPI
+                            #endif // MADVORO_WITH_MPI
                             ): envAgent(envAgent), supportsFurthestClosestRanks(false)
             {
-                #ifdef RICH_MPI
+                #ifdef MADVORO_WITH_MPI
                     MPI_Comm_rank(comm, &this->rank);
                     MPI_Comm_size(comm, &this->size);
                 #else
                     this->rank = 0;
                     this->size = 1;
-                #endif // RICH_MPI
+                #endif // MADVORO_WITH_MPI
 
                 const DistributedOctEnvironmentAgent<PointT> *distribuedOctEnvAgent = dynamic_cast<const DistributedOctEnvironmentAgent<PointT>*>(this->envAgent.get());
                 if(distribuedOctEnvAgent != nullptr)
@@ -244,48 +244,48 @@ private:
             mutable _map<size_t, std::vector<std::pair<coord_type, coord_type>>> resultCache;
             int rank, size;
             bool supportsFurthestClosestRanks;
-            #ifdef RICH_MPI
+            #ifdef MADVORO_WITH_MPI
                 std::function<typename HilbertCurveEnvironmentAgent<PointT>::DistancesVector(const PointT&)> getFurthestClosestRanks;
-            #endif // RICH_MPI
+            #endif // MADVORO_WITH_MPI
         };
-    #endif // RICH_MPI
+    #endif // MADVORO_WITH_MPI
 
 public:
     template<typename T>
     using _set = std::unordered_set<T>;
 
-    #ifdef RICH_MPI
+    #ifdef MADVORO_WITH_MPI
         BigRangeAgent(const RangeFinder<PointT> *rangeFinder, const std::shared_ptr<EnvironmentAgent<PointT>> &envAgent, SentPointsContainer &pointsContainer, const MPI_Comm &comm = MPI_COMM_WORLD): pointsContainer(pointsContainer)
-    #else // RICH_MPI
+    #else // MADVORO_WITH_MPI
         BigRangeAgent(const RangeFinder<PointT> *rangeFinder)
-    #endif // RICH_MPI
+    #endif // MADVORO_WITH_MPI
     {
-        #ifdef RICH_MPI
+        #ifdef MADVORO_WITH_MPI
             this->ansAgent = new BigRangeAnswerAgent(rangeFinder, pointsContainer, comm);
             this->talkAgent = new BigRangeTalkAgent(envAgent, comm);
             this->queryAgent = new BuffersManagerQueryAgent<BigRangeQueryData<PointT>, PointT>(this->talkAgent, this->ansAgent, false /* dont send messages to self */, comm);
             // this->queryAgent = new BusyWaitQueryAgent<BigRangeQueryData<PointT>, PointT>(this->talkAgent, this->ansAgent, false /* dont send messages to self */, comm);
             //this->queryAgent = new WaitUntilAnsweredQueryAgent<BigRangeQueryData<PointT>, PointT>(this->talkAgent, this->ansAgent, false /* dont send messages to self */, comm);
-        #else // RICH_MPI
+        #else // MADVORO_WITH_MPI
             this->ansAgent = new BigRangeAnswerAgent(rangeFinder);
-        #endif // RICH_MPI
+        #endif // MADVORO_WITH_MPI
     }
 
     ~BigRangeAgent()
     {
-        #ifdef RICH_MPI
+        #ifdef MADVORO_WITH_MPI
             delete this->queryAgent;
             delete this->talkAgent;
-        #endif // RICH_MPI
+        #endif // MADVORO_WITH_MPI
         delete this->ansAgent;
     }
 
-    #ifdef RICH_MPI
+    #ifdef MADVORO_WITH_MPI
         inline QueryBatchInfo<BigRangeQueryData<PointT>, PointT> runBatch(const std::vector<BigRangeQueryData<PointT>> &queries)
         {
             return this->queryAgent->runBatch(queries);
         };
-    #endif // RICH_MPI
+    #endif // MADVORO_WITH_MPI
 
     std::vector<std::vector<size_t>> selfBatchAnswer(const std::vector<BigRangeQueryData<PointT>> &bigQueriesBatch, _set<size_t> &ignore)
     {
@@ -297,20 +297,20 @@ public:
         return result;
     }
 
-    #ifdef RICH_MPI
+    #ifdef MADVORO_WITH_MPI
         inline std::vector<std::vector<std::size_t>> &getSentPoints(){return this->pointsContainer.getSentData();};
         inline std::vector<std::vector<std::size_t>> &getRecvPoints(){return this->queryAgent->getRecvData();};
         inline std::vector<int> &getSentProc(){return this->pointsContainer.getSentProc();};
         inline std::vector<int> &getRecvProc(){return this->queryAgent->getRecvProc();};
-    #endif // RICH_MPI
+    #endif // MADVORO_WITH_MPI
 
 private:
     BigRangeAnswerAgent *ansAgent;
-    #ifdef RICH_MPI
+    #ifdef MADVORO_WITH_MPI
         BigRangeTalkAgent *talkAgent;
         QueryAgent<BigRangeQueryData<PointT>, PointT> *queryAgent;
         SentPointsContainer &pointsContainer;
-    #endif // RICH_MPI
+    #endif // MADVORO_WITH_MPI
 };
 
 #endif // BIG_RANGE_AGENT_HPP
