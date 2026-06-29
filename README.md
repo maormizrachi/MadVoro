@@ -45,13 +45,118 @@ Additionally, you need:
 
 ## Building Standalone
 
+Run CMake from the MadVoro repository root. The standalone dependency directory
+defaults to `deps/`, so `MADVORO_DEPS_DIR` can usually be omitted after running
+`install_deps.sh`. Standalone single-config builds default to `Release`; pass
+`-DCMAKE_BUILD_TYPE=Debug` or `-DCMAKE_BUILD_TYPE=RelWithDebInfo` when you want
+debug symbols or debug behavior.
+
+### Serial Library and Examples
+
 ```bash
 ./install_deps.sh
-mkdir build && cd build
-cmake .. -DMADVORO_DEPS_DIR=../deps \
-         -DMADVORO_WITH_MPI=ON \
-         -DMADVORO_BUILD_EXAMPLES=ON
-make -j$(nproc)
+cmake -S . -B build \
+      -DMADVORO_DEPS_DIR=deps \
+      -DMADVORO_BUILD_EXAMPLES=ON
+cmake --build build -j"$(nproc)"
+```
+
+### MPI Library and Examples
+
+```bash
+./install_deps.sh
+cmake -S . -B build \
+      -DMADVORO_DEPS_DIR=deps \
+      -DMADVORO_WITH_MPI=ON \
+      -DMADVORO_BUILD_EXAMPLES=ON
+cmake --build build -j"$(nproc)"
+```
+
+Do not use `-DMADVORO_DEPS_DIR=../deps` with this CMake project; relative
+dependency paths are resolved by CMake relative to the source tree. Use `deps`,
+omit `MADVORO_DEPS_DIR`, or pass an absolute path.
+
+Example executables are written under per-example build directories, such as:
+
+```text
+build/examples/uniform_points/example_uniform_parallel
+build/examples/fox/example_fox
+```
+
+For convenience, CMake also copies each built example executable back beside its
+source files, such as `examples/fox/example_fox`. These generated files are
+ignored by git.
+
+Example `input/` directories are copied beside the matching executable. For
+example, the fox input files are copied to `build/examples/fox/input/`.
+
+### Building with VTK
+
+Enable VTK output with `MADVORO_WITH_VTK=ON`:
+
+```bash
+cmake -S . -B build-vtk \
+      -DMADVORO_DEPS_DIR=deps \
+      -DMADVORO_WITH_MPI=ON \
+      -DMADVORO_WITH_VTK=ON \
+      -DMADVORO_BUILD_EXAMPLES=ON
+cmake --build build-vtk -j"$(nproc)"
+```
+
+MadVoro requires VTK 9.3 or newer. With MPI enabled, CMake also requires VTK's
+parallel MPI components. If CMake cannot find VTK automatically, point it at
+your VTK package configuration:
+
+```bash
+cmake -S . -B build-vtk \
+      -DMADVORO_DEPS_DIR=deps \
+      -DMADVORO_WITH_MPI=ON \
+      -DMADVORO_WITH_VTK=ON \
+      -DVTK_DIR=/path/to/vtk/lib/cmake/vtk-9.3 \
+      -DMADVORO_BUILD_EXAMPLES=ON
+```
+
+You can also use `-DCMAKE_PREFIX_PATH=/path/to/vtk` if that is how VTK is
+installed on your system.
+
+### Building with HDF5
+
+Enable HDF5 I/O with `MADVORO_WITH_HDF5=ON`:
+
+```bash
+cmake -S . -B build-hdf5 \
+      -DMADVORO_DEPS_DIR=deps \
+      -DMADVORO_WITH_MPI=ON \
+      -DMADVORO_WITH_HDF5=ON \
+      -DMADVORO_BUILD_EXAMPLES=ON
+cmake --build build-hdf5 -j"$(nproc)"
+```
+
+When `MADVORO_WITH_MPI=ON`, MadVoro asks CMake to prefer a parallel HDF5 build.
+If CMake cannot find the right HDF5 installation, provide one of:
+
+```bash
+-DHDF5_ROOT=/path/to/hdf5
+```
+
+or:
+
+```bash
+-DCMAKE_PREFIX_PATH=/path/to/hdf5
+```
+
+### Building with Both VTK and HDF5
+
+```bash
+cmake -S . -B build-full \
+      -DMADVORO_DEPS_DIR=deps \
+      -DMADVORO_WITH_MPI=ON \
+      -DMADVORO_WITH_VTK=ON \
+      -DMADVORO_WITH_HDF5=ON \
+      -DVTK_DIR=/path/to/vtk/lib/cmake/vtk-9.3 \
+      -DHDF5_ROOT=/path/to/hdf5 \
+      -DMADVORO_BUILD_EXAMPLES=ON
+cmake --build build-full -j"$(nproc)"
 ```
 
 ## Using Inside RICH

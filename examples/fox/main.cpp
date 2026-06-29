@@ -1,6 +1,7 @@
 #include <vector>
 #include <mpi.h>
 #include <algorithm>
+#include <filesystem>
 #include <tuple>
 #include <Voronoi3D.hpp>
 #include "../Vector3D.hpp"
@@ -20,8 +21,10 @@ int main(int argc, char *argv[])
     
     if(rank == 0)
     {
-        std::vector<Vector3D> insidePoints = readPoints("input/points_inside_fox");
-        std::vector<Vector3D> outsidePoints = readPoints("input/points_outside_fox");
+        const std::filesystem::path executableDir = std::filesystem::absolute(argv[0]).parent_path();
+        const std::filesystem::path inputDir = executableDir / "input";
+        std::vector<Vector3D> insidePoints = readPoints((inputDir / "points_inside_fox").string());
+        std::vector<Vector3D> outsidePoints = readPoints((inputDir / "points_outside_fox").string());
         allPoints.insert(allPoints.end(), insidePoints.cbegin(), insidePoints.cend());
         for(size_t i = 0; i < insidePoints.size(); i++) isInside.push_back(1);
         allPoints.insert(allPoints.end(), outsidePoints.cbegin(), outsidePoints.cend());
@@ -37,8 +40,6 @@ int main(int argc, char *argv[])
     {
         std::cout << "Constructing the Voronoi diagram" << std::endl;
     }
-    diag.SetVerbosity(true);
-
     diag.BuildParallel(myPoints);
 
     std::tie(myPoints, myIsInside) = GetPointsAfterBuildExchange(diag, myPoints, myIsInside);

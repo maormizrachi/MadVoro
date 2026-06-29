@@ -1,12 +1,14 @@
 # CMake build directories
 build/
 install/
+deps/
 
 # Compiled objects
 *.o
 *.a
 *.so
 *.dylib
+examples/*/example_*
 
 # Autotools leftovers
 .deps/

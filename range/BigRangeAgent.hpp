@@ -3,9 +3,10 @@
 
 #include "finders/RangeFinder.hpp"
 #include "finders/utils/IndexedVector.hpp"
-#include <MeshDecomposer3D/environment/EnvironmentAgent.hpp>
-#include <MeshDecomposer3D/environment/hilbert/HilbertTreeEnvAgent.hpp>
+#include "exception/MadVoroException.hpp"
 #ifdef MADVORO_WITH_MPI
+    #include <MeshDecomposer3D/environment/EnvironmentAgent.hpp>
+    #include <MeshDecomposer3D/environment/hilbert/HilbertTreeEnvAgent.hpp>
     #include <mpi_utils/queryAgent/BusyWaitQueryAgent.hpp>
     #include <mpi_utils/queryAgent/WaitUntilAnsweredQueryAgent.hpp>
     #include <mpi_utils/queryAgent/BuffersManagerQueryAgent.hpp>
@@ -157,7 +158,7 @@ private:
             {
                 if(std::isnan(query.center.x) or std::isnan(query.center.y) or std::isnan(query.center.z))
                 {
-                    UniversalError eo("In BigRangeTalkAgent, should not reach here, since the query center is NaN");
+                    MadVoro::Exception::MadVoroException eo("In BigRangeTalkAgent, should not reach here, since the query center is NaN");
                     eo.addEntry("Query", query);
                     throw eo;
                 }
@@ -165,7 +166,7 @@ private:
                 typename EnvironmentAgent<PointT>::RanksSet intersectingRanks = this->envAgent->getIntersectingRanks(PointT(query.center.x, query.center.y, query.center.z), query.radius);
                 if(intersectingRanks.empty())
                 {
-                    throw UniversalError("In range talk agent, should not reach here: the intersecting ranks list should at least contain the rank itself");
+                    throw MadVoro::Exception::MadVoroException("In range talk agent, should not reach here: the intersecting ranks list should at least contain the rank itself");
                 }
 
                 if(intersectingRanks.size() == 1)
@@ -207,7 +208,7 @@ private:
                 }
                 if(minDistRank >= this->size)
                 {
-                    UniversalError eo("In BigRangeTalkAgent, should not reach here, since size of intersectingRanks is > 1");
+                    MadVoro::Exception::MadVoroException eo("In BigRangeTalkAgent, should not reach here, since size of intersectingRanks is > 1");
                     eo.addEntry("Query", query);
                     eo.addEntry("minDistRank", minDistRank);
                     eo.addEntry("Size of intersectingRanks", intersectingRanks.size());
@@ -228,7 +229,7 @@ private:
 
                 if(result.size() <= 1)
                 {
-                    UniversalError eo("In BigRangeTalkAgent, should not reach here, since `result` must contain at least one additional rank");
+                    MadVoro::Exception::MadVoroException eo("In BigRangeTalkAgent, should not reach here, since `result` must contain at least one additional rank");
                     eo.addEntry("Query", query);
                     eo.addEntry("Distances", distances);
                     eo.addEntry("closestDistThreshold", closestDistThreshold);

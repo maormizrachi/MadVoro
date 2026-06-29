@@ -347,23 +347,23 @@ public:
 
   inline const std::shared_ptr<LoadBalancer<PointT>> GetLoadBalancer(void) const {return this->pointsManager->getLoadBalancer();};
 
-  void BuildPartiallyParallel(const std::vector<PointT> &allPoints, const std::vector<double> &allWeights, const std::vector<size_t> &indicesToBuild, bool suppressRebalancing = false, bool suppressExchange = false);
+  std::vector<PointT> BuildPartiallyParallel(const std::vector<PointT> &allPoints, const std::vector<double> &allWeights, const std::vector<size_t> &indicesToBuild, bool suppressRebalancing = false, bool suppressExchange = false);
 
-  void BuildPartiallyParallel(const std::vector<PointT> &allPoints, const std::vector<size_t> &indicesToBuild, bool suppressRebalancing = false, bool suppressExchange = false)
+  std::vector<PointT> BuildPartiallyParallel(const std::vector<PointT> &allPoints, const std::vector<size_t> &indicesToBuild, bool suppressRebalancing = false, bool suppressExchange = false)
   {
-    this->BuildPartiallyParallel(allPoints, std::vector<double>(allPoints.size(), 1.0), indicesToBuild, suppressRebalancing, suppressExchange);
+    return this->BuildPartiallyParallel(allPoints, std::vector<double>(allPoints.size(), 1.0), indicesToBuild, suppressRebalancing, suppressExchange);
   }
 
-  void BuildParallel(const std::vector<PointT> &points, const std::vector<double> &weights, bool suppressRebalancing = false, bool suppressExchange = false)
+  std::vector<PointT> BuildParallel(const std::vector<PointT> &points, const std::vector<double> &weights, bool suppressRebalancing = false, bool suppressExchange = false)
   {
     std::vector<size_t> indicesToBuild(points.size());
     std::iota(indicesToBuild.begin(), indicesToBuild.end(), 0);
-    this->BuildPartiallyParallel(points, weights, indicesToBuild, suppressRebalancing, suppressExchange);
+    return this->BuildPartiallyParallel(points, weights, indicesToBuild, suppressRebalancing, suppressExchange);
   }
 
-  void BuildParallel(const std::vector<PointT> &points, bool suppressRebalancing = false, bool suppressExchange = false)
+  std::vector<PointT> BuildParallel(const std::vector<PointT> &points, bool suppressRebalancing = false, bool suppressExchange = false)
   {
-    this->BuildParallel(points, std::vector<double>(points.size(), 1.0), suppressRebalancing, suppressExchange);
+    return this->BuildParallel(points, std::vector<double>(points.size(), 1.0), suppressRebalancing, suppressExchange);
   }
   
   bool DidRebalance(void) const;
@@ -1988,7 +1988,7 @@ bool Voronoi3D<PointT>::DidRebalance(void) const
 }
 
 template <typename PointT>
-void Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<PointT> &allPoints, const std::vector<double> &allWeights, const std::vector<size_t> &indicesToBuild, bool suppressRebalancing, bool suppressExchange)
+std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<PointT> &allPoints, const std::vector<double> &allWeights, const std::vector<size_t> &indicesToBuild, bool suppressRebalancing, bool suppressExchange)
 {
     int rank, size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -2161,6 +2161,7 @@ void Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<PointT> &allPoi
 
     // save the list of the real ghost points
     // this->FilterRealGhostPoints();
+    return activePoints;
 }
 
 inline boost::container::flat_map<size_t, std::pair<rank_t, size_t>> GetGhostInfo(const std::vector<rank_t> &duplicatedProcs, const std::vector<std::vector<size_t>> &duplicatedPoints, const std::vector<std::vector<size_t>> &Nghost, const boost::container::flat_map<size_t, std::pair<rank_t, size_t>> &whereNow)

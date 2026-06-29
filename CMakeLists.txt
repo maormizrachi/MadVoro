@@ -7,6 +7,12 @@ project(MadVoro
 
 # Only set these as defaults when MadVoro is the top-level project.
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+  if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS
+      Debug Release RelWithDebInfo MinSizeRel)
+  endif()
+
   set(CMAKE_CXX_STANDARD 17 CACHE STRING "")
   set(CMAKE_CXX_STANDARD_REQUIRED ON)
   set(CMAKE_CXX_EXTENSIONS OFF)
@@ -80,6 +86,12 @@ list(APPEND MADVORO_SOURCES
   exception/InvalidArgumentException.cpp
   exception/SizeException.cpp
 )
+
+if(MADVORO_WITH_MPI AND EXISTS "${_deps}/mpi_utils/AmountManager.cpp")
+  list(APPEND MADVORO_SOURCES
+    "${_deps}/mpi_utils/AmountManager.cpp"
+  )
+endif()
 
 add_library(madvoro ${MADVORO_SOURCES})
 add_library(MadVoro::madvoro ALIAS madvoro)

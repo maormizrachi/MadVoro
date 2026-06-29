@@ -3,9 +3,10 @@
 
 #include "finders/RangeFinder.hpp"
 #include "finders/utils/IndexedVector.hpp"
-#include <MeshDecomposer3D/environment/EnvironmentAgent.hpp>
-#include <MeshDecomposer3D/environment/hilbert/HilbertTreeEnvAgent.hpp>
+#include "exception/MadVoroException.hpp"
 #ifdef MADVORO_WITH_MPI
+    #include <MeshDecomposer3D/environment/EnvironmentAgent.hpp>
+    #include <MeshDecomposer3D/environment/hilbert/HilbertTreeEnvAgent.hpp>
     #include <mpi_utils/queryAgent/BusyWaitQueryAgent.hpp>
     #include <mpi_utils/queryAgent/ThreePhasesQueryAgent.hpp>
     #include <mpi_utils/queryAgent/WaitUntilAnsweredQueryAgent.hpp>
@@ -151,7 +152,7 @@ private:
                 typename EnvironmentAgent<PointT>::RanksSet intersectingRanks = this->envAgent->getIntersectingRanks(PointT(query.center.x, query.center.y, query.center.z), query.radius);
                 if(intersectingRanks.empty())
                 {
-                    throw UniversalError("In range talk agent, should not reach here: the intersecting ranks list should at least contain the rank itself");
+                    throw MadVoro::Exception::MadVoroException("In range talk agent, should not reach here: the intersecting ranks list should at least contain the rank itself");
                 }
                 return intersectingRanks;
             }

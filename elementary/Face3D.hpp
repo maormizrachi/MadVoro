@@ -18,10 +18,15 @@ template <typename PointT>
 class Face3D
 {
 public:
+  using point_vec_v = point_vec_v_t<PointT>;
+
   point_vec_v_t<PointT> vertices;
   std::pair<std::size_t, std::size_t> neighbors;
 
   Face3D() : vertices(), neighbors() {}
+
+  explicit Face3D(point_vec_v_t<PointT> const& vert)
+    : vertices(vert), neighbors(0, 0) {}
 
   Face3D(point_vec_v_t<PointT> const& vert, std::size_t neighbor1, std::size_t neighbor2)
     : vertices(vert), neighbors(neighbor1, neighbor2) {}
@@ -42,6 +47,9 @@ public:
                               { return 0.5 * fastabs(CrossProduct(u - ref, v - ref)); });
   }
 };
+
+template <typename PointT>
+using Face = Face3D<PointT>;
 
 template <typename PointT>
 PointT calc_centroid(const Face3D<PointT>& face)

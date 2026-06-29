@@ -26,7 +26,7 @@ struct VoronoiPayload
     size_t dump(Serializer *serializer) const override
     {
         size_t count = serializer->insert(radius);
-        count += CM.dump(serializer);
+        count += serializer->insert(CM);
         return count;
     }
 
@@ -34,7 +34,7 @@ struct VoronoiPayload
     {
         size_t bytes = 0;
         bytes += serializer->extract(radius, byteOffset);
-        bytes += CM.load(serializer, byteOffset + bytes);
+        bytes += serializer->extract(CM, byteOffset + bytes);
         return bytes;
     }
 #endif // MADVORO_WITH_MPI
