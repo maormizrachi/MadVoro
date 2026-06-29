@@ -33,14 +33,14 @@ echo "=== Installing MadVoro dependencies into $DEST ==="
 echo ""
 
 # MPI utilities (serialization, exchange, collectives)
-clone_if_missing "mpi_utils" "https://github.com/maormizrachi/mpi_utils.git"
+clone_if_missing "mpi_utils" "git@github.com:maormizrachi/mpi_utils.git"
 
 # Spatial data structures (OctTree, KDTree, RangeTree, BoundingBox, Sphere)
-clone_if_missing "spatial_ds" "https://github.com/maormizrachi/spatial_ds.git"
+clone_if_missing "spatial_ds" "git@github.com:maormizrachi/spatial_ds.git"
 
 # Mesh decomposition (Hilbert ordering, load balancing, points manager,
 # environment agents, indexing kernels)
-clone_if_missing "MeshDecomposer3D" "https://github.com/maormizrachi/MeshDecomposer3D.git"
+clone_if_missing "MeshDecomposer3D" "git@github.com:maormizrachi/MeshDecomposer3D.git"
 
 echo ""
 echo "=== Done ==="

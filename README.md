@@ -54,9 +54,10 @@ debug symbols or debug behavior.
 ### Serial Library and Examples
 
 ```bash
+git clone git@github.com:maormizrachi/MadVoro.git
+cd MadVoro
 ./install_deps.sh
 cmake -S . -B build \
-      -DMADVORO_DEPS_DIR=deps \
       -DMADVORO_BUILD_EXAMPLES=ON
 cmake --build build -j"$(nproc)"
 ```
@@ -66,15 +67,10 @@ cmake --build build -j"$(nproc)"
 ```bash
 ./install_deps.sh
 cmake -S . -B build \
-      -DMADVORO_DEPS_DIR=deps \
       -DMADVORO_WITH_MPI=ON \
       -DMADVORO_BUILD_EXAMPLES=ON
 cmake --build build -j"$(nproc)"
 ```
-
-Do not use `-DMADVORO_DEPS_DIR=../deps` with this CMake project; relative
-dependency paths are resolved by CMake relative to the source tree. Use `deps`,
-omit `MADVORO_DEPS_DIR`, or pass an absolute path.
 
 Example executables are written under per-example build directories, such as:
 
@@ -96,7 +92,6 @@ Enable VTK output with `MADVORO_WITH_VTK=ON`:
 
 ```bash
 cmake -S . -B build-vtk \
-      -DMADVORO_DEPS_DIR=deps \
       -DMADVORO_WITH_MPI=ON \
       -DMADVORO_WITH_VTK=ON \
       -DMADVORO_BUILD_EXAMPLES=ON
@@ -109,7 +104,6 @@ your VTK package configuration:
 
 ```bash
 cmake -S . -B build-vtk \
-      -DMADVORO_DEPS_DIR=deps \
       -DMADVORO_WITH_MPI=ON \
       -DMADVORO_WITH_VTK=ON \
       -DVTK_DIR=/path/to/vtk/lib/cmake/vtk-9.3 \
@@ -125,7 +119,6 @@ Enable HDF5 I/O with `MADVORO_WITH_HDF5=ON`:
 
 ```bash
 cmake -S . -B build-hdf5 \
-      -DMADVORO_DEPS_DIR=deps \
       -DMADVORO_WITH_MPI=ON \
       -DMADVORO_WITH_HDF5=ON \
       -DMADVORO_BUILD_EXAMPLES=ON
@@ -149,7 +142,6 @@ or:
 
 ```bash
 cmake -S . -B build-full \
-      -DMADVORO_DEPS_DIR=deps \
       -DMADVORO_WITH_MPI=ON \
       -DMADVORO_WITH_VTK=ON \
       -DMADVORO_WITH_HDF5=ON \
@@ -165,4 +157,4 @@ When used as a submodule inside RICH (at `source/3D/tessellation/voronoi/`), the
 
 ## License
 
-See the [RICH repository](https://github.com/maormizrachi/RICH) for license information.
+BSD 3-Clause. See [LICENSE](LICENSE) for details.
