@@ -999,6 +999,7 @@ std::size_t Delaunay3D<PointT>::Walk(std::size_t point, std::size_t first_guess)
     std::size_t cur_facet = first_guess;
     std::size_t counter = 0;
     b4_temp_[3] = points_[point];
+    const std::size_t walkLimit = std::min<std::size_t>(100000, tetras_.size() + 1);
     while(!good) {
         ++counter;
         good = true;
@@ -1027,7 +1028,35 @@ std::size_t Delaunay3D<PointT>::Walk(std::size_t point, std::size_t first_guess)
                 break;
             }
         }
-        assert(counter < 100000);
+        if(counter >= walkLimit)
+        {
+            for(std::size_t tetraIdx = 0; tetraIdx < tetras_.size(); ++tetraIdx)
+            {
+                if(empty_tetras_.find(tetraIdx) != empty_tetras_.end())
+                    continue;
+
+                bool containsPoint = true;
+                for(size_t i = 0; i < 4; ++i)
+                {
+                    for(size_t j = 0; j < 3; j++)
+                        b4_temp_[j] = points_[tetras_[tetraIdx].points[(i + j + 1) % 4]];
+                    int sign = 2 * static_cast<int>(i % 2) - 1;
+                    if((orient3d(b4_temp_) * sign) > 0)
+                    {
+                        containsPoint = false;
+                        break;
+                    }
+                }
+
+                if(containsPoint)
+                    return tetraIdx;
+            }
+
+            MadVoro::Exception::MadVoroException eo("Delaunay walk did not converge");
+            eo.addEntry("point_index", point);
+            eo.addEntry("first_guess", first_guess);
+            throw eo;
+        }
         // if (counter % 1000 == 0)
         //     std::cout << "[Walk] point=" << point << " steps=" << counter << std::endl;
     }
