@@ -4,6 +4,8 @@
 #include <vector>
 #include <algorithm>
 #include <cstddef>
+#include <cmath>
+#include <limits>
 
 namespace MadVoro
 {
@@ -70,7 +72,8 @@ inline std::vector<T> VectorValues(const std::vector<T> &v, const std::vector<st
 
 inline bool close2zero(double x)
 {
-    return (x < 1e-9 && x > -1e-9);
+    constexpr double lowest_double = std::numeric_limits<double>::min();
+    return std::abs(x) < lowest_double;
 }
 
 } // namespace ContainerOps
