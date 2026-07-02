@@ -110,7 +110,7 @@ endif()
 target_link_libraries(madvoro PUBLIC Boost::boost OpenMP::OpenMP_CXX)
 
 if(MADVORO_WITH_MPI)
-  target_compile_definitions(madvoro PUBLIC MADVORO_WITH_MPI)
+  target_compile_definitions(madvoro PUBLIC MADVORO_WITH_MPI SPATIAL_DS_WITH_MPI)
   target_link_libraries(madvoro PUBLIC MPI::MPI_CXX)
 endif()
 
