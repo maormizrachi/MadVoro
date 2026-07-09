@@ -16,6 +16,16 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   set(CMAKE_CXX_STANDARD 17 CACHE STRING "")
   set(CMAKE_CXX_STANDARD_REQUIRED ON)
   set(CMAKE_CXX_EXTENSIONS OFF)
+
+  # --- Compiler flags (aligned with RICH/config/compiler_flags.cmake) ---
+
+  set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG -g1" CACHE STRING "" FORCE)
+  set(CMAKE_CXX_FLAGS_DEBUG   "-O0 -g3 -gdwarf-3 -D_GLIBCXX_ASSERTIONS" CACHE STRING "" FORCE)
+
+  string(APPEND CMAKE_CXX_FLAGS " -fno-omit-frame-pointer")
+  string(APPEND CMAKE_CXX_FLAGS " -fstrict-aliasing")
+  string(APPEND CMAKE_CXX_FLAGS " -fno-common")
+  string(APPEND CMAKE_CXX_FLAGS " -rdynamic")
 endif()
 
 # ---------- Options ----------

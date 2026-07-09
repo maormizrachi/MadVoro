@@ -323,6 +323,13 @@ public:
 
   bool IsPointInCell(const PointT &point, size_t cellIndex, bool verbose = false) const;
 
+  /*! \brief Like IsPointInCell, but returns the neighbor across the first violated face.
+    \param point The point to test
+    \param cellIndex The cell to test against (must be < Norg)
+    \return (true, cellIndex) if inside; (false, neighborIndex) if a face was violated
+   */
+  std::pair<bool, size_t> FindViolatedFaceNeighbor(const PointT &point, size_t cellIndex) const;
+
 #ifdef MADVORO_WITH_MPI
 
   void PreparePoints(const std::vector<PointT> &points, const std::vector<size_t> &mask);
@@ -4477,6 +4484,26 @@ bool Voronoi3D<PointT>::IsPointInCell(const PointT &point, size_t cellIndex, boo
         throw *verboseInfo;
     }
     return true;
+}
+
+template <typename PointT>
+std::pair<bool, size_t> Voronoi3D<PointT>::FindViolatedFaceNeighbor(const PointT &point, size_t cellIndex) const
+{
+    double width = this->GetWidth(cellIndex);
+    for(size_t faceIdx : this->FacesInCell_[cellIndex])
+    {
+        const auto &[n1, n2] = this->GetFaceNeighbors(faceIdx);
+        PointT normal = (n2 == cellIndex) ? del_.points_[n2] - del_.points_[n1]
+                                          : del_.points_[n1] - del_.points_[n2];
+        PointT mid = (del_.points_[n1] + del_.points_[n2]) * 0.5;
+        double dot = ScalarProd(normal, point - mid);
+        if(dot < -1e-12 * width)
+        {
+            size_t neighbor = (n1 == cellIndex) ? n2 : n1;
+            return {false, neighbor};
+        }
+    }
+    return {true, cellIndex};
 }
 
 template <typename PointT>
