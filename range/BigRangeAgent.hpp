@@ -187,7 +187,7 @@ private:
                 auto it = this->resultCache.find(query.pointIdx);
                 if(it == this->resultCache.end())
                 {
-                    this->resultCache.insert({query.pointIdx, this->getFurthestClosestRanks(query.originalPoint)});
+                    this->resultCache.emplace(query.pointIdx, this->getFurthestClosestRanks(query.originalPoint));
                     it = this->resultCache.find(query.pointIdx);
                 }
                 typename HilbertCurveEnvironmentAgent<PointT>::DistancesVector &distances = (*it).second;
