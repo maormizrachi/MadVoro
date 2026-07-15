@@ -2202,7 +2202,7 @@ inline boost::container::flat_map<size_t, std::pair<rank_t, size_t>> GetGhostInf
         for(size_t j = 0; j < NghostOfRank.size(); j++)
         {
             size_t oldIndex = NghostOfRank[j];
-            ghostsInfo.insert({oldIndex, receivedFromRank[j]});
+            ghostsInfo.emplace(oldIndex, receivedFromRank[j]);
         }
     }
     return ghostsInfo;
