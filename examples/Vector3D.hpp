@@ -13,8 +13,17 @@ struct Vector3D
     Vector3D(double x, double y, double z) : x(x), y(y), z(z) {}
 
     // Required by spatial_ds (BoundingBox, OctTree, Sphere)
-    double &operator[](size_t i) { return (&x)[i]; }
-    double operator[](size_t i) const { return (&x)[i]; }
+	double& operator[](size_t index)
+	{
+		double *values[3] = {&this->x, &this->y, &this->z};
+		return *values[index];
+	}
+
+	double operator[](size_t index) const
+	{
+		double values[3] = {this->x, this->y, this->z};
+		return values[index];
+	}
 
     // Required by spatial_ds and MeshDecomposer3D
     friend bool operator==(const Vector3D &a, const Vector3D &b) { return a.x == b.x && a.y == b.y && a.z == b.z; }
