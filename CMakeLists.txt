@@ -5,6 +5,10 @@ project(MadVoro
   DESCRIPTION "Massively distributed construction of 3D Voronoi diagrams"
 )
 
+if(CMAKE_CXX_COMPILER_ID MATCHES "^(Intel|IntelLLVM)$")
+  add_compile_options(-fp-model precise)
+endif()
+
 # Only set these as defaults when MadVoro is the top-level project.
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
