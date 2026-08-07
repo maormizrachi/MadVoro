@@ -38,6 +38,8 @@ option(MADVORO_WITH_HDF5  "Build with HDF5 support"  OFF)
 option(MADVORO_WITH_VTK   "Build with VTK support"   OFF)
 option(MADVORO_WITH_VCL   "Build with VCL (Vector Class Library) support" OFF)
 option(MADVORO_BUILD_EXAMPLES "Build example programs" OFF)
+option(MADVORO_USE_EXACT_INTEGER_FALLBACK
+  "Use exact integer fallback for uncertain 3D predicates" OFF)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
@@ -122,6 +124,10 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/range/finders")
   )
 endif()
 target_link_libraries(madvoro PUBLIC Boost::boost OpenMP::OpenMP_CXX)
+
+if(MADVORO_USE_EXACT_INTEGER_FALLBACK)
+  target_compile_definitions(madvoro PUBLIC MADVORO_USE_EXACT_INTEGER_FALLBACK)
+endif()
 
 if(MADVORO_WITH_MPI)
   target_compile_definitions(madvoro PUBLIC MADVORO_WITH_MPI SPATIAL_DS_WITH_MPI)

@@ -5,6 +5,11 @@
 #include <cstdlib>
 #include <cmath>
 #include <array>
+#include <algorithm>
+#include <cstdint>
+#include <limits>
+#include <numeric>
+#include <vector>
 
 #ifndef ATTRIBUTE_NO_SANITIZE_ADDRESS
 #if defined(__has_attribute) && __has_attribute(no_sanitize_address)
@@ -17,6 +22,281 @@
 namespace MadVoro {
 
 namespace {
+
+	inline bool lattice_integer(double value, std::int64_t& integer)
+	{
+		// Cartesian coordinates used by RICH are exact dyadics at this scale.
+		constexpr int scaleBits = 40;
+		constexpr double limit = static_cast<double>(std::uint64_t(1) << 61);
+		const double scaled = std::ldexp(value, scaleBits);
+		if(!std::isfinite(scaled) || scaled <= -limit || scaled >= limit)
+			return false;
+		integer = static_cast<std::int64_t>(scaled);
+		return static_cast<double>(integer) == scaled;
+	}
+
+	struct LatticePredicateState
+	{
+		bool active = false;
+		double spacing = 0;
+		double minX = 0;
+		double maxX = 0;
+		double minY = 0;
+		double maxY = 0;
+		double minZ = 0;
+		double maxZ = 0;
+	};
+
+	inline LatticePredicateState& lattice_predicate_state()
+	{
+		static thread_local LatticePredicateState state;
+		return state;
+	}
+
+	class LatticePredicateScope
+	{
+	public:
+		template<typename PointT>
+		explicit LatticePredicateScope(const std::vector<PointT>& points)
+			: previous_(lattice_predicate_state())
+		{
+			LatticePredicateState next;
+			if(points.size() < 8) {
+				lattice_predicate_state() = next;
+				return;
+			}
+
+			std::int64_t anchor[3];
+			if(!lattice_integer(points[0].x, anchor[0]) ||
+				!lattice_integer(points[0].y, anchor[1]) ||
+				!lattice_integer(points[0].z, anchor[2])) {
+				lattice_predicate_state() = next;
+				return;
+			}
+
+			std::int64_t minimum[3] = {anchor[0], anchor[1], anchor[2]};
+			std::int64_t maximum[3] = {anchor[0], anchor[1], anchor[2]};
+			std::uint64_t divisor = 0;
+			for(const PointT& point : points) {
+				std::int64_t coordinate[3];
+				if(!lattice_integer(point.x, coordinate[0]) ||
+					!lattice_integer(point.y, coordinate[1]) ||
+					!lattice_integer(point.z, coordinate[2])) {
+					lattice_predicate_state() = next;
+					return;
+				}
+				for(unsigned axis = 0; axis < 3; ++axis) {
+					minimum[axis] = std::min(minimum[axis], coordinate[axis]);
+					maximum[axis] = std::max(maximum[axis], coordinate[axis]);
+					const std::int64_t difference = coordinate[axis] - anchor[axis];
+					const std::uint64_t magnitude = difference < 0
+						? static_cast<std::uint64_t>(-difference)
+						: static_cast<std::uint64_t>(difference);
+					divisor = std::gcd(divisor, magnitude);
+				}
+			}
+			if(divisor == 0 || (divisor & (divisor - 1)) != 0) {
+				lattice_predicate_state() = next;
+				return;
+			}
+			// With a common power-of-two spacing and span <= 255, every
+			// orientation/insphere intermediate has an exact binary64 significand.
+			for(unsigned axis = 0; axis < 3; ++axis) {
+				if(static_cast<std::uint64_t>(maximum[axis] - minimum[axis]) /
+					divisor > 255) {
+					lattice_predicate_state() = next;
+					return;
+				}
+			}
+
+			next.active = true;
+			next.spacing = std::ldexp(static_cast<double>(divisor), -40);
+			next.minX = next.maxX = points[0].x;
+			next.minY = next.maxY = points[0].y;
+			next.minZ = next.maxZ = points[0].z;
+			for(const PointT& point : points) {
+				next.minX = std::min(next.minX, point.x);
+				next.maxX = std::max(next.maxX, point.x);
+				next.minY = std::min(next.minY, point.y);
+				next.maxY = std::max(next.maxY, point.y);
+				next.minZ = std::min(next.minZ, point.z);
+				next.maxZ = std::max(next.maxZ, point.z);
+			}
+			lattice_predicate_state() = next;
+		}
+
+		~LatticePredicateScope()
+		{
+			lattice_predicate_state() = previous_;
+		}
+
+		bool active() const
+		{
+			return lattice_predicate_state().active;
+		}
+
+		double spacing() const
+		{
+			return lattice_predicate_state().spacing;
+		}
+
+	private:
+		LatticePredicateState previous_;
+	};
+
+	template<typename PointT, std::size_t N>
+	bool lattice_predicate_covers(const std::array<PointT, N>& points)
+	{
+		const LatticePredicateState& state = lattice_predicate_state();
+		if(!state.active)
+			return false;
+		for(const PointT& point : points) {
+			if(point.x < state.minX || point.x > state.maxX ||
+				point.y < state.minY || point.y > state.maxY ||
+				point.z < state.minZ || point.z > state.maxZ)
+				return false;
+		}
+		return true;
+	}
+
+	inline bool lattice_predicate_covers(double* pa, double* pb, double* pc,
+		double* pd, double* pe)
+	{
+		const LatticePredicateState& state = lattice_predicate_state();
+		if(!state.active)
+			return false;
+		double* points[5] = {pa, pb, pc, pd, pe};
+		for(double* point : points) {
+			if(point[0] < state.minX || point[0] > state.maxX ||
+				point[1] < state.minY || point[1] > state.maxY ||
+				point[2] < state.minZ || point[2] > state.maxZ)
+				return false;
+		}
+		return true;
+	}
+
+	inline unsigned integer_bits(std::uint64_t value)
+	{
+		return value == 0 ? 0u : 64u - static_cast<unsigned>(__builtin_clzll(value));
+	}
+
+	template<std::size_t N>
+	bool reduce_lattice_differences(std::array<std::int64_t, N>& differences,
+		unsigned maximumBits, unsigned& commonShift)
+	{
+		commonShift = 63;
+		for(const std::int64_t difference : differences) {
+			if(difference == 0)
+				continue;
+			const std::uint64_t magnitude = difference < 0
+				? static_cast<std::uint64_t>(-difference)
+				: static_cast<std::uint64_t>(difference);
+			commonShift = std::min(commonShift,
+				static_cast<unsigned>(__builtin_ctzll(magnitude)));
+		}
+		if(commonShift == 63)
+			return true;
+
+		unsigned bits = 0;
+		for(std::int64_t& difference : differences) {
+			difference /= (std::int64_t(1) << commonShift);
+			const std::uint64_t magnitude = difference < 0
+				? static_cast<std::uint64_t>(-difference)
+				: static_cast<std::uint64_t>(difference);
+			bits = std::max(bits, integer_bits(magnitude));
+		}
+		return bits <= maximumBits;
+	}
+
+	template<typename PointT>
+	bool orient3d_lattice_exact(std::array<PointT, 4> const& points,
+		double& result)
+	{
+		std::array<std::int64_t, 12> coordinates;
+		const double values[12] = {
+			points[0].x, points[0].y, points[0].z,
+			points[1].x, points[1].y, points[1].z,
+			points[2].x, points[2].y, points[2].z,
+			points[3].x, points[3].y, points[3].z};
+		for(std::size_t i = 0; i < coordinates.size(); ++i) {
+			if(!lattice_integer(values[i], coordinates[i]))
+				return false;
+		}
+
+		std::array<std::int64_t, 9> d = {
+			coordinates[0] - coordinates[9],
+			coordinates[1] - coordinates[10],
+			coordinates[2] - coordinates[11],
+			coordinates[3] - coordinates[9],
+			coordinates[4] - coordinates[10],
+			coordinates[5] - coordinates[11],
+			coordinates[6] - coordinates[9],
+			coordinates[7] - coordinates[10],
+			coordinates[8] - coordinates[11]};
+		unsigned commonShift = 0;
+		if(!reduce_lattice_differences(d, 40, commonShift))
+			return false;
+
+		using Integer = __int128_t;
+		const Integer determinant =
+			Integer(d[2]) * (Integer(d[3]) * d[7] - Integer(d[6]) * d[4]) +
+			Integer(d[5]) * (Integer(d[6]) * d[1] - Integer(d[0]) * d[7]) +
+			Integer(d[8]) * (Integer(d[0]) * d[4] - Integer(d[3]) * d[1]);
+		result = std::ldexp(static_cast<double>(determinant),
+			3 * (static_cast<int>(commonShift) - 40));
+		return true;
+	}
+
+	inline bool insphere_lattice_exact(double* pa, double* pb, double* pc,
+		double* pd, double* pe, double& result)
+	{
+		std::array<std::int64_t, 15> coordinates;
+		const double values[15] = {
+			pa[0], pa[1], pa[2], pb[0], pb[1], pb[2], pc[0], pc[1], pc[2],
+			pd[0], pd[1], pd[2], pe[0], pe[1], pe[2]};
+		for(std::size_t i = 0; i < coordinates.size(); ++i) {
+			if(!lattice_integer(values[i], coordinates[i]))
+				return false;
+		}
+
+		std::array<std::int64_t, 12> d = {
+			coordinates[0] - coordinates[12],
+			coordinates[1] - coordinates[13],
+			coordinates[2] - coordinates[14],
+			coordinates[3] - coordinates[12],
+			coordinates[4] - coordinates[13],
+			coordinates[5] - coordinates[14],
+			coordinates[6] - coordinates[12],
+			coordinates[7] - coordinates[13],
+			coordinates[8] - coordinates[14],
+			coordinates[9] - coordinates[12],
+			coordinates[10] - coordinates[13],
+			coordinates[11] - coordinates[14]};
+		unsigned commonShift = 0;
+		if(!reduce_lattice_differences(d, 23, commonShift))
+			return false;
+
+		using Integer = __int128_t;
+		const Integer ab = Integer(d[0]) * d[4] - Integer(d[3]) * d[1];
+		const Integer bc = Integer(d[3]) * d[7] - Integer(d[6]) * d[4];
+		const Integer cd = Integer(d[6]) * d[10] - Integer(d[9]) * d[7];
+		const Integer da = Integer(d[9]) * d[1] - Integer(d[0]) * d[10];
+		const Integer ac = Integer(d[0]) * d[7] - Integer(d[6]) * d[1];
+		const Integer bd = Integer(d[3]) * d[10] - Integer(d[9]) * d[4];
+		const Integer abc = Integer(d[2]) * bc - Integer(d[5]) * ac + Integer(d[8]) * ab;
+		const Integer bcd = Integer(d[5]) * cd - Integer(d[8]) * bd + Integer(d[11]) * bc;
+		const Integer cda = Integer(d[8]) * da + Integer(d[11]) * ac + Integer(d[2]) * cd;
+		const Integer dab = Integer(d[11]) * ab + Integer(d[2]) * bd + Integer(d[5]) * da;
+		const Integer alift = Integer(d[0]) * d[0] + Integer(d[1]) * d[1] + Integer(d[2]) * d[2];
+		const Integer blift = Integer(d[3]) * d[3] + Integer(d[4]) * d[4] + Integer(d[5]) * d[5];
+		const Integer clift = Integer(d[6]) * d[6] + Integer(d[7]) * d[7] + Integer(d[8]) * d[8];
+		const Integer dlift = Integer(d[9]) * d[9] + Integer(d[10]) * d[10] + Integer(d[11]) * d[11];
+		const Integer determinant = (dlift * abc - clift * dab) +
+			(blift * cda - alift * bcd);
+		result = std::ldexp(static_cast<double>(determinant),
+			5 * (static_cast<int>(commonShift) - 40));
+		return true;
+	}
 
 double const epsilon = 1.1102230246251565e-016;
 double const splitter = 134217729;
@@ -1429,6 +1709,8 @@ namespace
 		dlift = dex * dex + dey * dey + dez * dez;
 
 		det = (dlift * abc - clift * dab) + (blift * cda - alift * bcd);
+		if(lattice_predicate_covers(pa, pb, pc, pd, pe))
+			return det;
 
 		aezplus = Absolute(aez);
 		bezplus = Absolute(bez);
@@ -1467,6 +1749,11 @@ namespace
 			return det;
 		}
 
+#ifdef MADVORO_USE_EXACT_INTEGER_FALLBACK
+		double integerResult = 0;
+		if(insphere_lattice_exact(pa, pb, pc, pd, pe, integerResult))
+			return integerResult;
+#endif
 		return insphereadapt(pa, pb, pc, pd, pe, permanent);
 	}
 }

@@ -2688,8 +2688,6 @@ void Voronoi3D<PointT>::UpdateCMs(void)
 template <typename PointT>
 void Voronoi3D<PointT>::UpdateRadiuses(const std::vector<PointT> &points)
 {
-    // use an oct tree to fast calculate the distance to closest point
-    OctTree<PointT> myOctTree(this->ll_, this->ur_, this->allMyPoints.begin(), this->allMyPoints.end());
     size_t const N = this->indicesInAllMyPoints.size();
     for(const std::pair<size_t, size_t> &indices : this->indicesInAllMyPoints)
     {

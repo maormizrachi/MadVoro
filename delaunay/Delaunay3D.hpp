@@ -11,6 +11,7 @@
 #include <array>
 #include <limits>
 #include <algorithm>
+#include <random>
 #include <cmath>
 #include <fstream>
 #include <iostream>
@@ -23,6 +24,16 @@ namespace MadVoro {
 using namespace MadVoro::fallback;
 
 using std::vector;
+
+inline void ShuffleDegenerateInsertionOrder(std::vector<std::size_t>& order)
+{
+    std::mt19937_64 generator(0x6d6164766f726full);
+    constexpr std::size_t blockSize = 1024;
+    for(std::size_t begin = 0; begin < order.size(); begin += blockSize) {
+        const std::size_t end = std::min(begin + blockSize, order.size());
+        std::shuffle(order.begin() + begin, order.begin() + end, generator);
+    }
+}
 using std::string;
 
 //#define runcheks 1
@@ -681,10 +692,20 @@ Delaunay3D<PointT>::~Delaunay3D()
 template <typename PointT>
 void Delaunay3D<PointT>::BuildExtra(vector<PointT> const& points)
 {
+    std::vector<PointT> predicatePoints;
+    predicatePoints.reserve(points_.size() + points.size() - 4);
+    predicatePoints.insert(predicatePoints.end(), points_.begin(),
+        points_.begin() + Norg_);
+    predicatePoints.insert(predicatePoints.end(), points_.begin() + Norg_ + 4,
+        points_.end());
+    predicatePoints.insert(predicatePoints.end(), points.begin(), points.end());
+    LatticePredicateScope predicateScope(predicatePoints);
     size_t Nstart = points_.size();
     points_.insert(points_.end(), points.begin(), points.end());
     size_t N = points.size();
     std::vector<size_t> order = HilbertOrder3D(points);
+    if(predicateScope.active())
+        ShuffleDegenerateInsertionOrder(order);
     assert(to_check_.empty());
     for(std::size_t i = 0; i < N; ++i) {
         if(InsideBigTetra(points_[order[i] + Nstart], points_, Norg_)) {
@@ -697,6 +718,7 @@ template <typename PointT>
 void Delaunay3D<PointT>::Build(vector<PointT> const& points, PointT const& maxv, PointT const& minv,
     std::vector<size_t>& order)
 {
+    LatticePredicateScope predicateScope(points);
     empty_tetras_.clear();
     std::size_t Norg = points.size();
     Norg_ = Norg;
@@ -743,6 +765,8 @@ void Delaunay3D<PointT>::Build(vector<PointT> const& points, PointT const& maxv,
     if(order.empty()) {
         order = HilbertOrder3D(points);
     }
+    if(predicateScope.active())
+        ShuffleDegenerateInsertionOrder(order);
     for(std::size_t i = 0; i < Norg; ++i) {
         InsertPoint(order[i]);
     }

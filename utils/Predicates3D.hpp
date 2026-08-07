@@ -37,6 +37,8 @@ double orient3d(std::array<PointT, 4> const& points)
 	det = adz * (bdxcdy - cdxbdy)
 		+ bdz * (cdxady - adxcdy)
 		+ cdz * (adxbdy - bdxady);
+	if(lattice_predicate_covers(points))
+		return det;
 
 	permanent = (std::abs(bdxcdy) + std::abs(cdxbdy)) * std::abs(adz)
 		+ (std::abs(cdxady) + std::abs(adxcdy)) * std::abs(bdz)
@@ -46,6 +48,11 @@ double orient3d(std::array<PointT, 4> const& points)
 		return det;
 	}
 
+#ifdef MADVORO_USE_EXACT_INTEGER_FALLBACK
+	double integerResult = 0;
+	if(orient3d_lattice_exact(points, integerResult))
+		return integerResult;
+#endif
 	return orient3dadapt(points, permanent);
 }
 
