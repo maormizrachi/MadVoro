@@ -692,8 +692,19 @@ Delaunay3D<PointT>::~Delaunay3D()
 template <typename PointT>
 void Delaunay3D<PointT>::BuildExtra(vector<PointT> const& points)
 {
+    if(points_.size() < 4 || Norg_ > points_.size() - 4)
+    {
+        MadVoro::Exception::MadVoroException eo(
+            "Delaunay3D::BuildExtra requires an initialized bounding tetrahedron");
+        eo.addEntry("point count", points_.size());
+        eo.addEntry("original point count", Norg_);
+        throw eo;
+    }
+    if(points.empty())
+        return;
+
     std::vector<PointT> predicatePoints;
-    predicatePoints.reserve(points_.size() + points.size() - 4);
+    predicatePoints.reserve((points_.size() - 4) + points.size());
     predicatePoints.insert(predicatePoints.end(), points_.begin(),
         points_.begin() + Norg_);
     predicatePoints.insert(predicatePoints.end(), points_.begin() + Norg_ + 4,

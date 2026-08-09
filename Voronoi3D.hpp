@@ -2037,37 +2037,23 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
 
     std::vector<size_t> order;
 
-    // build delaunay
-    if(not activePoints.empty())
+    // Initialize the Delaunay structure on every rank.  Empty ranks still need
+    // the four bounding-tetrahedron points before the collective ghost build;
+    // otherwise BuildExtra() sees an uninitialized point array.
+    std::pair<PointT, PointT> bounding_box =
+        std::make_pair(this->ll_, this->ur_);
+    for(const PointT &point : activePoints)
     {
-        std::pair<PointT, PointT> bounding_box = std::make_pair(activePoints[0], activePoints[0]);
-        for(const PointT &point : activePoints)
-        {
-            bounding_box.first.x = std::min(bounding_box.first.x, point.x);
-            bounding_box.second.x = std::max(bounding_box.second.x, point.x);
-            bounding_box.first.y = std::min(bounding_box.first.y, point.y);
-            bounding_box.second.y = std::max(bounding_box.second.y, point.y);
-            bounding_box.first.z = std::min(bounding_box.first.z, point.z);
-            bounding_box.second.z = std::max(bounding_box.second.z, point.z);
-        }
-
-        // Ensure bounding box covers at least the domain box to prevent
-        // degenerate big tets for collinear/coplanar point sets
-        bounding_box.first.x = std::min(bounding_box.first.x, this->ll_.x);
-        bounding_box.first.y = std::min(bounding_box.first.y, this->ll_.y);
-        bounding_box.first.z = std::min(bounding_box.first.z, this->ll_.z);
-        bounding_box.second.x = std::max(bounding_box.second.x, this->ur_.x);
-        bounding_box.second.y = std::max(bounding_box.second.y, this->ur_.y);
-        bounding_box.second.z = std::max(bounding_box.second.z, this->ur_.z);
-
-        // performs internal tesselation:
-        // std::cout << "checking duplications..." << std::endl;
-        // reportDuplications(new_points);
-        order = HilbertOrder3D(activePoints);
-        
-        // initial build for the points
-        this->del_.Build(activePoints, bounding_box.second, bounding_box.first, order);
+        bounding_box.first.x = std::min(bounding_box.first.x, point.x);
+        bounding_box.second.x = std::max(bounding_box.second.x, point.x);
+        bounding_box.first.y = std::min(bounding_box.first.y, point.y);
+        bounding_box.second.y = std::max(bounding_box.second.y, point.y);
+        bounding_box.first.z = std::min(bounding_box.first.z, point.z);
+        bounding_box.second.z = std::max(bounding_box.second.z, point.z);
     }
+
+    order = HilbertOrder3D(activePoints);
+    this->del_.Build(activePoints, bounding_box.second, bounding_box.first, order);
 
     // updates the radiuses array of the tetrahedra, as well as the lists for each point what tetras it belongs to
     this->R_.resize(this->del_.tetras_.size());
@@ -2341,29 +2327,21 @@ void Voronoi3D<PointT>::MockMesh(void)
     
     this->BuildInitialize(new_points.size());
     std::vector<size_t> order;
-    if(not new_points.empty())
+    // A rebalanced rank may own no cells.  It must still initialize the
+    // bounding tetrahedron before participating in ghost reconstruction.
+    std::pair<PointT, PointT> bounding_box =
+        std::make_pair(this->ll_, this->ur_);
+    for(const PointT &point : new_points)
     {
-        order = HilbertOrder3D(new_points);
-        std::pair<PointT, PointT> bounding_box = std::make_pair(new_points[0], new_points[0]);
-        for(const PointT &point : new_points)
-        {
-            bounding_box.first.x = std::min(bounding_box.first.x, point.x);
-            bounding_box.second.x = std::max(bounding_box.second.x, point.x);
-            bounding_box.first.y = std::min(bounding_box.first.y, point.y);
-            bounding_box.second.y = std::max(bounding_box.second.y, point.y);
-            bounding_box.first.z = std::min(bounding_box.first.z, point.z);
-            bounding_box.second.z = std::max(bounding_box.second.z, point.z);
-        }
-        
-        bounding_box.first.x = std::min(bounding_box.first.x, this->ll_.x);
-        bounding_box.first.y = std::min(bounding_box.first.y, this->ll_.y);
-        bounding_box.first.z = std::min(bounding_box.first.z, this->ll_.z);
-        bounding_box.second.x = std::max(bounding_box.second.x, this->ur_.x);
-        bounding_box.second.y = std::max(bounding_box.second.y, this->ur_.y);
-        bounding_box.second.z = std::max(bounding_box.second.z, this->ur_.z);
-
-        this->del_.Build(new_points, bounding_box.second, bounding_box.first, order);
+        bounding_box.first.x = std::min(bounding_box.first.x, point.x);
+        bounding_box.second.x = std::max(bounding_box.second.x, point.x);
+        bounding_box.first.y = std::min(bounding_box.first.y, point.y);
+        bounding_box.second.y = std::max(bounding_box.second.y, point.y);
+        bounding_box.first.z = std::min(bounding_box.first.z, point.z);
+        bounding_box.second.z = std::max(bounding_box.second.z, point.z);
     }
+    order = HilbertOrder3D(new_points);
+    this->del_.Build(new_points, bounding_box.second, bounding_box.first, order);
     // updates the radiuses array of the tetrahedra, as well as the lists for each point what tetras it belongs to
     this->R_.resize(this->del_.tetras_.size());
     ContainerOps::conditional_shrink(this->R_);
