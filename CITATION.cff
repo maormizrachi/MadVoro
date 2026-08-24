@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+title: "MadVoro: Massively distributed construction of 3D Voronoi diagrams"
+version: 1.0.0
+license: BSD-3-Clause
+type: software
+abstract: >-
+  MadVoro is a C++ library for massively distributed construction of 3D
+  Voronoi diagrams. It provides the Voronoi tessellation engine used by the
+  RICH astrophysical simulation code and can also be used as a standalone
+  library in other applications.
+message: "If you use MadVoro in your research, please cite it using the metadata below."
+authors:
+  - given-names: Maor
+    family-names: Mizrachi
+  - given-names: Elad
+    family-names: Steinberg
+keywords:
+  - Voronoi tessellation
+  - Delaunay triangulation
+  - high-performance computing
+  - distributed computing
+  - MPI
+  - computational geometry
