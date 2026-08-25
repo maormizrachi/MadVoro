@@ -199,7 +199,6 @@ private:
     std::vector<PointT> PrepareToBuildParallel(const std::vector<PointT> &allPoints, const std::vector<double> &allWeights, const std::vector<size_t> &indicesToBuild, bool suppressRebalancing, bool suppressExchange);
     void FilterRealGhostPoints();
     void UpdateDuplicatedPoints(const std::vector<int> &sentProc, const std::vector<std::vector<size_t>> &sentPoints);
-    void EnsureSymmetry(const std::vector<int> &sentProc, const std::vector<std::vector<int>> &recvProcLists);
     std::tuple<std::vector<PointT>, std::vector<std::vector<size_t>>, std::vector<std::vector<size_t>>> InitialGhostPointsExchange(const MPI_Comm &comm = MPI_COMM_WORLD) const;
     void InitialExchange(const std::vector<PointT> &points, std::vector<int> &sentProc, std::vector<std::vector<size_t>> &sentPoints, const MPI_Comm &comm = MPI_COMM_WORLD);
     void SetGhostArray(const std::vector<int> &recvProc, const std::vector<std::vector<size_t>> &recvPoints);  
@@ -258,7 +257,14 @@ private:
   std::vector<double> allPointsWeights;
   std::vector<double> radiuses;
 
-  AllPointsMap indicesInAllMyPoints; // the indices of the points in `del_.points_`, in the list of all points
+  // Internal mesh index -> compact allMyPoints storage index.  MadVoro's
+  // range/ghost machinery must keep using this map.
+  AllPointsMap indicesInAllMyPoints;
+  // Public mesh index -> index in the point vector supplied to Build*.  This
+  // differs from compact storage after a suppressed partial MPI exchange.
+  AllPointsMap indicesInInputPoints;
+  // Compact allMyPoints storage index -> Build* input index.
+  std::vector<size_t> allMyPointInputIndices;
 
 
   template<typename T>
@@ -437,6 +443,11 @@ public:
 
   const AllPointsMap &GetIndicesInAllPoints(void) const;
 
+  size_t GetInputIndexForAllPoint(size_t allPointIndex) const
+  {
+    return this->allMyPointInputIndices.at(allPointIndex);
+  }
+
   const std::vector<PointT> &getAllPoints(void) const;
 
   std::vector<PointT> &getAllPoints(void);
@@ -465,6 +476,11 @@ public:
   vector<vector<std::size_t> >& GetDuplicatedPoints(void);
 
   vector<vector<std::size_t> >const& GetDuplicatedPoints(void)const;
+
+  const vector<vector<std::size_t>>& GetDuplicatedAllPointIndices(void) const
+  {
+    return duplicated_points_;
+  }
 
     /*! \brief Get Duplicated processe
       \return List of duplicated points
@@ -1237,7 +1253,7 @@ Voronoi3D<PointT>::Voronoi3D(PointT const &ll, PointT const &ur) : ll_(ll), ur_(
                                                                 pointsManager(nullptr),
                                                                 allMyPoints(), 
                                                               #endif // MADVORO_WITH_MPI
-                                                              indicesInAllMyPoints()
+                                                              indicesInAllMyPoints(), indicesInInputPoints(), allMyPointInputIndices()
 {
     this->box_faces_ = BuildBox(this->ll_, this->ur_);
     #ifdef MADVORO_WITH_MPI
@@ -1590,33 +1606,6 @@ void Voronoi3D<PointT>::UpdateDuplicatedPoints(const std::vector<int> &sentProc,
     }
 }
 
-/**
- * \author Maor Mizrachi
- * \brief Ensures that the duplicated and ghost arrays contain only the points from/to ranks which are intersecting (sent iff received)
-*/
-template <typename PointT>
-void Voronoi3D<PointT>::EnsureSymmetry(const std::vector<int> &sentProc, const std::vector<std::vector<int>> &recvProcLists)
-{
-    for(size_t i = 0; i < this->duplicatedprocs_.size(); i++)
-    {
-        int _rank =  this->duplicatedprocs_[i];
-        bool notAppearingInSent = (std::find(sentProc.begin(), sentProc.end(), _rank) == sentProc.end());
-        bool notAppearingInAllRecv = std::all_of(recvProcLists.cbegin(), recvProcLists.cend(), [_rank](const std::vector<int> &recvProcList){return std::find(recvProcList.cbegin(), recvProcList.cend(), _rank) == recvProcList.cend();});
-        
-        if(notAppearingInSent or notAppearingInAllRecv)
-        {
-            // not in the intersection, remove the rank
-            this->duplicatedprocs_.erase(this->duplicatedprocs_.begin() + i);
-            this->duplicated_points_.erase(this->duplicated_points_.begin() + i);
-            this->Nghost_.erase(this->Nghost_.begin() + i);
-            i--;
-        }
-    }
-    ContainerOps::conditional_shrink(this->duplicatedprocs_);
-    ContainerOps::conditional_shrink(this->duplicated_points_);
-    ContainerOps::conditional_shrink(this->Nghost_);
-}
-
 // void Voronoi3D<PointT>::InitialExchange(const std::vector<PointT> &points, std::vector<int> &sentProc, std::vector<std::vector<size_t>> &sentPoints, const MPI_Comm &comm)
 // {
 //     const EnvironmentAgent *envAgent = this->pointsManager->getEnvironmentAgent();
@@ -1851,6 +1840,51 @@ std::vector<PointT> Voronoi3D<PointT>::PrepareToBuildParallel(const std::vector<
 
     PointsExchangeResult<PointT, VoronoiPayload<PointT>> exchangeResult = this->pointsManager->update(allPoints, allowExchange? allWeights : this->allPointsWeights, payloads, indicesToBuild, allowRebalance, allowExchange);
 
+    const size_t exchangedPointsSize = exchangeResult.newPoints.size();
+    if(exchangeResult.newWeights.size() != exchangedPointsSize ||
+       exchangeResult.newPayloads.size() != exchangedPointsSize ||
+       exchangeResult.newIndices.size() != exchangedPointsSize ||
+       exchangeResult.participatingIndices.size() != exchangedPointsSize)
+    {
+        MadVoro::Exception::MadVoroException eo(
+            "Voronoi3D::PrepareToBuildParallel: inconsistent point-exchange result sizes");
+        eo.addEntry("Points", exchangedPointsSize);
+        eo.addEntry("Weights", exchangeResult.newWeights.size());
+        eo.addEntry("Payloads", exchangeResult.newPayloads.size());
+        eo.addEntry("Original indices", exchangeResult.newIndices.size());
+        eo.addEntry("Participation flags", exchangeResult.participatingIndices.size());
+        throw eo;
+    }
+
+    this->allMyPointInputIndices.resize(exchangedPointsSize);
+    if(allowExchange)
+    {
+        // Preserve the historical post-exchange indexing contract.  Original
+        // indices received from another rank are not indices in this rank's
+        // input vector.
+        std::iota(this->allMyPointInputIndices.begin(),
+                  this->allMyPointInputIndices.end(), size_t(0));
+    }
+    else
+    {
+        std::vector<unsigned char> seenInputIndex(allPoints.size(), 0);
+        for(size_t pointIdx = 0; pointIdx < exchangedPointsSize; ++pointIdx)
+        {
+            const size_t inputIdx = exchangeResult.newIndices[pointIdx];
+            if(inputIdx >= allPoints.size() || seenInputIndex[inputIdx] != 0)
+            {
+                MadVoro::Exception::MadVoroException eo(
+                    "Voronoi3D::PrepareToBuildParallel: invalid suppressed-exchange input mapping");
+                eo.addEntry("Compact index", pointIdx);
+                eo.addEntry("Input index", inputIdx);
+                eo.addEntry("Input size", allPoints.size());
+                throw eo;
+            }
+            seenInputIndex[inputIdx] = 1;
+            this->allMyPointInputIndices[pointIdx] = inputIdx;
+        }
+    }
+
     this->allMyPoints = std::move(exchangeResult.newPoints);
     this->radiuses.resize(exchangeResult.newPayloads.size());
     this->all_CM.resize(exchangeResult.newPayloads.size());
@@ -1868,6 +1902,7 @@ std::vector<PointT> Voronoi3D<PointT>::PrepareToBuildParallel(const std::vector<
 
     std::vector<PointT> new_points;
     this->indicesInAllMyPoints = AllPointsMap();
+    this->indicesInInputPoints = AllPointsMap();
     size_t numOfSelfPoints = this->self_index_.size();
 
     // this loop determines the points list, and the matching indices of each point (in the points list) to the long points list
@@ -1876,7 +1911,10 @@ std::vector<PointT> Voronoi3D<PointT>::PrepareToBuildParallel(const std::vector<
     {
         if(exchangeResult.participatingIndices.at(pointIdx))
         {
-            this->indicesInAllMyPoints[new_points.size()] = pointIdx;
+            const size_t localPointIdx = new_points.size();
+            this->indicesInAllMyPoints[localPointIdx] = pointIdx;
+            this->indicesInInputPoints[localPointIdx] =
+                this->allMyPointInputIndices.at(pointIdx);
             new_points.push_back(this->allMyPoints[pointIdx]);
         }
     }
@@ -1959,7 +1997,7 @@ void Voronoi3D<PointT>::UpdatePointsTree(const std::vector<PointT> &activePoints
     size_t allPointsNum = this->allMyPoints.size();
     for(size_t pointIdx = 0; pointIdx < allPointsNum; pointIdx++)
     {
-        const PointT &point = activePoints[pointIdx];
+        const PointT &point = this->allMyPoints[pointIdx];
         this->allMyPointsTree->insert(IVec(point.x, point.y, point.z, pointIdx));
     }
 
@@ -2133,8 +2171,17 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
 
     {
         const std::vector<rank_t> &correspondents = this->GetDuplicatedProcs();
-        const std::vector<std::vector<size_t>> &indices = this->GetDuplicatedPoints();
-        std::vector<std::vector<double>> exchange = MPI_exchange_data_indexed(correspondents, this->volume_, indices);
+        const std::vector<std::vector<size_t>> &indices =
+            this->GetDuplicatedPoints();
+        // Sent-point indices come from the range finder and therefore index
+        // allMyPoints.  Non-target supports have no constructed cell volume;
+        // keep their compact all-point entries at zero.
+        std::vector<double> allVolumes(this->GetAllPointsNo(), 0.0);
+        for(size_t point = 0; point < this->Norg_; ++point)
+            allVolumes[this->indicesInAllMyPoints.at(point)] =
+                this->volume_.at(point);
+        std::vector<std::vector<double>> exchange =
+            MPI_exchange_data_indexed(correspondents, allVolumes, indices);
         const std::vector<std::vector<size_t>> &ghost_indices = this->GetGhostIndeces();
         this->volume_.resize(this->GetTotalPointNumber(), 0.0);
         for(size_t i = 0; i < correspondents.size(); ++i)
@@ -2261,6 +2308,10 @@ void Voronoi3D<PointT>::MockMesh(void)
 
     std::vector<PointT> new_points;
     this->indicesInAllMyPoints = AllPointsMap();
+    this->indicesInInputPoints = AllPointsMap();
+    this->allMyPointInputIndices.resize(this->allMyPoints.size());
+    std::iota(this->allMyPointInputIndices.begin(),
+              this->allMyPointInputIndices.end(), size_t(0));
     size_t numOfSelfPoints = this->self_index_.size();
 
     // this loop determines the points list, and the matching indices of each point (in the points list) to the long points list
@@ -2268,6 +2319,7 @@ void Voronoi3D<PointT>::MockMesh(void)
     for(size_t pointIdx = 0; pointIdx < allPointsSize; pointIdx++)
     {
         this->indicesInAllMyPoints[new_points.size()] = pointIdx;
+        this->indicesInInputPoints[new_points.size()] = pointIdx;
         new_points.push_back(this->allMyPoints[pointIdx]);
     }
     
@@ -2870,7 +2922,10 @@ void Voronoi3D<PointT>::BringSelfGhostPoints(const std::vector<BigRangeQueryData
             const SmallRangeQueryData<PointT> &query = smallQueries[i];
             for(const size_t &pointIdxInAll : newSmallQueriesPoints)
             {
-                this->indicesInAllMyPoints[this->del_.points_.size() + newPoints.size()] = pointIdxInAll;
+                const size_t localPointIdx = this->del_.points_.size() + newPoints.size();
+                this->indicesInAllMyPoints[localPointIdx] = pointIdxInAll;
+                this->indicesInInputPoints[localPointIdx] =
+                    this->allMyPointInputIndices.at(pointIdxInAll);
                 newPoints.push_back(this->allMyPoints[pointIdxInAll]);
             }
             numOfResultsForSmallPoints[query.pointIdx] = newSmallQueriesPoints.size();
@@ -2887,7 +2942,10 @@ void Voronoi3D<PointT>::BringSelfGhostPoints(const std::vector<BigRangeQueryData
             const BigRangeQueryData<PointT> &query = bigQueries[i];
             for(const size_t &pointIdxInAll : newBigQueriesPoints)
             {
-                this->indicesInAllMyPoints[this->del_.points_.size() + newPoints.size()] = pointIdxInAll;
+                const size_t localPointIdx = this->del_.points_.size() + newPoints.size();
+                this->indicesInAllMyPoints[localPointIdx] = pointIdxInAll;
+                this->indicesInInputPoints[localPointIdx] =
+                    this->allMyPointInputIndices.at(pointIdxInAll);
                 newPoints.push_back(this->allMyPoints[pointIdxInAll]);
             }
             numOfResultsForBigPoints[query.pointIdx] = newBigQueriesPoints.size();
@@ -3309,9 +3367,13 @@ template <typename PointT>
 
         // calculate this->duplicated_points_
         this->UpdateDuplicatedPoints(sentProc, sentPoints);
-        // remove whomever that does not appear both in my sent vector and receive vector (because if one appears in only one, it means that we either sent it a point, or received one, but has no used of it at all (otherwise it would require a symetric call))
-        // this->EnsureSymmetry(sentProc, {alreadyRecvProcs, smallRangeAgent.getRecvProc(), bigRangeAgent.getRecvProc()});    // todo: uncomment
-        this->EnsureSymmetry(sentProc, {alreadyRecvProcs, smallRangeAgent.getRecvProc(), bigRangeAgent.getRecvProc()});    
+        // SetGhostArray() adds every receive peer and
+        // UpdateDuplicatedPoints() adds every send peer.  Their union is
+        // symmetric across ranks even when only one direction carries data.
+        // Do not reduce it to the historical local intersection: partial
+        // builds legitimately have one-way geometric support, and removing
+        // that peer loses Nghost_ ownership and makes later exchanges
+        // asymmetric.  Zero-length reverse messages are valid.
     }
     #endif // MADVORO_WITH_MPI
 }
@@ -3428,6 +3490,8 @@ void Voronoi3D<PointT>::ReleaseMemory(void)
     ContainerOps::release_container_memory(allPointsWeights);
     ContainerOps::release_container_memory(radiuses);
     ContainerOps::release_container_memory(indicesInAllMyPoints);
+    ContainerOps::release_container_memory(indicesInInputPoints);
+    ContainerOps::release_container_memory(allMyPointInputIndices);
     del_.ReleaseMemory();
 #ifdef MADVORO_WITH_MPI
     ContainerOps::release_container_memory(sentprocs_);
@@ -3513,6 +3577,27 @@ void Voronoi3D<PointT>::BuildNoBox(vector<PointT> const &points, vector<vector<P
 template <typename PointT>
 void Voronoi3D<PointT>::BuildPartially(const std::vector<PointT> &allPoints, const std::vector<size_t> &indicesToBuild)
 {
+    std::vector<unsigned char> requested(allPoints.size(), 0);
+    for(size_t const pointIdx : indicesToBuild)
+    {
+        if(pointIdx >= allPoints.size())
+        {
+            MadVoro::Exception::MadVoroException eo(
+                "Voronoi3D::BuildPartially: requested index is outside allPoints");
+            eo.addEntry("Requested index", pointIdx);
+            eo.addEntry("All points size", allPoints.size());
+            throw eo;
+        }
+        if(requested[pointIdx] != 0)
+        {
+            MadVoro::Exception::MadVoroException eo(
+                "Voronoi3D::BuildPartially: requested indices contain a duplicate");
+            eo.addEntry("Duplicate index", pointIdx);
+            throw eo;
+        }
+        requested[pointIdx] = 1;
+    }
+
     if(this->radiuses.size() < allPoints.size())
     {
         this->radiuses.resize(allPoints.size(), RADIUS_UNINITIALIZED);
@@ -3524,14 +3609,20 @@ void Voronoi3D<PointT>::BuildPartially(const std::vector<PointT> &allPoints, con
     }
     
     this->allMyPoints = allPoints;
+    this->allMyPointInputIndices.resize(allPoints.size());
+    std::iota(this->allMyPointInputIndices.begin(),
+              this->allMyPointInputIndices.end(), size_t(0));
     // this->radiuses.resize(allPoints.size(), RADIUS_UNINITIALIZED);
     std::vector<PointT> activePoints = MadVoro::ContainerOps::VectorValues(allPoints, indicesToBuild);
     
     size_t pointsCounter = 0;
     this->indicesInAllMyPoints = AllPointsMap();
+    this->indicesInInputPoints = AllPointsMap();
     for(const size_t &pointIdx : indicesToBuild)
     {
-        this->indicesInAllMyPoints[pointIdx] = pointsCounter;
+        // The map is always partial/local build index -> index in allPoints.
+        this->indicesInAllMyPoints[pointsCounter] = pointIdx;
+        this->indicesInInputPoints[pointsCounter] = pointIdx;
         pointsCounter++;
     }
 
@@ -3604,7 +3695,7 @@ void Voronoi3D<PointT>::BuildPartially(const std::vector<PointT> &allPoints, con
     size_t allPointsNum = this->allMyPoints.size();
     for(size_t pointIdx = 0; pointIdx < allPointsNum; pointIdx++)
     {
-        const PointT &point = activePoints[pointIdx];
+        const PointT &point = this->allMyPoints[pointIdx];
         this->allMyPointsTree->insert(IVec(point.x, point.y, point.z, pointIdx));
     }
 
@@ -4298,7 +4389,7 @@ const vector<PointT> &Voronoi3D<PointT>::getMeshPoints(void) const
 template <typename PointT>
 const AllPointsMap &Voronoi3D<PointT>::GetIndicesInAllPoints(void) const
 {
-    return this->indicesInAllMyPoints;
+    return this->indicesInInputPoints;
 }
 
 template <typename PointT>
@@ -4359,7 +4450,9 @@ Voronoi3D<PointT>::Voronoi3D(Voronoi3D<PointT> const &other) : ll_(other.ll_), u
                                                     pointsManager(other.pointsManager->clone()), indexingToSave(other.indexingToSave),
                                                     rangeFinder(other.rangeFinder), radiuses(other.radiuses), allMyPoints(other.allMyPoints), allPointsWeights(other.allPointsWeights),
                                                 #endif // MADVORO_WITH_MPI
-                                                indicesInAllMyPoints(other.indicesInAllMyPoints)
+                                                indicesInAllMyPoints(other.indicesInAllMyPoints),
+                                                indicesInInputPoints(other.indicesInInputPoints),
+                                                allMyPointInputIndices(other.allMyPointInputIndices)
                                                 {}
 
 template <typename PointT>
@@ -4901,13 +4994,29 @@ void Voronoi3D<PointT>::SyncPartialBuildData(std::vector<T> &partialBuildData, s
     eo.addEntry("Number of points", Norg);
     throw eo;
   }
-  const AllPointsMap &indicesInAllMyPoints = this->GetIndicesInAllPoints();
+    // allBuildData is stored in compact allMyPoints order here.  The public
+    // GetIndicesInAllPoints() map instead targets the original Build* input.
+    const AllPointsMap &indicesInAllMyPoints = this->indicesInAllMyPoints;
+  if(indicesInAllMyPoints.size() < Norg)
+  {
+    MadVoro::Exception::MadVoroException eo("Voronoi3D<PointT>::SyncPartialBuildData: local-to-global map is incomplete");
+    eo.addEntry("Map size", indicesInAllMyPoints.size());
+    eo.addEntry("Number of points", Norg);
+    throw eo;
+  }
 
   allBuildData.resize(this->GetAllPointsNo());
 
   for(size_t i = 0; i < Norg; i++)
   {
-      size_t pointIdx = indicesInAllMyPoints.at(i);
+      auto const map_it = indicesInAllMyPoints.find(i);
+      if(map_it == indicesInAllMyPoints.end() || map_it->second >= allBuildData.size())
+      {
+        MadVoro::Exception::MadVoroException eo("Voronoi3D<PointT>::SyncPartialBuildData: invalid local-to-global map entry");
+        eo.addEntry("Local index", i);
+        throw eo;
+      }
+      size_t pointIdx = map_it->second;
       allBuildData[pointIdx] = partialBuildData[i];
   }
 
@@ -4919,12 +5028,23 @@ void Voronoi3D<PointT>::SyncPartialBuildData(std::vector<T> &partialBuildData, s
       if(pointIsMine)
       {
           size_t pointIdx = indicesInAllMyPoints.at(i);
+          if(pointIdx >= allBuildData.size())
+          {
+            MadVoro::Exception::MadVoroException eo("Voronoi3D<PointT>::SyncPartialBuildData: mapped index exceeds all data");
+            eo.addEntry("Local index", i);
+            eo.addEntry("Mapped index", pointIdx);
+            throw eo;
+          }
           partialBuildData[i] = allBuildData[pointIdx];
       }
   }
 
   #ifdef MADVORO_WITH_MPI
-      std::vector<std::vector<T>> incoming = MPI_exchange_data_indexed(this->GetDuplicatedProcs(), allBuildData, this->GetDuplicatedPoints());
+      // GetDuplicatedPoints() is indexed in compact allMyPoints space, as is
+      // allBuildData.  partialBuildData is instead indexed by Delaunay point.
+      std::vector<std::vector<T>> incoming = MPI_exchange_data_indexed(
+          this->GetDuplicatedProcs(), allBuildData,
+          this->GetDuplicatedPoints());
       size_t incomingSize = incoming.size();
       const std::vector<std::vector<size_t>> &Nghost = this->GetGhostIndeces();
       assert(this->GetDuplicatedProcs().size() == Nghost.size());
