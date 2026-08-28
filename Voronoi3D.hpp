@@ -23,6 +23,8 @@
 #include <array>
 #include <tuple>
 #include <limits>
+#include <unordered_set>
+#include <type_traits>
 #include <boost/container/flat_map.hpp>
 #include <boost/container/flat_set.hpp>
 #include <boost/multiprecision/cpp_dec_float.hpp>
@@ -51,6 +53,7 @@
 #include "utils/container_utils.hpp"
 #include <spatial_ds/utils/BoundingBox.hpp>
 #include "exception/MadVoroException.hpp"
+#include "exception/InvalidArgumentException.hpp"
 #include "elementary/PointOps.hpp"
 
 #ifdef MADVORO_WITH_MPI
@@ -97,6 +100,123 @@ using namespace MadVoro::fallback;
 #define RANGE_MAX_POINTS_TO_GET 15 // 15
 #define RADIUSES_GROWING_FACTOR 1.1
 #define RADIUS_UNINITIALIZED -1
+
+template <typename PointT>
+using PeriodicIgnoreSets = std::array<std::unordered_set<size_t>, NUM_IMAGE_CODES>;
+
+template <typename PointT>
+inline typename PointT::coord_type WrapPeriodicScalar(typename PointT::coord_type x, typename PointT::coord_type lo, typename PointT::coord_type hi)
+{
+    typename PointT::coord_type L = hi - lo;
+    typename PointT::coord_type r = std::fmod(x - lo, L);
+    if(r < typename PointT::coord_type(0))
+    {
+        r += L;
+    }
+    typename PointT::coord_type y = lo + r;
+    if(!(y < hi))
+    {
+        y = lo;
+    }
+    return y;
+}
+
+template <typename PointT>
+inline bool SphereIntersectsAABB(const PointT &center, typename PointT::coord_type radius, const PointT &tileLL, const PointT &tileUR)
+{
+    using coord_type = typename PointT::coord_type;
+    coord_type d2 = coord_type(0);
+    if(center.x < tileLL.x)
+    {
+        d2 += (tileLL.x - center.x) * (tileLL.x - center.x);
+    }
+    else if(center.x > tileUR.x)
+    {
+        d2 += (center.x - tileUR.x) * (center.x - tileUR.x);
+    }
+    if(center.y < tileLL.y)
+    {
+        d2 += (tileLL.y - center.y) * (tileLL.y - center.y);
+    }
+    else if(center.y > tileUR.y)
+    {
+        d2 += (center.y - tileUR.y) * (center.y - tileUR.y);
+    }
+    if(center.z < tileLL.z)
+    {
+        d2 += (tileLL.z - center.z) * (tileLL.z - center.z);
+    }
+    else if(center.z > tileUR.z)
+    {
+        d2 += (center.z - tileUR.z) * (center.z - tileUR.z);
+    }
+    constexpr coord_type eps = std::numeric_limits<coord_type>::epsilon();
+    return d2 <= radius * radius * (coord_type(1) + coord_type(64) * eps);
+}
+
+inline int GetBoxFaceAxis(size_t faceIdx)
+{
+    static const int axisMap[] = {2, 1, 0, 1, 0, 2};
+    return axisMap[faceIdx % 6];
+}
+
+template <typename QueryDataType, typename PointT>
+inline void ExpandPeriodicQueries(const std::vector<QueryDataType> &baseQueries,
+                                  const std::array<bool, 3> &periodic,
+                                  const PointT &ll,
+                                  const PointT &ur,
+                                  std::vector<QueryDataType> &expanded)
+{
+    PointT L = ur - ll;
+    expanded.clear();
+    expanded.reserve(baseQueries.size() * 8);
+    for(const QueryDataType &baseQuery : baseQueries)
+    {
+        expanded.push_back(baseQuery);
+        std::array<int, 3> shiftRanges[3] = {{0}, {0}, {0}};
+        if(periodic[0])
+        {
+            shiftRanges[0] = {-1, 0, 1};
+        }
+        if(periodic[1])
+        {
+            shiftRanges[1] = {-1, 0, 1};
+        }
+        if(periodic[2])
+        {
+            shiftRanges[2] = {-1, 0, 1};
+        }
+        for(int sx : shiftRanges[0])
+        {
+            for(int sy : shiftRanges[1])
+            {
+                for(int sz : shiftRanges[2])
+                {
+                    if(sx == 0 && sy == 0 && sz == 0)
+                    {
+                        continue;
+                    }
+                    PointT translation(L.x * sx, L.y * sy, L.z * sz);
+                    PointT tileLL = ll + translation;
+                    PointT tileUR = ur + translation;
+                    if(!SphereIntersectsAABB(baseQuery.center, baseQuery.radius, tileLL, tileUR))
+                    {
+                        continue;
+                    }
+                    QueryDataType periodicQuery = baseQuery;
+                    periodicQuery.imageTranslation = translation;
+                    periodicQuery.center = baseQuery.center - translation;
+                    if constexpr(std::is_same_v<QueryDataType, BigRangeQueryData<PointT>>)
+                    {
+                        periodicQuery.originalPoint = baseQuery.originalPoint - translation;
+                        periodicQuery.askOnlyClose = false;
+                    }
+                    expanded.push_back(periodicQuery);
+                }
+            }
+        }
+    }
+}
 
 typedef std::array<std::size_t, 4> b_array_4;
 typedef std::array<std::size_t, 3> b_array_3;
@@ -169,7 +289,13 @@ private:
                               BigRangeAgent<PointT> &bigRangeAgent, SmallRangeAgent<PointT> &smallRangeAgent,
                               boost::container::flat_map<size_t, size_t> &numOfResultsForBigPoints,
                               boost::container::flat_map<size_t, size_t> &numOfResultsForSmallPoints,
-                              std::unordered_set<size_t> &selfIgnorePoints);
+                              PeriodicIgnoreSets<PointT> &selfIgnorePoints);
+
+  void BuildExtraTracked(const std::vector<PointT> &pts);
+
+  PointT InferPeriodicTranslation(const PointT &p) const;
+
+  bool IsPeriodicFace(size_t faceIdx) const;
     
   #ifdef MADVORO_WITH_MPI
     void BringGhostPointsToBuild(const MPI_Comm &comm);
@@ -245,6 +371,8 @@ private:
   std::array<PointT, 4> temp_points_;
   std::array<PointT, 5> temp_points2_;
   std::vector<Face3D<PointT>> box_faces_;
+  std::array<bool, 3> periodic_ = {false, false, false};
+  std::vector<PointT> periodicImageTranslation_;
 
   std::shared_ptr<OctTree<IVec>> myPointsTree;
   std::shared_ptr<OctTree<IVec>> allMyPointsTree;
@@ -320,6 +448,16 @@ public:
   void ReleaseMemory(void);
 
   void BuildPartially(const std::vector<PointT> &allPoints, const std::vector<size_t> &indicesToBuild);
+
+  void SetPeriodicBoundaries(bool x, bool y, bool z);
+
+  std::array<bool, 3> GetPeriodicBoundaries() const;
+
+  bool HasPeriodicBoundaries() const;
+
+  PointT WrapPeriodicPoint(const PointT &p) const;
+
+  bool IsPeriodicImage(size_t delaunayIndex) const;
 
   bool IsPointInCell(const PointT &point, size_t cellIndex, bool verbose = false) const;
 
@@ -1433,7 +1571,8 @@ bool Voronoi3D<PointT>::PointInMyDomain(const PointT &point) const
 template <typename PointT>
 inline int Voronoi3D<PointT>::GetOwner(const PointT &point) const
 {
-    return this->pointsManager->getEnvironmentAgent()->getOwner(point);
+    PointT q = this->WrapPeriodicPoint(point);
+    return this->pointsManager->getEnvironmentAgent()->getOwner(q);
 }
 
 template <typename PointT>
@@ -2249,6 +2388,10 @@ inline boost::container::flat_map<size_t, std::pair<rank_t, size_t>> GetRemoteIn
 template <typename PointT>
 void Voronoi3D<PointT>::MockMesh(void)
 {
+    if(this->HasPeriodicBoundaries())
+    {
+        throw MadVoro::Exception::MadVoroException("MockMesh is not supported when periodic boundaries are enabled");
+    }
     int rank, size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
@@ -2629,6 +2772,133 @@ void Voronoi3D<PointT>::Rebalance(const std::vector<double> &weights)
 
 #endif // MADVORO_WITH_MPI
 
+template <typename PointT>
+void Voronoi3D<PointT>::SetPeriodicBoundaries(bool x, bool y, bool z)
+{
+    PointT L = this->ur_ - this->ll_;
+    if(x && !(L.x > typename PointT::coord_type(0)))
+    {
+        throw MadVoro::Exception::InvalidArgumentException("SetPeriodicBoundaries: invalid x periodic axis length");
+    }
+    if(y && !(L.y > typename PointT::coord_type(0)))
+    {
+        throw MadVoro::Exception::InvalidArgumentException("SetPeriodicBoundaries: invalid y periodic axis length");
+    }
+    if(z && !(L.z > typename PointT::coord_type(0)))
+    {
+        throw MadVoro::Exception::InvalidArgumentException("SetPeriodicBoundaries: invalid z periodic axis length");
+    }
+    this->periodic_[0] = x;
+    this->periodic_[1] = y;
+    this->periodic_[2] = z;
+}
+
+template <typename PointT>
+std::array<bool, 3> Voronoi3D<PointT>::GetPeriodicBoundaries() const
+{
+    return this->periodic_;
+}
+
+template <typename PointT>
+bool Voronoi3D<PointT>::HasPeriodicBoundaries() const
+{
+    return this->periodic_[0] || this->periodic_[1] || this->periodic_[2];
+}
+
+template <typename PointT>
+PointT Voronoi3D<PointT>::WrapPeriodicPoint(const PointT &p) const
+{
+    PointT q = p;
+    if(this->periodic_[0])
+    {
+        q.x = WrapPeriodicScalar<PointT>(q.x, this->ll_.x, this->ur_.x);
+    }
+    if(this->periodic_[1])
+    {
+        q.y = WrapPeriodicScalar<PointT>(q.y, this->ll_.y, this->ur_.y);
+    }
+    if(this->periodic_[2])
+    {
+        q.z = WrapPeriodicScalar<PointT>(q.z, this->ll_.z, this->ur_.z);
+    }
+    return q;
+}
+
+template <typename PointT>
+bool Voronoi3D<PointT>::IsPeriodicImage(size_t delaunayIndex) const
+{
+    if(delaunayIndex >= this->periodicImageTranslation_.size())
+    {
+        return false;
+    }
+    const PointT &translation = this->periodicImageTranslation_[delaunayIndex];
+    return translation.x != typename PointT::coord_type(0) || translation.y != typename PointT::coord_type(0) || translation.z != typename PointT::coord_type(0);
+}
+
+template <typename PointT>
+bool Voronoi3D<PointT>::IsPeriodicFace(size_t faceIdx) const
+{
+    if(!this->HasPeriodicBoundaries() || faceIdx >= 6)
+    {
+        return false;
+    }
+    int axis = GetBoxFaceAxis(faceIdx);
+    return this->periodic_[axis];
+}
+
+template <typename PointT>
+PointT Voronoi3D<PointT>::InferPeriodicTranslation(const PointT &p) const
+{
+    PointT translation;
+    PointT L = this->ur_ - this->ll_;
+    if(this->periodic_[0])
+    {
+        if(p.x < this->ll_.x)
+        {
+            translation.x = -L.x;
+        }
+        else if(p.x >= this->ur_.x)
+        {
+            translation.x = L.x;
+        }
+    }
+    if(this->periodic_[1])
+    {
+        if(p.y < this->ll_.y)
+        {
+            translation.y = -L.y;
+        }
+        else if(p.y >= this->ur_.y)
+        {
+            translation.y = L.y;
+        }
+    }
+    if(this->periodic_[2])
+    {
+        if(p.z < this->ll_.z)
+        {
+            translation.z = -L.z;
+        }
+        else if(p.z >= this->ur_.z)
+        {
+            translation.z = L.z;
+        }
+    }
+    return translation;
+}
+
+template <typename PointT>
+void Voronoi3D<PointT>::BuildExtraTracked(const std::vector<PointT> &pts)
+{
+    const size_t first = this->del_.points_.size();
+    this->del_.BuildExtra(pts);
+    this->periodicImageTranslation_.resize(this->del_.points_.size(), PointT());
+    for(size_t j = 0; j < pts.size(); ++j)
+    {
+        this->periodicImageTranslation_[first + j] = this->InferPeriodicTranslation(pts[j]);
+    }
+}
+
 /**
  * \author Maor Mizrachi
  * \brief Gets a point, its radius, a box and the normals to the box's faces, and returns the faces indices that the sphere (around `point`, in the given `radius`) intersects
@@ -2661,6 +2931,16 @@ void Voronoi3D<PointT>::UpdateCMs(void)
     }
 
     this->SyncPartialBuildData(this->CM_, this->all_CM);
+    if(this->HasPeriodicBoundaries())
+    {
+        for(size_t i = this->Norg_; i < this->CM_.size(); ++i)
+        {
+            if(this->IsPeriodicImage(i))
+            {
+                this->CM_[i] = this->CM_[i] + this->periodicImageTranslation_[i];
+            }
+        }
+    }
 }
 
 template <typename PointT>
@@ -2856,7 +3136,7 @@ void Voronoi3D<PointT>::BringSelfGhostPoints(const std::vector<BigRangeQueryData
                                         BigRangeAgent<PointT> &bigRangeAgent, SmallRangeAgent<PointT> &smallRangeAgent,
                                         boost::container::flat_map<size_t, size_t> &numOfResultsForBigPoints,
                                         boost::container::flat_map<size_t, size_t> &numOfResultsForSmallPoints,
-                                        std::unordered_set<size_t> &selfIgnorePoints)
+                                        PeriodicIgnoreSets<PointT> &selfIgnorePoints)
 {
     std::chrono::high_resolution_clock::time_point start1, end1, start2, end2, start3, end3;
 
@@ -2871,9 +3151,9 @@ void Voronoi3D<PointT>::BringSelfGhostPoints(const std::vector<BigRangeQueryData
             for(const size_t &pointIdxInAll : newSmallQueriesPoints)
             {
                 this->indicesInAllMyPoints[this->del_.points_.size() + newPoints.size()] = pointIdxInAll;
-                newPoints.push_back(this->allMyPoints[pointIdxInAll]);
+                newPoints.push_back(this->allMyPoints[pointIdxInAll] + query.imageTranslation);
             }
-            numOfResultsForSmallPoints[query.pointIdx] = newSmallQueriesPoints.size();
+            numOfResultsForSmallPoints[query.pointIdx] += newSmallQueriesPoints.size();
             i++;
         }
         end1 = std::chrono::high_resolution_clock::now();
@@ -2888,16 +3168,16 @@ void Voronoi3D<PointT>::BringSelfGhostPoints(const std::vector<BigRangeQueryData
             for(const size_t &pointIdxInAll : newBigQueriesPoints)
             {
                 this->indicesInAllMyPoints[this->del_.points_.size() + newPoints.size()] = pointIdxInAll;
-                newPoints.push_back(this->allMyPoints[pointIdxInAll]);
+                newPoints.push_back(this->allMyPoints[pointIdxInAll] + query.imageTranslation);
             }
-            numOfResultsForBigPoints[query.pointIdx] = newBigQueriesPoints.size();
+            numOfResultsForBigPoints[query.pointIdx] += newBigQueriesPoints.size();
             i++;
         }
         end2 = std::chrono::high_resolution_clock::now();
     }
 
     start3 = std::chrono::high_resolution_clock::now();
-    this->del_.BuildExtra(newPoints);
+    this->BuildExtraTracked(newPoints);
     end3 = std::chrono::high_resolution_clock::now();
     #ifdef TIMING
         #ifdef MADVORO_WITH_MPI
@@ -2934,7 +3214,7 @@ template <typename PointT>
             }
             newPoints.insert(newPoints.end(), bigBatchInfo.result.begin(), bigBatchInfo.result.end());
             this->SetGhostArray(bigRangeAgent.getRecvProc(), bigRangeAgent.getRecvPoints());
-            this->del_.BuildExtra(newPoints);
+            this->BuildExtraTracked(newPoints);
             end1 = std::chrono::high_resolution_clock::now();
         }
         // small points queries
@@ -2949,7 +3229,7 @@ template <typename PointT>
             newPoints.reserve(smallBatchInfo.result.size());
             newPoints.insert(newPoints.end(), smallBatchInfo.result.begin(), smallBatchInfo.result.end());
             this->SetGhostArray(smallRangeAgent.getRecvProc(), smallRangeAgent.getRecvPoints());
-            this->del_.BuildExtra(newPoints);
+            this->BuildExtraTracked(newPoints);
             end2 = std::chrono::high_resolution_clock::now();
         }    
 
@@ -3057,6 +3337,9 @@ template <typename PointT>
     std::vector<Face3D<PointT>> box;
     std::vector<PointT> normals;
     this->InitialBoxBuild(box, normals);
+
+    this->periodicImageTranslation_.clear();
+    this->periodicImageTranslation_.resize(this->del_.points_.size(), PointT());
     
     boost::container::flat_set<size_t> smallPoints; // indices of 'small' points
     boost::container::flat_set<size_t> largePoints; // indices of 'large' points
@@ -3084,7 +3367,7 @@ template <typename PointT>
     #ifdef MADVORO_WITH_MPI
     std::vector<int> alreadyRecvProcs;
     std::optional<SentPointsContainer> optPointsContainer;
-    if (!serialMode)
+    if(not serialMode and not this->HasPeriodicBoundaries())
     {
         auto [ghostPointsFromLastBuild, alreadySentPoints1, alreadyRecvPoints1] = this->InitialGhostPointsExchange(comm);
         std::vector<int> alreadySentProcs;
@@ -3103,7 +3386,7 @@ template <typename PointT>
             }
         }
         this->SetGhostArray(alreadyRecvProcs, alreadyRecvPoints2);
-        this->del_.BuildExtra(ghostPointsFromLastBuild);
+        this->BuildExtraTracked(ghostPointsFromLastBuild);
         this->R_.resize(this->del_.tetras_.size(), RADIUS_UNINITIALIZED);
         ContainerOps::conditional_shrink(this->R_);
         this->tetra_centers_.resize(this->R_.size());
@@ -3113,13 +3396,17 @@ template <typename PointT>
     }
     else
     {
-        optPointsContainer.emplace(); // empty container for serial mode
+        optPointsContainer.emplace();
     }
     SentPointsContainer &pointsContainer = *optPointsContainer;
 
     // In serial mode: envAgent is null (safe -- only used by talk agent for remote queries,
     // which never fire since sendToSelf=false and size=1).
     const std::shared_ptr<EnvironmentAgent<PointT>> envAgent = serialMode ? nullptr : this->pointsManager->getEnvironmentAgent();
+    if(!serialMode && !envAgent)
+    {
+        throw MadVoro::Exception::MadVoroException("BringGhostPointsToBuild: environment agent is null");
+    }
     const MPI_Comm &agentComm = serialMode ? MPI_COMM_SELF : comm;
     BigRangeAgent<PointT> bigRangeAgent(this->rangeFinder.get(), envAgent, pointsContainer, agentComm);
     SmallRangeAgent<PointT> smallRangeAgent(this->rangeFinder.get(), envAgent, pointsContainer, agentComm);
@@ -3140,11 +3427,11 @@ template <typename PointT>
 
     size_t iterations = 0;
 
-    bool considerOwnPoints = (size == 1) or (this->Norg_ != this->allMyPoints.size()); // there are points which we ignore in this step, so we have, in the range searching, communicate with us as well
-    std::unordered_set<size_t> selfIgnorePoints;
+    bool considerOwnPoints = (size == 1) or (this->Norg_ != this->allMyPoints.size()) or this->HasPeriodicBoundaries();
+    PeriodicIgnoreSets<PointT> selfIgnorePoints;
     for(const std::pair<size_t, size_t> &indices : this->indicesInAllMyPoints)
     {
-        selfIgnorePoints.insert(indices.second);
+        selfIgnorePoints[ZERO_IMAGE_CODE].insert(indices.second);
     }
 
     auto start = std::chrono::high_resolution_clock::now();
@@ -3185,6 +3472,33 @@ template <typename PointT>
         std::vector<std::pair<size_t, size_t>> mirroredPoints = MirrorPoints(smallQueries, box, normals);
         std::vector<std::pair<size_t, size_t>> moreMirroredPoints = MirrorPoints(bigQueries, box, normals);
         mirroredPoints.insert(mirroredPoints.end(), moreMirroredPoints.begin(), moreMirroredPoints.end());
+        if(this->HasPeriodicBoundaries())
+        {
+            std::vector<std::pair<size_t, size_t>> filteredMirrors;
+            filteredMirrors.reserve(mirroredPoints.size());
+            for(const std::pair<size_t, size_t> &mirrorPair : mirroredPoints)
+            {
+                if(!this->IsPeriodicFace(mirrorPair.first))
+                {
+                    filteredMirrors.push_back(mirrorPair);
+                }
+            }
+            mirroredPoints = std::move(filteredMirrors);
+            std::vector<SmallRangeQueryData<PointT>> expandedSmallQueries;
+            std::vector<BigRangeQueryData<PointT>> expandedBigQueries;
+            ExpandPeriodicQueries(smallQueries, this->periodic_, this->ll_, this->ur_, expandedSmallQueries);
+            ExpandPeriodicQueries(bigQueries, this->periodic_, this->ll_, this->ur_, expandedBigQueries);
+            smallQueries = std::move(expandedSmallQueries);
+            bigQueries = std::move(expandedBigQueries);
+        }
+        for(const SmallRangeQueryData<PointT> &query : smallQueries)
+        {
+            numOfResultsForSmallPoints[query.pointIdx] = 0;
+        }
+        for(const BigRangeQueryData<PointT> &query : bigQueries)
+        {
+            numOfResultsForBigPoints[query.pointIdx] = 0;
+        }
         VORONOI_TIMING(end1);
 
         VORONOI_REPORT_TIMING("Creating batches and mirrors", start1, end1);
@@ -3226,7 +3540,7 @@ template <typename PointT>
                 newPoints.push_back(MirrorPoint(box[pairFacePoint.first], this->del_.points_[pairFacePoint.second]));
             }
         }
-        this->del_.BuildExtra(newPoints);
+        this->BuildExtraTracked(newPoints);
         auto end2 = std::chrono::high_resolution_clock::now();
 
         #ifdef TIMING
@@ -3428,6 +3742,7 @@ void Voronoi3D<PointT>::ReleaseMemory(void)
     ContainerOps::release_container_memory(allPointsWeights);
     ContainerOps::release_container_memory(radiuses);
     ContainerOps::release_container_memory(indicesInAllMyPoints);
+    ContainerOps::release_container_memory(periodicImageTranslation_);
     del_.ReleaseMemory();
 #ifdef MADVORO_WITH_MPI
     ContainerOps::release_container_memory(sentprocs_);
@@ -3745,7 +4060,7 @@ void Voronoi3D<PointT>::BuildVoronoi(std::vector<size_t> const &order)
                             continue;
                         CalcFaceAreaCM(*temp_points_in_face, tetra_centers_, clean_vec, area_[FaceCounter],
                                                      Face_CM_[FaceCounter], Atempvec);
-                        if (area_[FaceCounter] < (Asize * (IsPointOutsideBox(point_other) ? 1e-14 : 1e-15)))
+                        if (area_[FaceCounter] < (Asize * ((IsPointOutsideBox(point_other) && !IsPeriodicImage(point_other)) ? 1e-14 : 1e-15)))
                             continue;
                         if (point_other >= Norg_ && point_other < (Norg_ + 4))
                         {
@@ -4232,7 +4547,51 @@ void Voronoi3D<PointT>::CalcCellCMVolume(std::size_t index)
 template <typename PointT>
 size_t Voronoi3D<PointT>::GetContainingCell(const PointT &point) const
 {
-    return this->myPointsTree->closestPoint(point).getIndex();
+    if(!this->HasPeriodicBoundaries())
+    {
+        return this->myPointsTree->closestPoint(point).getIndex();
+    }
+    PointT q0 = this->WrapPeriodicPoint(point);
+    PointT L = this->ur_ - this->ll_;
+    size_t bestIdx = this->myPointsTree->closestPoint(q0).getIndex();
+    typename PointT::coord_type bestDist2 = abs(this->GetMeshPoint(bestIdx) - q0);
+    bestDist2 = bestDist2 * bestDist2;
+    std::array<int, 3> shiftRanges[3] = {{0}, {0}, {0}};
+    if(this->periodic_[0])
+    {
+        shiftRanges[0] = {-1, 0, 1};
+    }
+    if(this->periodic_[1])
+    {
+        shiftRanges[1] = {-1, 0, 1};
+    }
+    if(this->periodic_[2])
+    {
+        shiftRanges[2] = {-1, 0, 1};
+    }
+    for(int sx : shiftRanges[0])
+    {
+        for(int sy : shiftRanges[1])
+        {
+            for(int sz : shiftRanges[2])
+            {
+                if(sx == 0 && sy == 0 && sz == 0)
+                {
+                    continue;
+                }
+                PointT qi(q0.x + L.x * sx, q0.y + L.y * sy, q0.z + L.z * sz);
+                size_t idx = this->myPointsTree->closestPoint(qi).getIndex();
+                typename PointT::coord_type dist2 = abs(this->GetMeshPoint(idx) - qi);
+                dist2 = dist2 * dist2;
+                if(dist2 < bestDist2)
+                {
+                    bestDist2 = dist2;
+                    bestIdx = idx;
+                }
+            }
+        }
+    }
+    return bestIdx;
 }
 
 template <typename PointT>
@@ -4355,6 +4714,7 @@ Voronoi3D<PointT>::Voronoi3D(Voronoi3D<PointT> const &other) : ll_(other.ll_), u
                                                     Nghost_(other.Nghost_), self_index_(other.self_index_),
                                                 #endif // MADVORO_WITH_MPI
                                                 temp_points_(std::array<PointT, 4>()), temp_points2_(std::array<PointT, 5>()), box_faces_(other.box_faces_),
+                                                periodic_(other.periodic_), periodicImageTranslation_(other.periodicImageTranslation_),
                                                 #ifdef MADVORO_WITH_MPI
                                                     pointsManager(other.pointsManager->clone()), indexingToSave(other.indexingToSave),
                                                     rangeFinder(other.rangeFinder), radiuses(other.radiuses), allMyPoints(other.allMyPoints), allPointsWeights(other.allPointsWeights),
@@ -4415,13 +4775,28 @@ bool Voronoi3D<PointT>::IsPointInCell(const PointT &point, size_t cellIndex, boo
     }
 
     double width = this->GetWidth(cellIndex);
+    PointT q = this->WrapPeriodicPoint(point);
+    if(this->HasPeriodicBoundaries())
+    {
+        PointT L = this->ur_ - this->ll_;
+        typename PointT::coord_type deltas[3] = {q.x - this->del_.points_[cellIndex].x, q.y - this->del_.points_[cellIndex].y, q.z - this->del_.points_[cellIndex].z};
+        typename PointT::coord_type lengths[3] = {L.x, L.y, L.z};
+        typename PointT::coord_type *qCoords[3] = {&q.x, &q.y, &q.z};
+        for(size_t d = 0; d < 3; ++d)
+        {
+            if(this->periodic_[d])
+            {
+                *qCoords[d] -= lengths[d] * std::nearbyint(deltas[d] / lengths[d]);
+            }
+        }
+    }
     for(size_t faceIdx : this->FacesInCell_[cellIndex])
     {
         const PointT &p1 = this->del_.points_[this->GetFaceNeighbors(faceIdx).first];
         const PointT &p2 = this->del_.points_[this->GetFaceNeighbors(faceIdx).second];
         PointT normal = (this->GetFaceNeighbors(faceIdx).second == cellIndex)? p2 - p1 : p1 - p2;
         PointT p = (p1 + p2) * 0.5;
-        double dot = ScalarProd(normal, point - p);
+        double dot = ScalarProd(normal, q - p);
         if(verboseInfo)
         {
             size_t neighbor = (this->GetFaceNeighbors(faceIdx).first == cellIndex)? this->GetFaceNeighbors(faceIdx).second : this->GetFaceNeighbors(faceIdx).first;
@@ -4466,13 +4841,28 @@ template <typename PointT>
 std::pair<bool, size_t> Voronoi3D<PointT>::FindViolatedFaceNeighbor(const PointT &point, size_t cellIndex) const
 {
     double width = this->GetWidth(cellIndex);
+    PointT q = this->WrapPeriodicPoint(point);
+    if(this->HasPeriodicBoundaries())
+    {
+        PointT L = this->ur_ - this->ll_;
+        typename PointT::coord_type deltas[3] = {q.x - this->del_.points_[cellIndex].x, q.y - this->del_.points_[cellIndex].y, q.z - this->del_.points_[cellIndex].z};
+        typename PointT::coord_type lengths[3] = {L.x, L.y, L.z};
+        typename PointT::coord_type *qCoords[3] = {&q.x, &q.y, &q.z};
+        for(size_t d = 0; d < 3; ++d)
+        {
+            if(this->periodic_[d])
+            {
+                *qCoords[d] -= lengths[d] * std::nearbyint(deltas[d] / lengths[d]);
+            }
+        }
+    }
     for(size_t faceIdx : this->FacesInCell_[cellIndex])
     {
         const auto &[n1, n2] = this->GetFaceNeighbors(faceIdx);
         PointT normal = (n2 == cellIndex) ? del_.points_[n2] - del_.points_[n1]
                                           : del_.points_[n1] - del_.points_[n2];
         PointT mid = (del_.points_[n1] + del_.points_[n2]) * 0.5;
-        double dot = ScalarProd(normal, point - mid);
+        double dot = ScalarProd(normal, q - mid);
         if(dot < -1e-12 * width)
         {
             size_t neighbor = (n1 == cellIndex) ? n2 : n1;
@@ -4503,18 +4893,23 @@ bool Voronoi3D<PointT>::IsPointOutsideBox(const PointT &point) const
 template <typename PointT>
 bool Voronoi3D<PointT>::BoundaryFace(std::size_t index) const
 {
+    size_t other = std::max(FaceNeighbors_[index].first, FaceNeighbors_[index].second);
+    if(other >= Norg_ && IsPeriodicImage(other))
+    {
+        return false;
+    }
     if (FaceNeighbors_[index].first >= Norg_ || FaceNeighbors_[index].second >= Norg_)
     {
 #ifdef MADVORO_WITH_MPI
         if(box_faces_.empty())
         {
-            if (PointInDomain(ll_, ur_, del_.points_[std::max(FaceNeighbors_[index].first, FaceNeighbors_[index].second)]))
+            if (PointInDomain(ll_, ur_, del_.points_[other]))
                 return false;
             else
                 return true;
         }
         else
-            if(PointInPoly(box_faces_, del_.points_[std::max(FaceNeighbors_[index].first, FaceNeighbors_[index].second)]))
+            if(PointInPoly(box_faces_, del_.points_[other]))
                 return false;
             else
 #endif

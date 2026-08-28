@@ -32,6 +32,8 @@ add_madvoro_example(example_faces_information faces_information/main.cpp)
 
 add_madvoro_example(example_uniform_serial uniform_points/serial.cpp)
 
+add_madvoro_example(example_periodic_boundaries periodic_boundaries/main.cpp)
+
 # Parallel examples (require MPI)
 if(MADVORO_WITH_MPI)
   add_madvoro_example(example_uniform_parallel uniform_points/parallel.cpp)
@@ -54,14 +56,22 @@ if(BUILD_TESTING)
   if(NOT MADVORO_WITH_MPI)
     add_test(NAME faces_information COMMAND example_faces_information)
     add_test(NAME uniform_serial    COMMAND example_uniform_serial)
+    add_test(NAME periodic_boundaries COMMAND example_periodic_boundaries)
     set_tests_properties(faces_information PROPERTIES
       WORKING_DIRECTORY "$<TARGET_FILE_DIR:example_faces_information>")
     set_tests_properties(uniform_serial PROPERTIES
       WORKING_DIRECTORY "$<TARGET_FILE_DIR:example_uniform_serial>")
+    set_tests_properties(periodic_boundaries PROPERTIES
+      WORKING_DIRECTORY "$<TARGET_FILE_DIR:example_periodic_boundaries>")
   endif()
 
   if(MADVORO_WITH_MPI)
     set(_NP 4)
+    add_test(NAME periodic_boundaries
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${_NP} $<TARGET_FILE:example_periodic_boundaries>)
+    set_tests_properties(periodic_boundaries PROPERTIES
+      WORKING_DIRECTORY "$<TARGET_FILE_DIR:example_periodic_boundaries>")
+
     add_test(NAME uniform_parallel
       COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${_NP} $<TARGET_FILE:example_uniform_parallel>)
     set_tests_properties(uniform_parallel PROPERTIES

@@ -6,13 +6,15 @@
 #include <vector>
 #include <unordered_set>
 #include <algorithm>
+#include <array>
 #include "../exception/MadVoroException.hpp"
+#include "RangeQueryData.h"
 
 class SentPointsContainer
 {
 public:
-    // Using unordered_set for O(1) lookup instead of O(log N) for flat_set
     using PointsSet = std::unordered_set<size_t>;
+    using ImageSets = std::array<PointsSet, NUM_IMAGE_CODES>;
 
     inline SentPointsContainer(const std::vector<int> &sentProc = std::vector<int>(), const std::vector<std::vector<size_t>> &sentData = std::vector<std::vector<size_t>>())
     {
@@ -20,7 +22,8 @@ public:
         this->sentData = sentData;
         for(size_t i = 0; i < sentProc.size(); i++)
         {
-            this->sentDataSet.emplace_back(PointsSet(sentData[i].begin(), sentData[i].end()));
+            this->sentDataSetByImage.emplace_back();
+            this->sentDataSetByImage.back()[ZERO_IMAGE_CODE] = PointsSet(sentData[i].begin(), sentData[i].end());
         }
     }
 
@@ -36,9 +39,9 @@ public:
 
     inline std::vector<size_t> &getSentData(size_t index){return this->sentData[index];};
 
-    inline const std::vector<PointsSet> &getSentDataSet() const{return this->sentDataSet;};
+    inline const std::vector<ImageSets> &getSentDataSetByImage() const{return this->sentDataSetByImage;};
 
-    inline std::vector<PointsSet> &getSentDataSet(){return this->sentDataSet;};
+    inline std::vector<ImageSets> &getSentDataSetByImage(){return this->sentDataSetByImage;};
 
     inline const std::vector<size_t> &getSentDataRank(int rank) const
     {
@@ -50,43 +53,53 @@ public:
         return this->sentData[index];
     };
 
-    inline const PointsSet &getSentDataSet(size_t index) const{return this->sentDataSet[index];};
+    inline const PointsSet &getSentDataSet(size_t index) const{return this->sentDataSetByImage[index][ZERO_IMAGE_CODE];};
 
-    inline PointsSet &getSentDataSet(size_t index){return this->sentDataSet[index];};
+    inline PointsSet &getSentDataSet(size_t index){return this->sentDataSetByImage[index][ZERO_IMAGE_CODE];};
 
     inline const PointsSet &getSentDataSetRank(int rank) const
+    {
+        return this->getSentDataSetRank(rank, ZERO_IMAGE_CODE);
+    };
+
+    inline const PointsSet &getSentDataSetRank(int rank, int imageCode) const
     {
         size_t index = this->findRankIndex(rank);
         if(index == this->sentProc.size())
         {
             return this->emptySet;
         }
-        return this->sentDataSet[index];
+        return this->sentDataSetByImage[index][imageCode];
     };
 
     template<template<typename...> class Container, typename... Ts>
     inline Container<size_t> addPointsAsSent(int rank, const Container<size_t, Ts...> &points)
     {
+        return this->addPointsAsSent(rank, points, ZERO_IMAGE_CODE);
+    }
+
+    template<template<typename...> class Container, typename... Ts>
+    inline Container<size_t> addPointsAsSent(int rank, const Container<size_t, Ts...> &points, int imageCode)
+    {
         Container<size_t> result;
         if(points.empty())
         {
-            return result; // `result` is empty
+            return result;
         }
         
         size_t rankIdx = this->findRankIndex(rank);
         if(rankIdx == this->sentProc.size())
         {
-            // `_rank` is new
             this->initializeNewRank(rank);
         }
 
+        PointsSet &ignoreSet = this->sentDataSetByImage[rankIdx][imageCode];
         for(const size_t &dataIdx : points)
         {
-            if(this->sentDataSet[rankIdx].find(dataIdx) == this->sentDataSet[rankIdx].end())
+            if(ignoreSet.find(dataIdx) == ignoreSet.end())
             {
-                // `_data` was not sent before
                 result.push_back(dataIdx);
-                this->sentDataSet[rankIdx].insert(dataIdx);
+                ignoreSet.insert(dataIdx);
                 this->sentData[rankIdx].push_back(dataIdx);
             }
         }
@@ -100,7 +113,7 @@ public:
 
     std::vector<int> sentProc;
     std::vector<std::vector<size_t>> sentData;
-    std::vector<PointsSet> sentDataSet;
+    std::vector<ImageSets> sentDataSetByImage;
     const std::vector<size_t> emptyVector = std::vector<size_t>();
     const PointsSet emptySet = PointsSet();
 
@@ -119,7 +132,7 @@ private:
         }
         this->sentProc.push_back(rank);
         this->sentData.emplace_back(std::vector<size_t>());
-        this->sentDataSet.emplace_back(PointsSet());
+        this->sentDataSetByImage.emplace_back();
     }
 };
 

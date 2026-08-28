@@ -49,6 +49,7 @@ struct SmallRangeQueryData : public RangeQueryData<PointT>
             bytes += serializer->insert(this->pointIdx);
             bytes += serializer->insert(this->center);
             bytes += serializer->insert(this->radius);
+            bytes += serializer->insert(this->imageTranslation);
             bytes += serializer->insert(this->maxPointsToGet);
             return bytes;
         }
@@ -59,6 +60,7 @@ struct SmallRangeQueryData : public RangeQueryData<PointT>
             bytes += serializer->extract(this->pointIdx, byteOffset);
             bytes += serializer->extract(this->center, byteOffset + bytes);
             bytes += serializer->extract(this->radius, byteOffset + bytes);
+            bytes += serializer->extract(this->imageTranslation, byteOffset + bytes);
             bytes += serializer->extract(this->maxPointsToGet, byteOffset + bytes);
             return bytes;
         }
@@ -91,8 +93,10 @@ private:
         #endif // MADVORO_WITH_MPI
         {}
 
-        std::vector<size_t> selfAnswer(const SmallRangeQueryData<PointT> &query, std::unordered_set<size_t> &ignore)
+        std::vector<size_t> selfAnswer(const SmallRangeQueryData<PointT> &query, std::array<std::unordered_set<size_t>, NUM_IMAGE_CODES> &ignoreSets)
         {
+            int code = ImageCode(query.imageTranslation);
+            std::unordered_set<size_t> &ignore = ignoreSets[code];
             std::vector<size_t> indicesResult = this->rangeFinder->range(PointT(query.center.x, query.center.y, query.center.z), query.radius, query.maxPointsToGet, ignore);
             ignore.insert(indicesResult.begin(), indicesResult.end());
             return indicesResult;
@@ -104,15 +108,16 @@ private:
                 std::vector<PointT> result;
                 std::vector<size_t> indicesResult;
 
-                const SentPointsContainer::PointsSet &ignore = this->pointsContainer.getSentDataSetRank(_rank);
+                int code = ImageCode(query.imageTranslation);
+                const SentPointsContainer::PointsSet &ignore = this->pointsContainer.getSentDataSetRank(_rank, code);
 
                 indicesResult = this->rangeFinder->range(PointT(query.center.x, query.center.y, query.center.z), query.radius, query.maxPointsToGet, ignore);
-                indicesResult = this->pointsContainer.addPointsAsSent(_rank, indicesResult);
+                indicesResult = this->pointsContainer.addPointsAsSent(_rank, indicesResult, code);
 
                 result.reserve(indicesResult.size());
                 for(const size_t &pointIdx : indicesResult)
                 {
-                    result.push_back(this->rangeFinder->getPoint(pointIdx));
+                    result.push_back(this->rangeFinder->getPoint(pointIdx) + query.imageTranslation);
                 }
                 return result;
             }
@@ -192,12 +197,12 @@ public:
         delete this->ansAgent;
     }
 
-    std::vector<std::vector<size_t>> selfBatchAnswer(const std::vector<SmallRangeQueryData<PointT>> &smallQueriesBatch, _set<size_t> &ignore)
+    std::vector<std::vector<size_t>> selfBatchAnswer(const std::vector<SmallRangeQueryData<PointT>> &smallQueriesBatch, std::array<std::unordered_set<size_t>, NUM_IMAGE_CODES> &ignoreSets)
     {
         std::vector<std::vector<size_t>> result;
         for(const SmallRangeQueryData<PointT> &query : smallQueriesBatch)
         {
-            result.emplace_back(this->ansAgent->selfAnswer(query, ignore));
+            result.emplace_back(this->ansAgent->selfAnswer(query, ignoreSets));
         }
         return result;
     }
