@@ -1,0 +1,7 @@
+# MadVoro Voronoi MPI ownership and containment checks (aperiodic + periodic)
+TAGS="mpi"
+CATEGORY="code_correctness"
+CHECK_FUNCTION="check_voronoi_parallel_check_case"
+TIMEOUT=1800
+MPI_NP=16
+SLURM_PARTITION=bigrun

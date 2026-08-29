@@ -1,0 +1,8 @@
+# MadVoro Voronoi volume conservation (aperiodic boundaries)
+TAGS="serial mpi"
+CATEGORY="code_correctness"
+CHECK_FUNCTION="check_voronoi_volume_case"
+TIMEOUT=1800
+MPI_NP=64
+SLURM_PARTITION=bigrun
+SLURM_EXCLUSIVE=YES

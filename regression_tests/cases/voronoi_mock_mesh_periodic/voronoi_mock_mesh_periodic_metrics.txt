@@ -1,0 +1,7 @@
+mode mpi
+volume_before 1.0000000000000000e+00
+volume_after 1.0000000000000000e+00
+rel_error_before 0.0000000000000000e+00
+rel_error_after 0.0000000000000000e+00
+did_rebalance 1
+pass 1

@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "description": "MadVoro regression tests",
+  "project_root": "..",
+  "artifact_root": "regression_results",
+  "discovery": {
+    "metadata": "REGRESSION_INFO",
+    "test_roots": [
+      {
+        "path": "regression_tests/cases",
+        "namespace": "madvoro"
+      }
+    ]
+  },
+  "build": {
+    "mode": "grouped",
+    "build_dir": "build/regression",
+    "configure_command": [
+      "cmake",
+      "-S",
+      "{project_root}",
+      "-B",
+      "{build_dir}"
+    ],
+    "configure_args": [
+      "-DMADVORO_BUILD_REGRESSION_TESTS=ON"
+    ],
+    "build_command": [
+      "cmake",
+      "--build",
+      "{build_dir}",
+      "-j",
+      "{nproc}"
+    ],
+    "binary": "{test_dir}/{build_target}"
+  },
+  "run": {
+    "mode": "slurm",
+    "force_slurm": true,
+    "default_command": "{binary}",
+    "default_commands": {
+      "mpi": "mpirun -np ${SLURM_NTASKS} \"{binary}\""
+    },
+    "binary_environment": "MADVORO_BIN",
+    "timeout": 3600,
+    "tasks": 1
+  },
+  "checks": {
+    "library": "regression_tests/lib/regression_checks.sh"
+  },
+  "defaults": {
+    "mode": "serial"
+  },
+  "options": [
+    {
+      "flags": [
+        "--with-mpi"
+      ],
+      "dest": "with_mpi",
+      "type": "bool",
+      "default": false,
+      "mode_when_true": "all",
+      "help": "Build and include MPI tests",
+      "cmake": {
+        "MADVORO_WITH_MPI": "ON"
+      },
+      "mode_cmake": {
+        "mpi": "MADVORO_WITH_MPI=ON",
+        "all": "MADVORO_WITH_MPI=ON"
+      }
+    },
+    {
+      "flags": [
+        "--build-type"
+      ],
+      "dest": "build_type",
+      "type": "enum",
+      "choices": [
+        "Release",
+        "Debug",
+        "RelWithDebInfo"
+      ],
+      "default": "Release",
+      "help": "CMake build type",
+      "cmake": {
+        "CMAKE_BUILD_TYPE": "{value}"
+      }
+    },
+    {
+      "flags": [
+        "--deps-dir"
+      ],
+      "dest": "deps_dir",
+      "type": "string",
+      "default": "{project_root}/deps",
+      "help": "Path to external dependencies (mpi_utils, spatial_ds, etc.)",
+      "cmake": {
+        "MADVORO_DEPS_DIR": "{value}"
+      }
+    },
+    {
+      "flags": [
+        "--mesh-decomposer-dir"
+      ],
+      "dest": "mesh_decomposer_dir",
+      "type": "string",
+      "default": "{project_root}/deps/MeshDecomposer3D",
+      "help": "Path to the MeshDecomposer3D dependency",
+      "cmake": {
+        "MADVORO_MESH_DECOMPOSER_DIR": "{value}"
+      }
+    }
+  ]
+}

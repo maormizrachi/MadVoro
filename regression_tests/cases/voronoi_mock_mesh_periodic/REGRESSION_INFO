@@ -1,0 +1,7 @@
+# Periodic Voronoi MockMesh rebalance test
+TAGS="mpi"
+CATEGORY="code_correctness"
+CHECK_FUNCTION="check_voronoi_mock_mesh_periodic_case"
+TIMEOUT=3600
+MPI_NP=4
+SLURM_PARTITION=bigrun

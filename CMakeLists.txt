@@ -38,6 +38,7 @@ option(MADVORO_WITH_HDF5  "Build with HDF5 support"  OFF)
 option(MADVORO_WITH_VTK   "Build with VTK support"   OFF)
 option(MADVORO_WITH_VCL   "Build with VCL (Vector Class Library) support" OFF)
 option(MADVORO_BUILD_EXAMPLES "Build example programs" OFF)
+option(MADVORO_BUILD_REGRESSION_TESTS "Build THUNDER regression test executables" OFF)
 option(MADVORO_USE_EXACT_INTEGER_FALLBACK
   "Use exact integer fallback for uncertain 3D predicates" OFF)
 
@@ -55,6 +56,24 @@ if(IS_DIRECTORY "${_deps}")
   include_directories("${_deps}")
 else()
   message(STATUS "MadVoro deps directory not found: ${_deps} (standalone deps unavailable)")
+endif()
+
+if(NOT DEFINED MADVORO_MESH_DECOMPOSER_DIR)
+  set(MADVORO_MESH_DECOMPOSER_DIR "${MADVORO_DEPS_DIR}/MeshDecomposer3D")
+endif()
+get_filename_component(_mesh_decomposer "${MADVORO_MESH_DECOMPOSER_DIR}" ABSOLUTE)
+if(IS_DIRECTORY "${_mesh_decomposer}")
+  set(_madvoro_dependency_includes "${CMAKE_BINARY_DIR}/madvoro_dependency_includes")
+  file(MAKE_DIRECTORY "${_madvoro_dependency_includes}")
+  set(_mesh_decomposer_alias "${_madvoro_dependency_includes}/MeshDecomposer3D")
+  if(EXISTS "${_mesh_decomposer_alias}" OR IS_SYMLINK "${_mesh_decomposer_alias}")
+    file(REMOVE "${_mesh_decomposer_alias}")
+  endif()
+  file(CREATE_LINK "${_mesh_decomposer}" "${_mesh_decomposer_alias}" SYMBOLIC)
+  message(STATUS "MadVoro mesh decomposer: ${_mesh_decomposer}")
+  include_directories("${_madvoro_dependency_includes}")
+else()
+  message(STATUS "MadVoro mesh decomposer directory not found: ${_mesh_decomposer}")
 endif()
 
 # ---------- Required dependencies ----------
@@ -130,7 +149,8 @@ if(MADVORO_USE_EXACT_INTEGER_FALLBACK)
 endif()
 
 if(MADVORO_WITH_MPI)
-  target_compile_definitions(madvoro PUBLIC MADVORO_WITH_MPI SPATIAL_DS_WITH_MPI)
+  target_compile_definitions(madvoro PUBLIC MADVORO_WITH_MPI SPATIAL_DS_WITH_MPI RICH_MPI)
+  target_compile_options(madvoro PUBLIC "-D__WITH_MPI")
   target_link_libraries(madvoro PUBLIC MPI::MPI_CXX)
 endif()
 
@@ -150,13 +170,18 @@ if(MADVORO_WITH_VCL)
   target_include_directories(madvoro PUBLIC ${VCL_INCLUDE_DIR})
 endif()
 
-# ---------- Examples ----------
-if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND MADVORO_BUILD_EXAMPLES)
-  include(CTest)
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+  if(MADVORO_BUILD_EXAMPLES OR MADVORO_BUILD_REGRESSION_TESTS)
+    include(CTest)
+  endif()
 endif()
 
 if(MADVORO_BUILD_EXAMPLES)
   add_subdirectory(examples)
+endif()
+
+if(MADVORO_BUILD_REGRESSION_TESTS)
+  add_subdirectory(regression_tests)
 endif()
 
 # ---------- Install & export (skip when embedded) ----------
