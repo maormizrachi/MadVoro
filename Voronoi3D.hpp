@@ -373,6 +373,7 @@ private:
   std::vector<Face3D<PointT>> box_faces_;
   std::array<bool, 3> periodic_ = {false, false, false};
   std::vector<PointT> periodicImageTranslation_;
+  mutable std::vector<std::size_t> periodicImagePhysical_;
 
   std::shared_ptr<OctTree<IVec>> myPointsTree;
   std::shared_ptr<OctTree<IVec>> allMyPointsTree;
@@ -455,9 +456,15 @@ public:
 
   bool HasPeriodicBoundaries() const;
 
+  void WrapPeriodicPoint(PointT &p) const;
+
   PointT WrapPeriodicPoint(const PointT &p) const;
 
   bool IsPeriodicImage(size_t delaunayIndex) const;
+
+  const PointT &GetPeriodicImageTranslation(size_t delaunayIndex) const;
+
+  size_t ResolvePeriodicImageIndex(size_t meshIndex) const;
 
   bool IsPointInCell(const PointT &point, size_t cellIndex, bool verbose = false) const;
 
@@ -1510,6 +1517,7 @@ template <typename PointT>
 void Voronoi3D<PointT>::BuildInitialize(size_t num_points)
 {
     ++buildGeneration_;
+    this->periodicImagePhysical_.clear();
     // assert(num_points > 0);
     // Clear data
     PointTetras_.clear();
@@ -1571,7 +1579,8 @@ bool Voronoi3D<PointT>::PointInMyDomain(const PointT &point) const
 template <typename PointT>
 inline int Voronoi3D<PointT>::GetOwner(const PointT &point) const
 {
-    PointT q = this->WrapPeriodicPoint(point);
+    PointT q = point;
+    this->WrapPeriodicPoint(q);
     return this->pointsManager->getEnvironmentAgent()->getOwner(q);
 }
 
@@ -2385,16 +2394,52 @@ inline boost::container::flat_map<size_t, std::pair<rank_t, size_t>> GetRemoteIn
     return whereNow;
 }
 
+struct MockMeshGhostAsk
+{
+    rank_t receiver = 0;
+    size_t pointIndex = 0;
+    double imageTx = 0.0;
+    double imageTy = 0.0;
+    double imageTz = 0.0;
+
+    bool operator==(MockMeshGhostAsk const &other) const
+    {
+        return receiver == other.receiver
+            && pointIndex == other.pointIndex
+            && imageTx == other.imageTx
+            && imageTy == other.imageTy
+            && imageTz == other.imageTz;
+    }
+
+    bool operator<(MockMeshGhostAsk const &other) const
+    {
+        if(receiver != other.receiver)
+        {
+            return receiver < other.receiver;
+        }
+        if(pointIndex != other.pointIndex)
+        {
+            return pointIndex < other.pointIndex;
+        }
+        if(imageTx != other.imageTx)
+        {
+            return imageTx < other.imageTx;
+        }
+        if(imageTy != other.imageTy)
+        {
+            return imageTy < other.imageTy;
+        }
+        return imageTz < other.imageTz;
+    }
+};
+
 template <typename PointT>
 void Voronoi3D<PointT>::MockMesh(void)
 {
-    if(this->HasPeriodicBoundaries())
-    {
-        throw MadVoro::Exception::MadVoroException("MockMesh is not supported when periodic boundaries are enabled");
-    }
     int rank, size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
+    const bool periodic = this->HasPeriodicBoundaries();
     
     boost::container::flat_map<size_t, std::pair<rank_t, size_t>> whereNow = GetRemoteIndices(this->self_index_, this->sentprocs_, this->sentpoints_); // previous point -> holder (rank + index)
     assert(whereNow.size() == this->Norg_);
@@ -2404,7 +2449,6 @@ void Voronoi3D<PointT>::MockMesh(void)
 
     std::vector<PointT> new_points;
     this->indicesInAllMyPoints = AllPointsMap();
-    size_t numOfSelfPoints = this->self_index_.size();
 
     // this loop determines the points list, and the matching indices of each point (in the points list) to the long points list
     size_t allPointsSize = this->allMyPoints.size();
@@ -2415,18 +2459,49 @@ void Voronoi3D<PointT>::MockMesh(void)
     }
     
     // now find what ghosts should be sent
-    using GhostAsk = std::pair<rank_t, size_t>; // receiver rank, point index on sender
-    std::vector<std::vector<GhostAsk>> askToSend(size); // [sender][(receiver, point)...]
+    std::vector<std::vector<MockMeshGhostAsk>> askToSend(size); // [sender][(receiver, point, imageTranslation)...]
     std::vector<std::vector<PointT>> mirrorsToSend(size);
-    std::vector<PointT> allMirrors;
+    std::vector<std::vector<PointT>> periodicExtrasToBuild(size);
 
-    auto addAskToSend = [&](rank_t sender, rank_t receiver, size_t pointIndex)
+    auto periodicTranslationAt = [&](size_t delaunayIndex) -> PointT
+    {
+        if(!periodic || delaunayIndex >= this->periodicImageTranslation_.size())
+        {
+            return PointT();
+        }
+        return this->periodicImageTranslation_[delaunayIndex];
+    };
+
+    auto addAskToSend = [&](rank_t sender, rank_t receiver, size_t pointIndex, PointT const &imageTranslation)
     {
         if(sender == receiver)
         {
             return;
         }
-        askToSend[sender].emplace_back(receiver, pointIndex);
+        askToSend[sender].push_back(MockMeshGhostAsk{receiver, pointIndex, imageTranslation.x, imageTranslation.y, imageTranslation.z});
+    };
+
+    auto addPeriodicGhostOrAsk = [&](rank_t sender, rank_t receiver, size_t pointIndex, size_t oldNeighborIndex)
+    {
+        PointT imageTranslation = periodicTranslationAt(oldNeighborIndex);
+        if(periodic)
+        {
+            if(imageTranslation.x != typename PointT::coord_type(0)
+                || imageTranslation.y != typename PointT::coord_type(0)
+                || imageTranslation.z != typename PointT::coord_type(0))
+            {
+                if(sender == receiver)
+                {
+                    periodicExtrasToBuild[receiver].push_back(delaunayPoints[oldNeighborIndex]);
+                    return;
+                }
+            }
+            else if(sender == receiver)
+            {
+                return;
+            }
+        }
+        addAskToSend(sender, receiver, pointIndex, imageTranslation);
     };
 
     size_t previousN = this->Norg_;
@@ -2443,24 +2518,27 @@ void Voronoi3D<PointT>::MockMesh(void)
             {
                 // original point and neighbor are both local
                 const auto &[neighborNewOwner, neighborNewIndex] = whereNow.at(neighbor);
-                addAskToSend(neighborNewOwner, newOwner, neighborNewIndex);
+                addAskToSend(neighborNewOwner, newOwner, neighborNewIndex, periodicTranslationAt(neighbor));
             }
             else
             {
                 assert(neighbor >= previousN + 4); // 4 for the big tetra
-                // neighbor is either a ghost or a mirror
+                // neighbor is either a ghost, a periodic image, or a mirror
                 auto it = ghostsInfo.find(neighbor);
                 if(it != ghostsInfo.end())
                 {
                     // neighbor is a ghost
                     const auto &[neighborNewOwner, neighborNewIndex] = it->second;
-                    addAskToSend(neighborNewOwner, newOwner, neighborNewIndex);
+                    addPeriodicGhostOrAsk(neighborNewOwner, newOwner, neighborNewIndex, neighbor);
+                }
+                else if(this->IsPeriodicImage(neighbor))
+                {
+                    periodicExtrasToBuild[newOwner].push_back(delaunayPoints[neighbor]);
                 }
                 else
                 {
-                    // mirror
+                    // Mirror across a non-periodic box face.
                     mirrorsToSend[newOwner].push_back(delaunayPoints[neighbor]);
-                    // allMirrors.push_back(delaunayPoints[neighbor]);
                 }
             }
         }
@@ -2485,6 +2563,10 @@ void Voronoi3D<PointT>::MockMesh(void)
     }
     order = HilbertOrder3D(new_points);
     this->del_.Build(new_points, bounding_box.second, bounding_box.first, order);
+    if(periodic)
+    {
+        this->periodicImageTranslation_.assign(this->del_.points_.size(), PointT());
+    }
     // updates the radiuses array of the tetrahedra, as well as the lists for each point what tetras it belongs to
     this->R_.resize(this->del_.tetras_.size());
     ContainerOps::conditional_shrink(this->R_);
@@ -2525,7 +2607,27 @@ void Voronoi3D<PointT>::MockMesh(void)
     _prof("UpdateRangeFinder", std::chrono::duration<double>(_t1 - _t0).count());
     _t0 = std::chrono::high_resolution_clock::now();
 #endif
-    size_t countMirrors = 0;
+    if(periodic)
+    {
+        auto periodicExtrasResult = MPI_Exchange_sparse_by_rank(periodicExtrasToBuild, MPI_COMM_WORLD, MPI_EXCHANGE_SPARSE_TAG + 1);
+#ifdef TIMING
+        _t1 = std::chrono::high_resolution_clock::now();
+        _prof("PeriodicExtrasExchange", std::chrono::duration<double>(_t1 - _t0).count());
+        _t0 = std::chrono::high_resolution_clock::now();
+#endif
+        for(const auto &[_senderRank, incomingExtras] : periodicExtrasResult)
+        {
+            if(this->Norg_ > 0 && !incomingExtras.empty())
+            {
+                this->BuildExtraTracked(incomingExtras);
+            }
+        }
+#ifdef TIMING
+        _t1 = std::chrono::high_resolution_clock::now();
+        _prof("BuildExtraTracked(periodic images)", std::chrono::duration<double>(_t1 - _t0).count());
+        _t0 = std::chrono::high_resolution_clock::now();
+#endif
+    }
     auto _mirrorsResult = MPI_Exchange_sparse_by_rank(mirrorsToSend, MPI_COMM_WORLD, MPI_EXCHANGE_SPARSE_TAG + 1);
 #ifdef TIMING
     _t1 = std::chrono::high_resolution_clock::now();
@@ -2534,10 +2636,9 @@ void Voronoi3D<PointT>::MockMesh(void)
 #endif
     for(const auto &[_senderRank, incomingMirrors] : _mirrorsResult)
     {
-        if(this->Norg_ > 0)
+        if(this->Norg_ > 0 && !incomingMirrors.empty())
         {
             this->del_.BuildExtra(incomingMirrors);
-            countMirrors += incomingMirrors.size();
         }
     }
 #ifdef TIMING
@@ -2545,7 +2646,7 @@ void Voronoi3D<PointT>::MockMesh(void)
     _prof("BuildExtra(mirrors)", std::chrono::duration<double>(_t1 - _t0).count());
     _t0 = std::chrono::high_resolution_clock::now();
 #endif
-    for(std::vector<GhostAsk> &asksForSender : askToSend)
+    for(std::vector<MockMeshGhostAsk> &asksForSender : askToSend)
     {
         if(asksForSender.size() > 1)
         {
@@ -2558,7 +2659,7 @@ void Voronoi3D<PointT>::MockMesh(void)
     _prof("BuildAskToSend", std::chrono::duration<double>(_t1 - _t0).count());
     _t0 = std::chrono::high_resolution_clock::now();
 #endif
-    std::vector<std::pair<rank_t, std::vector<GhostAsk>>> whatIshouldSend =
+    std::vector<std::pair<rank_t, std::vector<MockMeshGhostAsk>>> whatIshouldSend =
         MPI_Exchange_sparse_by_rank(askToSend, MPI_COMM_WORLD, MPI_EXCHANGE_SPARSE_TAG + 2);
 #ifdef TIMING
     _t1 = std::chrono::high_resolution_clock::now();
@@ -2569,24 +2670,24 @@ void Voronoi3D<PointT>::MockMesh(void)
 
     std::vector<rank_t> newDuplicatedProcs;
     std::vector<std::vector<size_t>> newDuplicatedPoints;
-    boost::container::flat_map<rank_t, boost::container::flat_set<size_t>> sentToProcessors;
+    boost::container::flat_map<rank_t, boost::container::flat_set<MockMeshGhostAsk>> sentToProcessors;
     boost::container::flat_map<rank_t, size_t> procsToIndices;
 
     for(const auto &[_requestingRank, sendInfo] : whatIshouldSend)
     {
-        for(const auto &[_rank, pointIdx] : sendInfo)
+        for(const MockMeshGhostAsk &ask : sendInfo)
         {
-            if(_rank == rank)
+            if(ask.receiver == rank)
             {
                 continue;
             }
-            auto it = procsToIndices.find(_rank);
+            auto it = procsToIndices.find(ask.receiver);
             size_t idx = newDuplicatedProcs.size();
             if(it == procsToIndices.end())
             {
-                newDuplicatedProcs.push_back(_rank);
+                newDuplicatedProcs.push_back(ask.receiver);
                 newDuplicatedPoints.emplace_back();
-                procsToIndices[_rank] = idx;
+                procsToIndices[ask.receiver] = idx;
             }
             else
             {
@@ -2594,11 +2695,11 @@ void Voronoi3D<PointT>::MockMesh(void)
             }
             std::vector<size_t> &newDuplicatedPointsOfRank = newDuplicatedPoints[idx];
 
-            boost::container::flat_set<size_t> &sentToRank = sentToProcessors[_rank];
-            if(sentToRank.insert(pointIdx).second)
+            boost::container::flat_set<MockMeshGhostAsk> &sentToRank = sentToProcessors[ask.receiver];
+            if(sentToRank.insert(ask).second)
             {
-                whatIShouldSendToRanks[_rank].push_back(new_points[pointIdx]);
-                newDuplicatedPointsOfRank.push_back(pointIdx);
+                whatIShouldSendToRanks[ask.receiver].push_back(new_points[ask.pointIndex] + PointT(ask.imageTx, ask.imageTy, ask.imageTz));
+                newDuplicatedPointsOfRank.push_back(ask.pointIndex);
             }
         }
     }
@@ -2648,7 +2749,14 @@ void Voronoi3D<PointT>::MockMesh(void)
         }
     }
 
-    this->del_.BuildExtra(buildExtra);
+    if(periodic && !buildExtra.empty())
+    {
+        this->BuildExtraTracked(buildExtra);
+    }
+    else if(!buildExtra.empty())
+    {
+        this->del_.BuildExtra(buildExtra);
+    }
     this->R_.resize(this->del_.tetras_.size());
     ContainerOps::conditional_shrink(this->R_);
     std::fill(this->R_.begin(), this->R_.end(), RADIUS_UNINITIALIZED);
@@ -2806,21 +2914,27 @@ bool Voronoi3D<PointT>::HasPeriodicBoundaries() const
 }
 
 template <typename PointT>
-PointT Voronoi3D<PointT>::WrapPeriodicPoint(const PointT &p) const
+void Voronoi3D<PointT>::WrapPeriodicPoint(PointT &p) const
 {
-    PointT q = p;
     if(this->periodic_[0])
     {
-        q.x = WrapPeriodicScalar<PointT>(q.x, this->ll_.x, this->ur_.x);
+        p.x = WrapPeriodicScalar<PointT>(p.x, this->ll_.x, this->ur_.x);
     }
     if(this->periodic_[1])
     {
-        q.y = WrapPeriodicScalar<PointT>(q.y, this->ll_.y, this->ur_.y);
+        p.y = WrapPeriodicScalar<PointT>(p.y, this->ll_.y, this->ur_.y);
     }
     if(this->periodic_[2])
     {
-        q.z = WrapPeriodicScalar<PointT>(q.z, this->ll_.z, this->ur_.z);
+        p.z = WrapPeriodicScalar<PointT>(p.z, this->ll_.z, this->ur_.z);
     }
+}
+
+template <typename PointT>
+PointT Voronoi3D<PointT>::WrapPeriodicPoint(const PointT &p) const
+{
+    PointT q = p;
+    WrapPeriodicPoint(q);
     return q;
 }
 
@@ -2833,6 +2947,54 @@ bool Voronoi3D<PointT>::IsPeriodicImage(size_t delaunayIndex) const
     }
     const PointT &translation = this->periodicImageTranslation_[delaunayIndex];
     return translation.x != typename PointT::coord_type(0) || translation.y != typename PointT::coord_type(0) || translation.z != typename PointT::coord_type(0);
+}
+
+template <typename PointT>
+const PointT &Voronoi3D<PointT>::GetPeriodicImageTranslation(size_t delaunayIndex) const
+{
+    static const PointT zero;
+    if(delaunayIndex >= this->periodicImageTranslation_.size())
+    {
+        return zero;
+    }
+    return this->periodicImageTranslation_[delaunayIndex];
+}
+
+template <typename PointT>
+size_t Voronoi3D<PointT>::ResolvePeriodicImageIndex(size_t meshIndex) const
+{
+    if(meshIndex < this->Norg_)
+    {
+        return meshIndex;
+    }
+    if(meshIndex >= this->del_.points_.size() || !this->IsPeriodicImage(meshIndex))
+    {
+        return meshIndex;
+    }
+    if(this->periodicImagePhysical_.size() != this->del_.points_.size())
+    {
+        this->periodicImagePhysical_.assign(this->del_.points_.size(), std::numeric_limits<std::size_t>::max());
+    }
+    if(meshIndex < this->periodicImagePhysical_.size())
+    {
+        std::size_t &cached = this->periodicImagePhysical_[meshIndex];
+        if(cached == std::numeric_limits<std::size_t>::max())
+        {
+            PointT unwrapped = this->del_.points_[meshIndex];
+            const PointT &translation = this->periodicImageTranslation_[meshIndex];
+            unwrapped.x -= translation.x;
+            unwrapped.y -= translation.y;
+            unwrapped.z -= translation.z;
+            PointT wrapped = unwrapped;
+            this->WrapPeriodicPoint(wrapped);
+            cached = this->myPointsTree->closestPoint(wrapped).getIndex();
+        }
+        if(cached < this->Norg_)
+        {
+            return cached;
+        }
+    }
+    return meshIndex;
 }
 
 template <typename PointT>
@@ -4551,7 +4713,8 @@ size_t Voronoi3D<PointT>::GetContainingCell(const PointT &point) const
     {
         return this->myPointsTree->closestPoint(point).getIndex();
     }
-    PointT q0 = this->WrapPeriodicPoint(point);
+    PointT q0 = point;
+    this->WrapPeriodicPoint(q0);
     PointT L = this->ur_ - this->ll_;
     size_t bestIdx = this->myPointsTree->closestPoint(q0).getIndex();
     typename PointT::coord_type bestDist2 = abs(this->GetMeshPoint(bestIdx) - q0);
@@ -4775,7 +4938,8 @@ bool Voronoi3D<PointT>::IsPointInCell(const PointT &point, size_t cellIndex, boo
     }
 
     double width = this->GetWidth(cellIndex);
-    PointT q = this->WrapPeriodicPoint(point);
+    PointT q = point;
+    this->WrapPeriodicPoint(q);
     if(this->HasPeriodicBoundaries())
     {
         PointT L = this->ur_ - this->ll_;
@@ -4841,7 +5005,8 @@ template <typename PointT>
 std::pair<bool, size_t> Voronoi3D<PointT>::FindViolatedFaceNeighbor(const PointT &point, size_t cellIndex) const
 {
     double width = this->GetWidth(cellIndex);
-    PointT q = this->WrapPeriodicPoint(point);
+    PointT q = point;
+    this->WrapPeriodicPoint(q);
     if(this->HasPeriodicBoundaries())
     {
         PointT L = this->ur_ - this->ll_;

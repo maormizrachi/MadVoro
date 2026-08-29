@@ -10,6 +10,7 @@ struct Vector3D
     double x, y, z;
 
     Vector3D() : x(0), y(0), z(0) {}
+    explicit Vector3D(double value) : x(value), y(value), z(value) {}
     Vector3D(double x, double y, double z) : x(x), y(y), z(z) {}
 
     // Required by spatial_ds (BoundingBox, OctTree, Sphere)

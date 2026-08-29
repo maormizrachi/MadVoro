@@ -147,6 +147,72 @@ static bool TestOwnerWrapping(const MadVoro::Voronoi3D<Vector3D> &voronoi)
     return true;
 }
 
+static bool TestPeriodicMockMeshRebalance(MPI_Comm comm)
+{
+    int rank, size;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &size);
+
+    Vector3D ll(0.0, 0.0, 0.0);
+    Vector3D ur(1.0, 1.0, 1.0);
+    MadVoro::Voronoi3D<Vector3D> voronoi(ll, ur);
+    voronoi.SetPeriodicBoundaries(true, true, true);
+
+    std::vector<Vector3D> localPoints;
+    for(int ix = 0; ix < 2; ++ix)
+    {
+        for(int iy = 0; iy < 2; ++iy)
+        {
+            for(int iz = 0; iz < 2; ++iz)
+            {
+                size_t globalIdx = static_cast<size_t>(ix * 4 + iy * 2 + iz);
+                if(globalIdx % static_cast<size_t>(size) == static_cast<size_t>(rank))
+                {
+                    localPoints.emplace_back(0.25 + 0.5 * ix, 0.25 + 0.5 * iy, 0.25 + 0.5 * iz);
+                }
+            }
+        }
+    }
+
+    voronoi.BuildParallel(localPoints);
+
+    double localVolume = 0.0;
+    for(size_t i = 0; i < voronoi.GetPointNo(); ++i)
+    {
+        localVolume += voronoi.GetVolume(i);
+    }
+    double volumeBefore = 0.0;
+    MPI_Allreduce(&localVolume, &volumeBefore, 1, MPI_DOUBLE, MPI_SUM, comm);
+
+    std::vector<double> weights(voronoi.getAllPoints().size(), 1.0);
+    for(size_t i = 0; i < weights.size(); ++i)
+    {
+        weights[i] = static_cast<double>((i * 17 + static_cast<size_t>(rank) * 11) % 23 + 1);
+    }
+    voronoi.Rebalance(weights);
+
+    localVolume = 0.0;
+    for(size_t i = 0; i < voronoi.GetPointNo(); ++i)
+    {
+        localVolume += voronoi.GetVolume(i);
+    }
+    double volumeAfter = 0.0;
+    MPI_Allreduce(&localVolume, &volumeAfter, 1, MPI_DOUBLE, MPI_SUM, comm);
+
+    bool pass = ApproxEqual(volumeBefore, 1.0) && ApproxEqual(volumeAfter, 1.0) && voronoi.DidRebalance();
+    if(!pass && rank == 0)
+    {
+        std::cerr << "Periodic MockMesh: before=" << volumeBefore
+                  << " after=" << volumeAfter
+                  << " didRebalance=" << voronoi.DidRebalance() << std::endl;
+    }
+
+    int localOk = pass ? 1 : 0;
+    int globalOk = 0;
+    MPI_Allreduce(&localOk, &globalOk, 1, MPI_INT, MPI_MIN, comm);
+    return globalOk == 1;
+}
+
 static bool TestPeriodicParallel(MPI_Comm comm)
 {
     int rank, size;
@@ -249,6 +315,19 @@ int main(int argc, char *argv[])
 #endif
 
 #ifdef MADVORO_WITH_MPI
+    if(!TestPeriodicMockMeshRebalance(MPI_COMM_WORLD))
+    {
+        if(rank == 0)
+        {
+            std::cerr << "FAILED: periodic MockMesh rebalance test" << std::endl;
+        }
+        ++failed;
+    }
+    else if(rank == 0)
+    {
+        std::cout << "PASSED: periodic MockMesh rebalance test" << std::endl;
+    }
+
     if(!TestPeriodicParallel(MPI_COMM_WORLD))
     {
         if(rank == 0)
