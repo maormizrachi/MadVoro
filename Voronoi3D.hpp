@@ -948,13 +948,22 @@ namespace
     }
 #endif
 
+    // Scratch buffers for the tetrahedron fan of a single Voronoi face.  A face on
+    // the seam between a finely and a coarsely resolved region of the mesh can have
+    // far more vertices than the inline capacity, so these have to be able to grow
+    // onto the heap instead of being a hard limit.
+    template <typename T>
+    using face_scratch = boost::container::small_vector<T, 128>;
+
     template <typename PointT>
-    double CleanDuplicates(std::array<size_t, 128> const &indeces, const vector<PointT> &points,
+    double CleanDuplicates(face_scratch<size_t> const &indeces, const vector<PointT> &points,
                                                  boost::container::small_vector<size_t, 8> &res, double R,
-                                                 std::array<double, 128> &diffs,
-                                                 std::array<PointT, 128> &vtemp, const size_t N)
+                                                 face_scratch<double> &diffs,
+                                                 face_scratch<PointT> &vtemp, const size_t N)
     {
         res.clear();
+        diffs.resize(N);
+        vtemp.resize(N);
         for (size_t i = 0; i < N; ++i)
             vtemp[i] = points[indeces[i]];
         for (size_t i = N - 1; i > 0; --i)
@@ -980,10 +989,11 @@ namespace
     }
 
     template <typename PointT>
-    bool CleanSameLine(boost::container::small_vector<size_t, 8> &indeces, vector<PointT> const& face_points, std::array<double, 128> &area_vec_temp)
+    bool CleanSameLine(boost::container::small_vector<size_t, 8> &indeces, vector<PointT> const& face_points, face_scratch<double> &area_vec_temp)
     {
         point_vec old;
         size_t const N = indeces.size();
+        area_vec_temp.resize(N);
         double const small_fraction = 1e-14;
         // double const medium_fraction = 3e-1;
         // Find correct normal
@@ -1093,7 +1103,7 @@ namespace
     template <typename PointT>
 
     void MakeRightHandFace(boost::container::small_vector<size_t, 8> &indeces, PointT const &point, vector<PointT> const &face_points,
-                                                 std::array<size_t, 128> &temp, double areascale)
+                                                 face_scratch<size_t> &temp, double areascale)
     {
         PointT V1, V2;
         size_t counter = 0;
@@ -1101,19 +1111,36 @@ namespace
         V1 = face_points[indeces[counter + 1]];
         V1 -= face_points[indeces[counter]];
         double AScale = 1e-14 * areascale;
+        // These loops skip degenerate edges, and the release build compiles asserts
+        // out, so the bounds have to be checked explicitly: a face whose every edge
+        // is below the area scale would otherwise index past `indeces`.
         while (ScalarProd(V1, V1) < AScale)
         {
             ++counter;
-            assert(counter < N);
+            if(counter >= N)
+            {
+                MadVoro::Exception::MadVoroException eo("MakeRightHandFace: every edge of the face is degenerate");
+                eo.addEntry("N", N);
+                eo.addEntry("areascale", areascale);
+                eo.addEntry("first face point", face_points[indeces[0]]);
+                throw eo;
+            }
             V1 = face_points[indeces[(counter + 1) % N]];
-            V1 -= face_points[indeces[counter]];
+            V1 -= face_points[indeces[counter % N]];
         }
         V2 = face_points[indeces[(counter + 2) % N]];
         V2 -= face_points[indeces[(counter + 1) % N]];
         while (ScalarProd(V2, V2) < AScale)
         {
             ++counter;
-            assert(counter < 2 * N);
+            if(counter >= 2 * N)
+            {
+                MadVoro::Exception::MadVoroException eo("MakeRightHandFace: could not find a second non degenerate edge of the face");
+                eo.addEntry("N", N);
+                eo.addEntry("areascale", areascale);
+                eo.addEntry("first face point", face_points[indeces[0]]);
+                throw eo;
+            }
             V2 = face_points[indeces[(counter + 2) % N]];
             V2 -= face_points[indeces[(counter + 1) % N]];
         }
@@ -1121,6 +1148,7 @@ namespace
         if (ScalarProd(CrossProduct(V1, V2), point - face_points[indeces[0]]) > 0)
         {
             const size_t Ninner = indeces.size();
+            temp.resize(Ninner);
 #if defined(__INTEL_COMPILER) || defined(__INTEL_LLVM_COMPILER)
 #pragma omp simd early_exit
 #endif
@@ -1153,11 +1181,13 @@ namespace
 
     template <typename PointT>
     void CalcFaceAreaCM(boost::container::small_vector<size_t, 8> const &indeces, std::vector<PointT> const &allpoints,
-                                            std::array<PointT, 128> &points, double &Area, PointT &CM,
-                                            std::array<double, 128> &Atemp)
+                                            face_scratch<PointT> &points, double &Area, PointT &CM,
+                                            face_scratch<double> &Atemp)
     {
         //CM.Set(0.0, 0.0, 0.0);
         size_t Nloop = indeces.size();
+        points.resize(Nloop);
+        Atemp.resize(Nloop);
 #if defined(__INTEL_COMPILER) || defined(__INTEL_LLVM_COMPILER)
 #pragma ivdep
 #endif
@@ -2505,6 +2535,27 @@ void Voronoi3D<PointT>::MockMesh(void)
     };
 
     size_t previousN = this->Norg_;
+
+    // Resolves the pre-image of a periodic image in the previous mesh. This runs before
+    // BuildInitialize, so the points tree and the resolution cache still describe that mesh. The
+    // match is verified against the untranslated position, because an unverified nearest point is
+    // an arbitrary cell whenever the pre-image is not local.
+    auto resolveOldPreImage = [&](size_t oldImageIndex) -> size_t
+    {
+        const size_t preImage = this->ResolvePeriodicImageIndex(oldImageIndex);
+        if(preImage >= previousN)
+        {
+            return previousN;
+        }
+        PointT expected = delaunayPoints[oldImageIndex] - periodicTranslationAt(oldImageIndex);
+        this->WrapPeriodicPoint(expected);
+        if(fastabs(delaunayPoints[preImage] - expected) > 1e-8 * fastabs(this->ur_ - this->ll_))
+        {
+            return previousN;
+        }
+        return preImage;
+    };
+
     std::vector<size_t> neighbor_buf;
     for(size_t i = 0; i < previousN; i++)
     {
@@ -2533,7 +2584,20 @@ void Voronoi3D<PointT>::MockMesh(void)
                 }
                 else if(this->IsPeriodicImage(neighbor))
                 {
-                    periodicExtrasToBuild[newOwner].push_back(delaunayPoints[neighbor]);
+                    // A periodic image has to follow its pre-image, not the cell it borders.
+                    // Repartitioning can hand the two to different ranks, and rebuilding the image on
+                    // the cell's rank alone leaves it with no owner to exchange its state and centroid
+                    // with. Route it the same way as any other ghost of the pre-image.
+                    const size_t preImage = resolveOldPreImage(neighbor);
+                    if(preImage < previousN)
+                    {
+                        const auto &[preImageNewOwner, preImageNewIndex] = whereNow.at(preImage);
+                        addPeriodicGhostOrAsk(preImageNewOwner, newOwner, preImageNewIndex, neighbor);
+                    }
+                    else
+                    {
+                        periodicExtrasToBuild[newOwner].push_back(delaunayPoints[neighbor]);
+                    }
                 }
                 else
                 {
@@ -3095,12 +3159,43 @@ void Voronoi3D<PointT>::UpdateCMs(void)
     this->SyncPartialBuildData(this->CM_, this->all_CM);
     if(this->HasPeriodicBoundaries())
     {
+        // SyncPartialBuildData only fills extended points that are registered as active points or that
+        // arrive as MPI ghosts. Repartitioning rebuilds periodic images of local cells outside both of
+        // those sets, so their centroids are still at their default value here and have to be taken
+        // from the pre-image before the periodic shift is applied.
+        std::vector<bool> filledBySync(this->CM_.size(), false);
+        const AllPointsMap &indicesInAllPoints = this->GetIndicesInAllPoints();
         for(size_t i = this->Norg_; i < this->CM_.size(); ++i)
         {
-            if(this->IsPeriodicImage(i))
+            filledBySync[i] = (indicesInAllPoints.find(i) != indicesInAllPoints.cend());
+        }
+#ifdef MADVORO_WITH_MPI
+        for(const std::vector<size_t> &ghostIndices : this->Nghost_)
+        {
+            for(size_t ghostIndex : ghostIndices)
             {
-                this->CM_[i] = this->CM_[i] + this->periodicImageTranslation_[i];
+                if(ghostIndex < filledBySync.size())
+                {
+                    filledBySync[ghostIndex] = true;
+                }
             }
+        }
+#endif // MADVORO_WITH_MPI
+        for(size_t i = this->Norg_; i < this->CM_.size(); ++i)
+        {
+            if(!this->IsPeriodicImage(i))
+            {
+                continue;
+            }
+            if(!filledBySync[i])
+            {
+                const size_t physical = this->ResolvePeriodicImageIndex(i);
+                if(physical < this->Norg_)
+                {
+                    this->CM_[i] = this->CM_[physical];
+                }
+            }
+            this->CM_[i] = this->CM_[i] + this->periodicImageTranslation_[i];
         }
     }
 }
@@ -4162,20 +4257,20 @@ void Voronoi3D<PointT>::BuildVoronoi(std::vector<size_t> const &order)
     FaceNeighbors_.resize(Norg_ * 10);
     PointsInFace_.resize(Norg_ * 10);
 
-    std::array<size_t, 128> temp, temp3;
+    face_scratch<size_t> temp, temp3;
     // Build all voronoi points
     std::size_t Ntetra = del_.tetras_.size();
     for (size_t i = 0; i < Ntetra; ++i)
         if (ShouldCalcTetraRadius(del_.tetras_[i], Norg_))
             CalcTetraRadiusCenter(i);
     // Organize the faces and assign them to cells
-    std::array<double, 128> diffs, Atempvec;
+    face_scratch<double> diffs, Atempvec;
 
     size_t FaceCounter = 0;
     boost::container::flat_set<size_t> neigh_set;
     point_vec *temp_points_in_face;
-    std::array<PointT, 128> clean_vec;
-    std::array<double, 128> area_vec_temp;
+    face_scratch<PointT> clean_vec;
+    face_scratch<double> area_vec_temp;
 
     //std::vector<PointT, boost::alignment::aligned_allocator<PointT, 32> > clean_vec;
     for (size_t i = 0; i < Norg_; ++i)
@@ -4196,22 +4291,40 @@ void Voronoi3D<PointT>::BuildVoronoi(std::vector<size_t> const &order)
                     // Did we already build this face?
                     if (neigh_set.find(point_other) == neigh_set.end())
                     {
-                        size_t temp_size = 0;
-                        // Find all tetras for face
-                        temp[0] = tetcheck;
-                        ++temp_size;
+                        // Find all tetras for face.  The fan grows onto the heap when a
+                        // face has more vertices than the inline capacity, which happens
+                        // where a coarse cell borders a finely resolved region.  The walk
+                        // only ends by returning to its first tetrahedron, so a Delaunay
+                        // with inconsistent neighbour links would otherwise never stop.
+                        temp.clear();
+                        temp.push_back(tetcheck);
                         size_t next_check = NextLoopTetra(del_.tetras_[tetcheck], tetcheck, point, point_other);
                         size_t cur_check = next_check;
                         size_t last_check = tetcheck;
                         while (next_check != tetcheck)
                         {
+                            if(temp.size() > PointTetras_[point].size())
+                            {
+                                MadVoro::Exception::MadVoroException eo("Voronoi3D:BuildVoronoi: the tetrahedron fan around a face visited more tetrahedra than the point has");
+                                eo.addEntry("point", point);
+                                eo.addEntry("point_other", point_other);
+                                eo.addEntry("Norg", Norg_);
+                                eo.addEntry("first tetra", tetcheck);
+                                eo.addEntry("current tetra", cur_check);
+                                eo.addEntry("fan size", temp.size());
+                                eo.addEntry("tetras of point", PointTetras_[point].size());
+                                eo.addEntry("Point", del_.points_[point]);
+                                eo.addEntry("Point other", del_.points_[point_other]);
+                                eo.addEntry("distance", abs(del_.points_[point] - del_.points_[point_other]));
+                                throw eo;
+                            }
                             Tetrahedron const &tet_check = del_.tetras_[cur_check];
-                            temp[temp_size] = cur_check;
-                            ++temp_size;
+                            temp.push_back(cur_check);
                             next_check = NextLoopTetra(tet_check, last_check, point, point_other);
                             last_check = cur_check;
                             cur_check = next_check;
                         }
+                        const size_t temp_size = temp.size();
                         // Is face too small?
                         if (temp_size < 3)
                             continue;
