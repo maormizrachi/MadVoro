@@ -216,6 +216,9 @@ public:
 
   //! \brief Clear data and release retained buffers
   void ReleaseMemory(void);
+
+  //! \brief Drops spare capacity of every container while keeping the mesh valid.
+  void ShrinkToFit(void);
 private:
   void InsertPoint(std::size_t index);
   std::size_t Walk(std::size_t point, std::size_t first_guess);
@@ -1272,6 +1275,17 @@ void Delaunay3D<PointT>::Clean(void)
     empty_tetras_.clear();
     changed_tetras_.clear();
     newTetras_.clear();
+}
+
+template <typename PointT>
+void Delaunay3D<PointT>::ShrinkToFit(void)
+{
+    tetras_.shrink_to_fit();
+    points_.shrink_to_fit();
+    empty_tetras_.shrink_to_fit();
+    changed_tetras_.shrink_to_fit();
+    newTetras_.shrink_to_fit();
+    to_check_.shrink_to_fit();
 }
 
 template <typename PointT>

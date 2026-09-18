@@ -448,6 +448,13 @@ public:
 
   void ReleaseMemory(void);
 
+  /*! \brief Returns spare container capacity to the allocator.
+      A rebuild on fewer points (after a load-balance repartition) leaves every
+      container with the capacity of the largest mesh it ever held; the default
+      conditional_shrink is compiled out, so call this after a rebuild. The mesh
+      stays fully usable. */
+  void ShrinkToFit(void);
+
   void BuildPartially(const std::vector<PointT> &allPoints, const std::vector<size_t> &indicesToBuild);
 
   void SetPeriodicBoundaries(bool x, bool y, bool z);
@@ -3978,6 +3985,42 @@ template <typename PointT>
 std::pair<PointT, PointT> Voronoi3D<PointT>::GetBoxCoordinates(void) const
 {
     return std::pair<PointT, PointT>(ll_, ur_);
+}
+
+template <typename PointT>
+void Voronoi3D<PointT>::ShrinkToFit(void)
+{
+    PointTetras_.shrink_to_fit();
+    R_.shrink_to_fit();
+    tetra_centers_.shrink_to_fit();
+    FacesInCell_.shrink_to_fit();
+    PointsInFace_.shrink_to_fit();
+    FaceNeighbors_.shrink_to_fit();
+    all_CM.shrink_to_fit();
+    CM_.shrink_to_fit();
+    Face_CM_.shrink_to_fit();
+    volume_.shrink_to_fit();
+    area_.shrink_to_fit();
+    allMyPoints.shrink_to_fit();
+    allPointsWeights.shrink_to_fit();
+    radiuses.shrink_to_fit();
+    periodicImageTranslation_.shrink_to_fit();
+    periodicImagePhysical_.shrink_to_fit();
+    del_.ShrinkToFit();
+#ifdef MADVORO_WITH_MPI
+    sentprocs_.shrink_to_fit();
+    for(auto &v : sentpoints_) v.shrink_to_fit();
+    sentpoints_.shrink_to_fit();
+    duplicatedprocs_.shrink_to_fit();
+    for(auto &v : duplicated_points_) v.shrink_to_fit();
+    duplicated_points_.shrink_to_fit();
+    real_duplicated_proc.shrink_to_fit();
+    for(auto &v : real_duplicated_points) v.shrink_to_fit();
+    real_duplicated_points.shrink_to_fit();
+    for(auto &v : Nghost_) v.shrink_to_fit();
+    Nghost_.shrink_to_fit();
+    self_index_.shrink_to_fit();
+#endif
 }
 
 template <typename PointT>
