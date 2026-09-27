@@ -10,6 +10,7 @@
 #endif // _MSC_VER
 
 #include <algorithm>
+#include <cstdlib>
 #include <numeric>
 #include <cfloat>
 #include <stack>
@@ -76,6 +77,15 @@
   #include <MeshDecomposer3D/points_manager/HilbertPointsManager.hpp>
   #define INITIAL_SENDRECV_TAG 1105
 #endif 
+
+namespace madvoro_runtime_log_detail
+{
+inline bool Detailed()
+{
+    char const* const value = std::getenv("RICH_RUNTIME_LOG");
+    return value != nullptr && std::string(value) == "detailed";
+}
+}
 
 #ifdef TIMING
 #define VORONOI_TIMING(name) (auto name = std::chrono::high_resolution_clock::now();)
@@ -2020,7 +2030,7 @@ void Voronoi3D<PointT>::UpdatePointsTree(const std::vector<PointT> &activePoints
 
     rank_t rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    if(rank == 0)
+    if(rank == 0 && madvoro_runtime_log_detail::Detailed())
     {
         std::cout << "Time for tree: " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
     }
@@ -2057,7 +2067,7 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
 
     std::vector<PointT> activePoints = this->PrepareToBuildParallel(allPoints, allWeights, indicesToBuild, suppressRebalancing, suppressExchange);
     end = std::chrono::high_resolution_clock::now();
-    if(rank == 0)
+    if(rank == 0 && madvoro_runtime_log_detail::Detailed())
     {
         std::cout << "Time for preparing (hilbert tree + load balancing): " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
     }
@@ -2067,7 +2077,7 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
         int maxPts = myPts, minPts = myPts;
         MPI_Allreduce(MPI_IN_PLACE, &maxPts, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
         MPI_Allreduce(MPI_IN_PLACE, &minPts, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
-        if (rank == 0)
+        if(rank == 0 && madvoro_runtime_log_detail::Detailed())
             std::cout << "Post-LB point distribution: max=" << maxPts << ", min=" << minPts << std::endl;
     }
 
@@ -2104,7 +2114,7 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
     // MPI_Barrier(MPI_COMM_WORLD);
 
     end = std::chrono::high_resolution_clock::now();
-    if(rank == 0)
+    if(rank == 0 && madvoro_runtime_log_detail::Detailed())
     {
         std::cout << "Time for initial build: " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
     }
@@ -2127,7 +2137,7 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
     this->UpdateRadiuses(activePoints);    
     end = std::chrono::high_resolution_clock::now();
 
-    if(rank == 0)
+    if(rank == 0 && madvoro_runtime_log_detail::Detailed())
     {
         std::cout << "Time for radiuses: " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
     }
@@ -2138,7 +2148,7 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
     this->UpdateRangeFinder();
     end = std::chrono::high_resolution_clock::now();
 
-    if(rank == 0)
+    if(rank == 0 && madvoro_runtime_log_detail::Detailed())
     {
         std::cout << "Time for range agent: " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
     }
@@ -2194,7 +2204,7 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
 
     end = std::chrono::high_resolution_clock::now();
 
-    if(rank == 0)
+    if(rank == 0 && madvoro_runtime_log_detail::Detailed())
     {
         std::cout << "Time for build Voronoi from Delaunay: " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
     }
@@ -3108,7 +3118,8 @@ template <typename PointT>
     }
     else
     {
-        std::cout << "In serial mode" << std::endl;
+        if(madvoro_runtime_log_detail::Detailed())
+            std::cout << "In serial mode" << std::endl;
     }
     #endif // MADVORO_WITH_MPI
 
@@ -3236,7 +3247,7 @@ template <typename PointT>
         totalBigQueries += largePointsNum;
         totalSmallQueries += smallPointsNum;
 
-        if(rank == 0) std::cout << "iteration " << iterations << " (" << smallPointsNum << " small points, " << largePointsNum << " large points, average ghost points: " << averageGP << ")" << std::endl;
+        if(rank == 0 && madvoro_runtime_log_detail::Detailed()) std::cout << "iteration " << iterations << " (" << smallPointsNum << " small points, " << largePointsNum << " large points, average ghost points: " << averageGP << ")" << std::endl;
 
         VORONOI_TIMING(start1);
         auto [smallQueries, bigQueries] = this->CreateBatches(smallPoints, largePoints, firstLargeIteration, currentRadiuses, iterations);
@@ -3327,7 +3338,7 @@ template <typename PointT>
 
         auto end_iter = std::chrono::high_resolution_clock::now();
 
-        if(rank == 0) std::cout << "added new points: " << new_points << ", total time: " << std::chrono::duration<double>(end_iter - start_iter).count() << std::endl;
+        if(rank == 0 && madvoro_runtime_log_detail::Detailed()) std::cout << "added new points: " << new_points << ", total time: " << std::chrono::duration<double>(end_iter - start_iter).count() << std::endl;
 
         std::tie(smallPoints, largePoints) = this->DetermineNextIterationPoints(iterations, firstLargeIteration, currentRadiuses, numOfResultsForSmallPoints, numOfResultsForBigPoints);
 
@@ -3348,12 +3359,12 @@ template <typename PointT>
     }
 
     auto end = std::chrono::high_resolution_clock::now();
-    if(rank == 0)
+    if(rank == 0 && madvoro_runtime_log_detail::Detailed())
     {
         std::cout << "Time for bringing ghosts: " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
     }
 
-    if(rank == 0)
+    if(rank == 0 && madvoro_runtime_log_detail::Detailed())
     {
         std::cout << "Total small queries: " << totalSmallQueries << ", total big queries: " << totalBigQueries << std::endl;
     }
@@ -3687,7 +3698,8 @@ void Voronoi3D<PointT>::BuildPartially(const std::vector<PointT> &allPoints, con
     this->bigtet_ = SetPointTetras();
     
     end = std::chrono::high_resolution_clock::now();
-    std::cout << "Time for initial build: " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
+    if(madvoro_runtime_log_detail::Detailed())
+        std::cout << "Time for initial build: " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
 
     start = std::chrono::high_resolution_clock::now();
     this->allMyPointsTree = std::make_shared<OctTree<IVec>>(IVec(this->ll_, std::numeric_limits<size_t>::max()),
@@ -3721,7 +3733,8 @@ void Voronoi3D<PointT>::BuildPartially(const std::vector<PointT> &allPoints, con
     
     end = std::chrono::high_resolution_clock::now();
 
-    std::cout << "Time for data structures initialization: " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
+    if(madvoro_runtime_log_detail::Detailed())
+        std::cout << "Time for data structures initialization: " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
 
     #ifdef MADVORO_WITH_MPI
         this->BringGhostPointsToBuild(MPI_COMM_SELF);
