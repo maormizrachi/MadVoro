@@ -85,6 +85,20 @@ inline bool Detailed()
     char const* const value = std::getenv("RICH_RUNTIME_LOG");
     return value != nullptr && std::string(value) == "detailed";
 }
+#ifdef MADVORO_WITH_MPI
+// Detailed(), agreed over MPI_COMM_WORLD at its first (collective) call, for reductions that only feed the
+// detailed log: without it they are skipped on every rank.
+inline bool DetailedAgreed()
+{
+    static int const agreed = []()
+    {
+        int value = Detailed() ? 1 : 0;
+        MPI_Allreduce(MPI_IN_PLACE, &value, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+        return value;
+    }();
+    return agreed != 0;
+}
+#endif
 }
 
 #ifdef TIMING
@@ -123,6 +137,11 @@ public:
 private:
   PointT ll_, ur_;
   std::size_t Norg_, bigtet_;
+  std::array<double, 7> partialBuildStageSeconds_{};
+  size_t lastGhostIterations_ = 0;
+  // Diagnostic-only reductions in the ghost rounds: agreed at the parallel build entry (BuildPartiallyParallel);
+  // in a local build the communicator is MPI_COMM_SELF, where either value is safe.
+  bool detailedReductions_ = false;
 
   std::set<int> set_temp_;
   std::stack<int> stack_temp_;
@@ -371,6 +390,11 @@ public:
   inline const std::shared_ptr<LoadBalancer<PointT>> GetLoadBalancer(void) const {return this->pointsManager->getLoadBalancer();};
 
   std::vector<PointT> BuildPartiallyParallel(const std::vector<PointT> &allPoints, const std::vector<double> &allWeights, const std::vector<size_t> &indicesToBuild, bool suppressRebalancing = false, bool suppressExchange = false);
+  // This rank's wall seconds of the last BuildPartiallyParallel call by stage: prepare, Delaunay, point tree,
+  // radii, range finder, ghost points, Voronoi (incl. centres of mass and the volume exchange); and the number of
+  // ghost-point rounds.  Diagnostics only.
+  const std::array<double, 7> &GetPartialBuildStageSeconds(void) const { return partialBuildStageSeconds_; }
+  size_t GetLastGhostIterations(void) const { return lastGhostIterations_; }
 
   std::vector<PointT> BuildPartiallyParallel(const std::vector<PointT> &allPoints, const std::vector<size_t> &indicesToBuild, bool suppressRebalancing = false, bool suppressExchange = false)
   {
@@ -2067,17 +2091,23 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
 
     std::vector<PointT> activePoints = this->PrepareToBuildParallel(allPoints, allWeights, indicesToBuild, suppressRebalancing, suppressExchange);
     end = std::chrono::high_resolution_clock::now();
+    this->partialBuildStageSeconds_.fill(0);
+    this->partialBuildStageSeconds_[0] = std::chrono::duration<double>(end - start).count();
     if(rank == 0 && madvoro_runtime_log_detail::Detailed())
     {
         std::cout << "Time for preparing (hilbert tree + load balancing): " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
     }
 
+    // Agreed here, on the world call every rank makes, and kept for the ghost rounds of this build: a local build
+    // (BringGhostPointsToBuild on MPI_COMM_SELF) must not be the first caller of a world collective.
+    this->detailedReductions_ = madvoro_runtime_log_detail::DetailedAgreed();
+    if(this->detailedReductions_)
     {
         int myPts = static_cast<int>(activePoints.size());
         int maxPts = myPts, minPts = myPts;
         MPI_Allreduce(MPI_IN_PLACE, &maxPts, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
         MPI_Allreduce(MPI_IN_PLACE, &minPts, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
-        if(rank == 0 && madvoro_runtime_log_detail::Detailed())
+        if(rank == 0)
             std::cout << "Post-LB point distribution: max=" << maxPts << ", min=" << minPts << std::endl;
     }
 
@@ -2114,6 +2144,7 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
     // MPI_Barrier(MPI_COMM_WORLD);
 
     end = std::chrono::high_resolution_clock::now();
+    this->partialBuildStageSeconds_[1] = std::chrono::duration<double>(end - start).count();
     if(rank == 0 && madvoro_runtime_log_detail::Detailed())
     {
         std::cout << "Time for initial build: " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
@@ -2130,12 +2161,15 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
 
     START_TIMER_PREEMPTIVE("Tree construction");
 
+    start = std::chrono::high_resolution_clock::now();
     this->UpdatePointsTree(activePoints);
+    this->partialBuildStageSeconds_[2] = std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - start).count();
     
     START_TIMER_PREEMPTIVE("Radiuses calculation");
     start = std::chrono::high_resolution_clock::now();
     this->UpdateRadiuses(activePoints);    
     end = std::chrono::high_resolution_clock::now();
+    this->partialBuildStageSeconds_[3] = std::chrono::duration<double>(end - start).count();
 
     if(rank == 0 && madvoro_runtime_log_detail::Detailed())
     {
@@ -2147,6 +2181,7 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
     start = std::chrono::high_resolution_clock::now();
     this->UpdateRangeFinder();
     end = std::chrono::high_resolution_clock::now();
+    this->partialBuildStageSeconds_[4] = std::chrono::duration<double>(end - start).count();
 
     if(rank == 0 && madvoro_runtime_log_detail::Detailed())
     {
@@ -2155,7 +2190,9 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
 
     START_TIMER_PREEMPTIVE("Bringing ghosts");
 
+    start = std::chrono::high_resolution_clock::now();
     this->BringGhostPointsToBuild(MPI_COMM_WORLD);
+    this->partialBuildStageSeconds_[5] = std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - start).count();
 
     START_TIMER_PREEMPTIVE("Building voronoi");
 
@@ -2203,6 +2240,7 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
     }
 
     end = std::chrono::high_resolution_clock::now();
+    this->partialBuildStageSeconds_[6] = std::chrono::duration<double>(end - start).count();
 
     if(rank == 0 && madvoro_runtime_log_detail::Detailed())
     {
@@ -3230,16 +3268,18 @@ template <typename PointT>
         size_t smallPointsNum = smallPoints.size();
         size_t largePointsNum = largePoints.size();
         #ifdef MADVORO_WITH_MPI
-        if (!serialMode)
+        // Diagnostic-only reductions (the iteration line and totals below): skipped without the detailed log.
+        if (!serialMode && this->detailedReductions_)
         {
             MPI_Reduce((rank == 0)? MPI_IN_PLACE : &smallPointsNum, &smallPointsNum, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, 0, comm);
             MPI_Reduce((rank == 0)? MPI_IN_PLACE : &largePointsNum, &largePointsNum, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, 0, comm);
         }
         #endif // MADVORO_WITH_MPI
         iterations++;
+        this->lastGhostIterations_ = iterations;
         size_t averageGP = this->del_.points_.size();
         #ifdef MADVORO_WITH_MPI
-        if (!serialMode)
+        if (!serialMode && this->detailedReductions_)
             MPI_Reduce((rank == 0)? MPI_IN_PLACE : &averageGP, &averageGP, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, 0, comm);
         #endif // MADVORO_WITH_MPI
 
@@ -3330,7 +3370,8 @@ template <typename PointT>
             size_t new_points_until_now = std::accumulate(this->Nghost_.cbegin(), this->Nghost_.cend(), 0, [](const size_t &a, const std::vector<size_t> &b){return a + b.size();});
             new_points = new_points_until_now - total_new_points;
             total_new_points = new_points_until_now;
-            MPI_Allreduce(MPI_IN_PLACE, &new_points, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, comm);
+            if(this->detailedReductions_)
+                MPI_Allreduce(MPI_IN_PLACE, &new_points, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, comm);
         }
         #else // MADVORO_WITH_MPI
             new_points = newPoints.size();
