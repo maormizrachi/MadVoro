@@ -1,0 +1,7 @@
+# MadVoro partial builds keep non-participating points as neighbours (serial + MPI)
+TAGS="serial mpi"
+CATEGORY="code_correctness"
+CHECK_FUNCTION="check_voronoi_partial_build_case"
+TIMEOUT=1800
+MPI_NP=16
+SLURM_PARTITION=bigrun

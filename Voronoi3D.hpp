@@ -2034,7 +2034,9 @@ std::vector<PointT> Voronoi3D<PointT>::PrepareToBuildParallel(const std::vector<
     for(size_t i = 0; i < allPoints.size(); i++)
         payloads[i] = VoronoiPayload<PointT>(this->radiuses[i], this->all_CM[i]);
 
-    PointsExchangeResult<PointT, VoronoiPayload<PointT>> exchangeResult = this->pointsManager->update(allPoints, allowExchange? allWeights : this->allPointsWeights, payloads, indicesToBuild, allowRebalance, allowExchange);
+    // allPoints are this rank's own points; non-participating points must travel
+    // too, since they act as neighbours of the participating ones.
+    PointsExchangeResult<PointT, VoronoiPayload<PointT>> exchangeResult = this->pointsManager->update(allPoints, allowExchange? allWeights : this->allPointsWeights, payloads, indicesToBuild, allowRebalance, allowExchange, ExchangeScope::AllPointsFlagIndices);
 
     this->allMyPoints = std::move(exchangeResult.newPoints);
     this->radiuses.resize(exchangeResult.newPayloads.size());
@@ -2144,7 +2146,7 @@ void Voronoi3D<PointT>::UpdatePointsTree(const std::vector<PointT> &activePoints
     size_t allPointsNum = this->allMyPoints.size();
     for(size_t pointIdx = 0; pointIdx < allPointsNum; pointIdx++)
     {
-        const PointT &point = activePoints[pointIdx];
+        const PointT &point = this->allMyPoints[pointIdx];
         this->allMyPointsTree->insert(IVec(point.x, point.y, point.z, pointIdx));
     }
 
@@ -4146,7 +4148,7 @@ void Voronoi3D<PointT>::BuildPartially(const std::vector<PointT> &allPoints, con
     this->indicesInAllMyPoints = AllPointsMap();
     for(const size_t &pointIdx : indicesToBuild)
     {
-        this->indicesInAllMyPoints[pointIdx] = pointsCounter;
+        this->indicesInAllMyPoints[pointsCounter] = pointIdx;
         pointsCounter++;
     }
 
@@ -4219,7 +4221,7 @@ void Voronoi3D<PointT>::BuildPartially(const std::vector<PointT> &allPoints, con
     size_t allPointsNum = this->allMyPoints.size();
     for(size_t pointIdx = 0; pointIdx < allPointsNum; pointIdx++)
     {
-        const PointT &point = activePoints[pointIdx];
+        const PointT &point = this->allMyPoints[pointIdx];
         this->allMyPointsTree->insert(IVec(point.x, point.y, point.z, pointIdx));
     }
 

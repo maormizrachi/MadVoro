@@ -188,3 +188,35 @@ check_voronoi_mock_mesh_periodic_case() {
     REGRESSION_CHECK_MSG="Periodic MockMesh rebalance passed (rel_error_after=${rel_error_after})"
     return 0
 }
+
+check_voronoi_partial_build_case() {
+    local run_dir="$1"
+    local start_epoch="$2"
+    local stdout_log="$3"
+    local stderr_log="$4"
+    local metrics_file="${run_dir}/voronoi_partial_build_metrics.txt"
+    local pass_flag
+    local subset
+
+    check_no_fatal_markers "$stdout_log" "$stderr_log" || return 1
+    is_nonempty_and_newer "$metrics_file" "$start_epoch" || return 1
+
+    pass_flag=$(awk '$1 == "pass" { print $2 }' "$metrics_file")
+    if [[ -z "$pass_flag" ]]; then
+        REGRESSION_CHECK_MSG="failed to parse voronoi partial build metrics"
+        return 1
+    fi
+    for subset in half_box scattered_third full_rebuild; do
+        if [[ "$(awk -v k="${subset}_pass" '$1 == k { print $2 }' "$metrics_file")" != "1" ]]; then
+            REGRESSION_CHECK_MSG="$(grep -m1 "^${subset}:" "$stdout_log" 2>/dev/null || echo "${subset} did not pass")"
+            return 1
+        fi
+    done
+    if [[ "$pass_flag" != "1" ]]; then
+        REGRESSION_CHECK_MSG="voronoi_partial_build test reported pass=${pass_flag}"
+        return 1
+    fi
+
+    REGRESSION_CHECK_MSG="PASS (half_box rel_error=$(awk '$1 == "half_box_max_rel_error" { print $2 }' "$metrics_file"), scattered_third rel_error=$(awk '$1 == "scattered_third_max_rel_error" { print $2 }' "$metrics_file"))"
+    return 0
+}
