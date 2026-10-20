@@ -151,7 +151,7 @@ int main()
     MPI_Comm_size(MPI_COMM_WORLD, &worldSize);
 #endif
     const std::size_t numPoints = (worldSize > 1) ? 60000 : 20000;
-#ifdef MADVORO_WITH_KOKKOS
+#ifdef MADVORO_WITH_GPU
     const std::string backend = "kokkos";
 #else
     const std::string backend = "host";

@@ -37,7 +37,7 @@ option(MADVORO_WITH_MPI   "Build with MPI support"   OFF)
 option(MADVORO_WITH_HDF5  "Build with HDF5 support"  OFF)
 option(MADVORO_WITH_VTK   "Build with VTK support"   OFF)
 option(MADVORO_WITH_VCL   "Build with VCL (Vector Class Library) support" OFF)
-option(MADVORO_WITH_KOKKOS "Build with Kokkos support" OFF)
+option(MADVORO_WITH_GPU   "Build with Kokkos (GPU or host-thread) support" OFF)
 option(MADVORO_BUILD_EXAMPLES "Build example programs" OFF)
 option(MADVORO_BUILD_REGRESSION_TESTS "Build THUNDER regression test executables" OFF)
 option(MADVORO_USE_EXACT_INTEGER_FALLBACK
@@ -106,14 +106,14 @@ if(MADVORO_WITH_VCL)
   find_package(VCL REQUIRED)
 endif()
 
-if(MADVORO_WITH_KOKKOS)
+if(MADVORO_WITH_GPU)
   # launch_compiler keeps CMAKE_CXX_COMPILER (e.g. mpicxx) and redirects only
   # Kokkos-dependent compiles/links to the compiler Kokkos was built with
   # (nvcc_wrapper for CUDA, hipcc/amdclang++ for HIP).
   find_package(Kokkos CONFIG QUIET COMPONENTS launch_compiler)
   if(NOT Kokkos_FOUND)
     message(FATAL_ERROR
-      "MADVORO_WITH_KOKKOS needs a Kokkos installation, and none was found.\n"
+      "MADVORO_WITH_GPU needs a Kokkos installation, and none was found.\n"
       "Point CMake at it, e.g. 'export Kokkos_ROOT=/path/to/kokkos/install' (or load a Kokkos module) "
       "and re-run the build.")
   endif()
@@ -185,8 +185,8 @@ if(MADVORO_WITH_VCL)
   target_include_directories(madvoro PUBLIC ${VCL_INCLUDE_DIR})
 endif()
 
-if(MADVORO_WITH_KOKKOS)
-  target_compile_definitions(madvoro PUBLIC MADVORO_WITH_KOKKOS)
+if(MADVORO_WITH_GPU)
+  target_compile_definitions(madvoro PUBLIC MADVORO_WITH_GPU)
   if("OPENMP" IN_LIST Kokkos_DEVICES)
     # A host compiler flag such as RICH's static "-lgomp" can hide libgomp from
     # FindOpenMP, leaving OpenMP::OpenMP_CXX without it; link the runtime explicitly.
@@ -200,7 +200,7 @@ if(MADVORO_WITH_KOKKOS)
   add_library(madvoro_geometry STATIC geometry/KokkosGeometryExecutor.cpp)
   set_target_properties(madvoro_geometry PROPERTIES POSITION_INDEPENDENT_CODE ON)
   target_include_directories(madvoro_geometry PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-  target_compile_definitions(madvoro_geometry PUBLIC MADVORO_WITH_KOKKOS)
+  target_compile_definitions(madvoro_geometry PUBLIC MADVORO_WITH_GPU)
   # Bit-identical geometry on every backend: no fused multiply-adds in the kernels
   # (the host code is built with -ffp-contract=off for the same reason).
   if("CUDA" IN_LIST Kokkos_DEVICES)
@@ -232,7 +232,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   include(CMakePackageConfigHelpers)
 
   set(_madvoro_install_targets madvoro)
-  if(MADVORO_WITH_KOKKOS)
+  if(MADVORO_WITH_GPU)
     list(APPEND _madvoro_install_targets madvoro_geometry)
   endif()
   install(TARGETS ${_madvoro_install_targets}

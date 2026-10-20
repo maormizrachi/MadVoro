@@ -4,7 +4,7 @@
 // The executor of the geometry kernels: Kokkos (on a device or host threads) when
 // MadVoro is built with Kokkos, the host one after the other otherwise. Both take the
 // same calls and give the same results.
-#ifdef MADVORO_WITH_KOKKOS
+#ifdef MADVORO_WITH_GPU
 #include "KokkosGeometryExecutor.hpp"
 #else
 #include "HostGeometryExecutor.hpp"
@@ -14,7 +14,7 @@ namespace MadVoro
 {
 namespace Geometry
 {
-#ifdef MADVORO_WITH_KOKKOS
+#ifdef MADVORO_WITH_GPU
 using GeometryExecutor = KokkosGeometryExecutor;
 #else
 using GeometryExecutor = HostGeometryExecutor;

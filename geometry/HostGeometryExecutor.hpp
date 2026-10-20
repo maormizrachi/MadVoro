@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <vector>
 
-#ifdef MADVORO_WITH_KOKKOS
+#ifdef MADVORO_WITH_GPU
 #include <Kokkos_Core.hpp>
 #include "../portability/KokkosInitializer.hpp"
 #endif
@@ -23,7 +23,7 @@ namespace MadVoro
 namespace Geometry
 {
 
-#ifdef MADVORO_WITH_KOKKOS
+#ifdef MADVORO_WITH_GPU
 namespace executor_detail
 {
     using HostPolicy = Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace, Kokkos::Schedule<Kokkos::Dynamic>,
@@ -37,7 +37,7 @@ namespace executor_detail
 template<typename F>
 void HostParallelFor(flat_index_t n, const F &f)
 {
-#ifdef MADVORO_WITH_KOKKOS
+#ifdef MADVORO_WITH_GPU
     KokkosInitializer::Instance();
     Kokkos::parallel_for("MadVoro::HostParallelFor", executor_detail::HostPolicy(0, static_cast<std::int64_t>(n)),
                          [&f](const std::int64_t i) { f(static_cast<flat_index_t>(i)); });
@@ -155,7 +155,7 @@ inline FaceBuildReport BuildFacesHost(const FlatMeshView &mesh, const flat_index
     std::vector<FaceBuildResult> results(pointCount);
     std::vector<executor_detail::PointFaces> pointFaces(pointCount);
     // One face buffer and scratch per concurrently running thread (a Kokkos unique token)
-#ifdef MADVORO_WITH_KOKKOS
+#ifdef MADVORO_WITH_GPU
     KokkosInitializer::Instance();
     const Kokkos::Experimental::UniqueToken<Kokkos::DefaultHostExecutionSpace> tokens;
     const int slotCount = tokens.size();
@@ -178,7 +178,7 @@ inline FaceBuildReport BuildFacesHost(const FlatMeshView &mesh, const flat_index
         record.faceCount = buffer.area.size() - record.firstFace;
         record.vertexCount = buffer.vertices.size() - record.firstVertex;
     };
-#ifdef MADVORO_WITH_KOKKOS
+#ifdef MADVORO_WITH_GPU
     Kokkos::parallel_for("MadVoro::BuildFacesHost", executor_detail::HostPolicy(0, static_cast<std::int64_t>(pointCount)),
                          [&](const std::int64_t i) {
                              const int slot = tokens.acquire();
