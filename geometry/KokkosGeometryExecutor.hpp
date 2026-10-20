@@ -102,7 +102,8 @@ namespace device_detail
     SetVertices, BuildFaces, CellMoments, with inputs and results in the host
     FlatMesh and FlatVoronoi. Work the kernels cannot finish (extended-precision
     circumcenters, exact volumes, faces that do not fit the fixed scratch) is done
-    on the host.
+    on the host. In a SerialGeometryScope every call is run by a HostGeometryExecutor,
+    serially on the calling thread.
     The kernel launches are public member functions because CUDA's extended
     lambdas cannot be defined in private ones. */
 class KokkosGeometryExecutor
@@ -131,6 +132,9 @@ public:
 
 private:
     FlatVoronoiView DeviceView(const FlatVoronoi &out) const;
+
+    // Runs the calls made in a SerialGeometryScope
+    HostGeometryExecutor host_;
 
     const FlatMesh *hostMesh_ = nullptr;
     FlatMeshView mesh_;

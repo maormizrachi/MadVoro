@@ -32,6 +32,9 @@ namespace
 
 void KokkosGeometryExecutor::SetMesh(const FlatMesh &mesh)
 {
+    this->host_.SetMesh(mesh);
+    if(InSerialGeometryScope())
+        return;
     KokkosInitializer::Instance();
     this->hostMesh_ = &mesh;
     this->points_.Upload(mesh.points);
@@ -70,6 +73,11 @@ FlatVoronoiView KokkosGeometryExecutor::DeviceView(const FlatVoronoi &out) const
 
 void KokkosGeometryExecutor::Circumcenters(const std::vector<std::uint8_t> &compute, FlatVoronoi &out)
 {
+    if(InSerialGeometryScope())
+    {
+        this->host_.Circumcenters(compute, out);
+        return;
+    }
     this->compute_.Upload(compute);
     // Reused circumcenters are already in out.vertices
     this->vertices_.Upload(out.vertices);
@@ -91,6 +99,11 @@ void KokkosGeometryExecutor::Circumcenters(const std::vector<std::uint8_t> &comp
 
 void KokkosGeometryExecutor::SetVertices(const FlatVoronoi &out)
 {
+    if(InSerialGeometryScope())
+    {
+        this->host_.SetVertices(out);
+        return;
+    }
     this->vertices_.Upload(out.vertices);
 }
 
@@ -220,6 +233,10 @@ void KokkosGeometryExecutor::LaunchCellFaceLists(std::size_t pointCount, std::si
 FaceBuildReport KokkosGeometryExecutor::BuildFaces(const std::vector<flat_index_t> &order,
                                                    const std::vector<std::uint8_t> &looseAreaCut, FlatVoronoi &out)
 {
+    if(InSerialGeometryScope())
+    {
+        return this->host_.BuildFaces(order, looseAreaCut, out);
+    }
     const std::size_t pointCount = this->mesh_.ownedCount;
     this->order_.Upload(order);
     this->looseAreaCut_.Upload(looseAreaCut);
@@ -296,6 +313,11 @@ FaceBuildReport KokkosGeometryExecutor::BuildFaces(const std::vector<flat_index_
 
 void KokkosGeometryExecutor::CellMoments(FlatVoronoi &out)
 {
+    if(InSerialGeometryScope())
+    {
+        this->host_.CellMoments(out);
+        return;
+    }
     this->cellVolume_.Output(out.cellVolume);
     this->cellCM_.Output(out.cellCM);
     this->cellStatus_.Output(out.cellStatus);

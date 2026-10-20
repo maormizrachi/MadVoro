@@ -40,6 +40,7 @@
 #endif // MADVORO_WITH_MPI
 
 #include <optional>
+#include <exception>
 #include "VoronoiPayload.hpp"
 #include "types.hpp"
 #include "elementary/Face3D.hpp"
@@ -52,6 +53,8 @@
 #include <MeshDecomposer3D/hilbert/HilbertOrder3D.hpp>
 #include "range/SmallRangeAgent.hpp"
 #include "range/BigRangeAgent.hpp"
+#include "subdomains/MergeSubdomains.hpp"
+#include "subdomains/SubdomainSearch.hpp"
 #include "utils/container_utils.hpp"
 #include <spatial_ds/utils/BoundingBox.hpp>
 #include "exception/MadVoroException.hpp"
@@ -380,6 +383,18 @@ private:
 
   std::shared_ptr<OctTree<IVec>> myPointsTree;
   std::shared_ptr<OctTree<IVec>> allMyPointsTree;
+  // Thread subdomains (see BuildFromThreadSubdomains): their number (0 builds as one
+  // domain), and their tessellations. A subdomain uses its rank's tree of all points
+  // (sharedPointsTree_) instead of building one, and searches for the points of the
+  // other subdomains with sharedRangeFinder_.
+  size_t threadSubdomainCount_ = 0;
+  SubdomainMeshes<PointT> threadSubdomains_;
+  std::shared_ptr<OctTree<IVec>> sharedPointsTree_;
+  std::shared_ptr<RangeFinder<PointT>> sharedRangeFinder_;
+
+  bool UsesThreadSubdomains(void) const;
+
+  void BuildFromThreadSubdomains(void);
   #ifdef MADVORO_WITH_MPI
     std::shared_ptr<PointsManager<PointT, VoronoiPayload<PointT>>> pointsManager;
     std::shared_ptr<const Kernelization3D::IndexingKernel3D<PointT>> indexingToSave = std::shared_ptr<const Kernelization3D::IndexingKernel3D<PointT>>();
@@ -448,6 +463,12 @@ public:
 
 
   size_t GetBuildGeneration(void) const { return buildGeneration_; }
+
+  /*! \brief Builds from `count` thread subdomains (see BuildFromThreadSubdomains); 0, the default, builds as one domain.
+      So far only full builds without periodic boundaries use the subdomains (with BuildParallel, only on one rank). */
+  void SetThreadSubdomains(size_t count) { threadSubdomainCount_ = count; }
+
+  size_t GetThreadSubdomains(void) const { return threadSubdomainCount_; }
 
   void ReleaseMemory(void);
 
@@ -1923,6 +1944,12 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
         std::cout << "Time for preparing (hilbert tree + load balancing): " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
     }
 
+    if(size == 1 and this->UsesThreadSubdomains())
+    {
+        this->BuildFromThreadSubdomains();
+        return activePoints;
+    }
+
     {
         int myPts = static_cast<int>(activePoints.size());
         int maxPts = myPts, minPts = myPts;
@@ -2975,6 +3002,12 @@ void Voronoi3D<PointT>::UpdateRadiuses(const std::vector<PointT> &points)
 template <typename PointT>
 void Voronoi3D<PointT>::UpdateRangeFinder()
 {
+    if(this->sharedRangeFinder_ != nullptr)
+    {
+        // a thread subdomain
+        this->rangeFinder = this->sharedRangeFinder_;
+        return;
+    }
     this->rangeFinder = std::make_shared<OctTreeFinder<PointT>>(this->allMyPointsTree.get(), this->allMyPoints);
     // if(this->rangeFinder.get() == nullptr)
     // {
@@ -3876,6 +3909,11 @@ void Voronoi3D<PointT>::BuildPartially(const std::vector<PointT> &allPoints, con
     }
 
     this->BuildInitialize(activePoints.size());
+    if(this->UsesThreadSubdomains())
+    {
+        this->BuildFromThreadSubdomains();
+        return;
+    }
     // Norg_ = points.size();
     // // Clear data
     // PointTetras_.clear();
@@ -3939,13 +3977,20 @@ void Voronoi3D<PointT>::BuildPartially(const std::vector<PointT> &allPoints, con
     std::cout << "Time for initial build: " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
 
     start = std::chrono::high_resolution_clock::now();
-    this->allMyPointsTree = std::make_shared<OctTree<IVec>>(IVec(this->ll_, std::numeric_limits<size_t>::max()),
-                                                                    IVec(this->ur_, std::numeric_limits<size_t>::max()));
-    size_t allPointsNum = this->allMyPoints.size();
-    for(size_t pointIdx = 0; pointIdx < allPointsNum; pointIdx++)
+    if(this->sharedPointsTree_ != nullptr)
     {
-        const PointT &point = this->allMyPoints[pointIdx];
-        this->allMyPointsTree->insert(IVec(point.x, point.y, point.z, pointIdx));
+        this->allMyPointsTree = this->sharedPointsTree_;
+    }
+    else
+    {
+        this->allMyPointsTree = std::make_shared<OctTree<IVec>>(IVec(this->ll_, std::numeric_limits<size_t>::max()),
+                                                                        IVec(this->ur_, std::numeric_limits<size_t>::max()));
+        size_t allPointsNum = this->allMyPoints.size();
+        for(size_t pointIdx = 0; pointIdx < allPointsNum; pointIdx++)
+        {
+            const PointT &point = this->allMyPoints[pointIdx];
+            this->allMyPointsTree->insert(IVec(point.x, point.y, point.z, pointIdx));
+        }
     }
 
     if(this->allMyPoints.size() == activePoints.size())
@@ -3953,7 +3998,7 @@ void Voronoi3D<PointT>::BuildPartially(const std::vector<PointT> &allPoints, con
         // not a real parital build
         this->myPointsTree = this->allMyPointsTree;
     }
-    else
+    else if(this->sharedPointsTree_ == nullptr) // (a thread subdomain does not search its own points)
     {
         this->myPointsTree = std::make_shared<OctTree<IVec>>(IVec(this->ll_, std::numeric_limits<size_t>::max()),
                                                                         IVec(this->ur_, std::numeric_limits<size_t>::max()));
@@ -4014,6 +4059,160 @@ void Voronoi3D<PointT>::BuildPartially(const std::vector<PointT> &allPoints, con
     BuildVoronoi(order);
 
     this->UpdateCMs();
+}
+
+/**
+ * \brief Whether this build is built from thread subdomains: they are asked for, and it
+ * is a full build without periodic boundaries.
+*/
+template <typename PointT>
+bool Voronoi3D<PointT>::UsesThreadSubdomains(void) const
+{
+    return this->threadSubdomainCount_ > 0 and this->Norg_ > 0 and this->Norg_ == this->allMyPoints.size() and
+           not this->HasPeriodicBoundaries();
+}
+
+/**
+ * \brief Builds the tessellation of the points (allMyPoints) from thread subdomains.
+ * The points are cut into contiguous ranges of their Hilbert order. Each range is a
+ * subdomain, built by its own Voronoi3D as a partial build of the points: the points
+ * of the other subdomains are searched for in one tree of all the points, shared by
+ * every subdomain, and are added to the subdomain's Delaunay as ghosts. The
+ * subdomains' tessellations are then merged (see MergeSubdomains). Expects the build
+ * to be prepared up to and including BuildInitialize.
+*/
+template <typename PointT>
+void Voronoi3D<PointT>::BuildFromThreadSubdomains(void)
+{
+    const size_t pointsNum = this->Norg_;
+    // (a subdomain's id is a SubdomainGrid::subdomain_t)
+    const size_t count = std::min({this->threadSubdomainCount_, pointsNum, static_cast<size_t>(0xFFFE)});
+
+    // One tree of all the points (a full build: they are also the active points)
+    const PointT width = this->ur_ - this->ll_;
+    this->allMyPointsTree = std::make_shared<OctTree<IVec>>(IVec(this->ll_ - width * 0.00001, std::numeric_limits<size_t>::max()),
+                                                            IVec(this->ur_ + width * 0.00001, std::numeric_limits<size_t>::max()));
+    for(size_t pointIdx = 0; pointIdx < pointsNum; pointIdx++)
+    {
+        const PointT &point = this->allMyPoints[pointIdx];
+        this->allMyPointsTree->insert(IVec(point.x, point.y, point.z, pointIdx));
+    }
+    this->myPointsTree = this->allMyPointsTree;
+
+    // Subdomain s is the range [s * pointsNum / count, (s + 1) * pointsNum / count) of the Hilbert order
+    const std::vector<size_t> order = HilbertOrder3D(this->allMyPoints);
+    const auto subdomainBegin = [pointsNum, count](size_t s) { return s * pointsNum / count; };
+
+    // A subdomain searches for the points of the other subdomains only where there may be some
+    using subdomain_t = typename SubdomainGrid<PointT>::subdomain_t;
+    std::vector<subdomain_t> subdomainOf(pointsNum);
+    for(size_t s = 0; s < count; ++s)
+    {
+        for(size_t i = subdomainBegin(s); i < subdomainBegin(s + 1); ++i)
+        {
+            subdomainOf[order[i]] = static_cast<subdomain_t>(s);
+        }
+    }
+    const std::shared_ptr<const SubdomainGrid<PointT>> grid = std::make_shared<SubdomainGrid<PointT>>(this->allMyPoints, subdomainOf);
+    const std::shared_ptr<const RangeFinder<PointT>> pointsFinder = std::make_shared<OctTreeFinder<PointT>>(this->allMyPointsTree.get(), this->allMyPoints);
+
+    std::vector<std::unique_ptr<Voronoi3D<PointT>>> &subdomains = this->threadSubdomains_.meshes;
+    subdomains.resize(count);
+    for(size_t s = 0; s < count; ++s)
+    {
+        if(subdomains[s] == nullptr)
+        {
+            subdomains[s] = std::make_unique<Voronoi3D<PointT>>(this->ll_, this->ur_);
+            #ifdef MADVORO_WITH_MPI
+                // a subdomain talks to no other rank: its ghost loop runs in serial mode
+                subdomains[s]->SetPointsManager(nullptr);
+            #endif // MADVORO_WITH_MPI
+        }
+        Voronoi3D<PointT> &subdomain = *subdomains[s];
+        subdomain.ll_ = this->ll_;
+        subdomain.ur_ = this->ur_;
+        subdomain.box_faces_ = this->box_faces_;
+        subdomain.periodic_ = this->periodic_;
+        subdomain.sharedPointsTree_ = this->allMyPointsTree;
+        subdomain.sharedRangeFinder_ = std::make_shared<SubdomainRangeFinder<PointT>>(pointsFinder, grid, static_cast<subdomain_t>(s));
+        subdomain.radiuses = this->radiuses;
+    }
+
+    // The subdomains are built in parallel, with Kokkos on host threads (one after
+    // another without Kokkos). A subdomain reads only the shared points, tree and
+    // radii, and writes only its own Voronoi3D. Kokkos cannot launch a parallel loop
+    // from inside one, so a subdomain built in parallel runs its own geometry
+    // serially (in a SerialGeometryScope). When the geometry kernels run on a device,
+    // the subdomains are built one after another, so only one thread launches kernels.
+    std::vector<std::exception_ptr> errors(count);
+    const auto buildSubdomain = [&](size_t s)
+    {
+        try
+        {
+            // in the points' own order, so one subdomain is the same build as one domain
+            std::vector<size_t> indicesToBuild(order.begin() + subdomainBegin(s), order.begin() + subdomainBegin(s + 1));
+            std::sort(indicesToBuild.begin(), indicesToBuild.end());
+            subdomains[s]->BuildPartially(this->allMyPoints, indicesToBuild);
+        }
+        catch(...)
+        {
+            errors[s] = std::current_exception();
+        }
+    };
+    #ifdef MADVORO_WITH_GPU
+        constexpr bool kernelsOnHost = Kokkos::SpaceAccessibility<Kokkos::DefaultExecutionSpace, Kokkos::HostSpace>::accessible;
+    #else // MADVORO_WITH_GPU
+        constexpr bool kernelsOnHost = true;
+    #endif // MADVORO_WITH_GPU
+    if constexpr(kernelsOnHost)
+    {
+        Geometry::HostParallelFor(count, [&buildSubdomain](size_t s)
+        {
+            const Geometry::SerialGeometryScope serialGeometry;
+            buildSubdomain(s);
+        });
+    }
+    else
+    {
+        for(size_t s = 0; s < count; ++s)
+        {
+            buildSubdomain(s);
+        }
+    }
+    for(const std::exception_ptr &error : errors)
+    {
+        if(error)
+            std::rethrow_exception(error);
+    }
+
+    std::vector<const Voronoi3D<PointT> *> parts;
+    for(const std::unique_ptr<Voronoi3D<PointT>> &subdomain : subdomains)
+    {
+        parts.push_back(subdomain.get());
+    }
+    SubdomainMerge<PointT> merged = MergeSubdomains(parts, this->allMyPoints);
+    this->del_.points_ = std::move(merged.points);
+    this->del_.Norg_ = pointsNum;
+    this->FacesInCell_ = std::move(merged.cellFaces);
+    this->FaceNeighbors_ = std::move(merged.faceNeighbors);
+    this->PointsInFace_ = std::move(merged.faceVertices);
+    this->area_ = std::move(merged.faceArea);
+    this->Face_CM_ = std::move(merged.faceCM);
+    this->tetra_centers_ = std::move(merged.vertices);
+    this->volume_ = std::move(merged.volume);
+    this->CM_ = std::move(merged.CM);
+    this->periodicImageTranslation_.assign(this->del_.points_.size(), PointT());
+
+    // the radii carried to the next build: each point's, from the subdomain that built it
+    for(const std::unique_ptr<Voronoi3D<PointT>> &subdomain : subdomains)
+    {
+        for(size_t j = 0; j < subdomain->Norg_; ++j)
+        {
+            const size_t pointIdx = subdomain->indicesInAllMyPoints.at(j);
+            this->radiuses[pointIdx] = subdomain->radiuses[pointIdx];
+        }
+    }
+    this->SyncPartialBuildData(this->CM_, this->all_CM);
 }
 
 template <typename PointT>
@@ -4676,6 +4875,7 @@ Voronoi3D<PointT>::Voronoi3D(Voronoi3D<PointT> const &other) : ll_(other.ll_), u
                                                 #endif // MADVORO_WITH_MPI
                                                 temp_points_(std::array<PointT, 4>()), temp_points2_(std::array<PointT, 5>()), box_faces_(other.box_faces_),
                                                 periodic_(other.periodic_), periodicImageTranslation_(other.periodicImageTranslation_),
+                                                threadSubdomainCount_(other.threadSubdomainCount_),
                                                 #ifdef MADVORO_WITH_MPI
                                                     pointsManager(other.pointsManager->clone()), indexingToSave(other.indexingToSave),
                                                     rangeFinder(other.rangeFinder), radiuses(other.radiuses), allMyPoints(other.allMyPoints), allPointsWeights(other.allPointsWeights),
@@ -5282,6 +5482,9 @@ void Voronoi3D<PointT>::SyncPartialBuildData(std::vector<T> &partialBuildData, s
   }
 
   #ifdef MADVORO_WITH_MPI
+      // without a points manager (e.g. a thread subdomain) the build talked to no other rank
+      if(this->pointsManager == nullptr)
+          return;
       std::vector<std::vector<T>> incoming = MPI_exchange_data_indexed(this->GetDuplicatedProcs(), allBuildData, this->GetDuplicatedPoints());
       size_t incomingSize = incoming.size();
       const std::vector<std::vector<size_t>> &Nghost = this->GetGhostIndeces();

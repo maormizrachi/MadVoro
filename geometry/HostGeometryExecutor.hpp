@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 #ifdef MADVORO_WITH_GPU
@@ -31,23 +32,65 @@ namespace executor_detail
 } // namespace executor_detail
 #endif
 
+namespace executor_detail
+{
+    inline bool &SerialScopeFlag()
+    {
+        thread_local bool serial = false;
+        return serial;
+    }
+} // namespace executor_detail
+
+/*! \brief While alive, the geometry loops and kernels started on this thread run on
+    it, one iteration after another, without launching any Kokkos work. For work that
+    already runs inside a Kokkos parallel loop on the host (a thread subdomain): Kokkos
+    cannot launch a parallel loop from inside one. */
+class SerialGeometryScope
+{
+public:
+    SerialGeometryScope() : previous_(executor_detail::SerialScopeFlag())
+    {
+        executor_detail::SerialScopeFlag() = true;
+    }
+
+    ~SerialGeometryScope()
+    {
+        executor_detail::SerialScopeFlag() = this->previous_;
+    }
+
+    SerialGeometryScope(const SerialGeometryScope &) = delete;
+    SerialGeometryScope &operator=(const SerialGeometryScope &) = delete;
+
+private:
+    bool previous_;
+};
+
+//! \brief Whether this thread is in a SerialGeometryScope.
+inline bool InSerialGeometryScope()
+{
+    return executor_detail::SerialScopeFlag();
+}
+
 /*! \brief Runs f(i) for i in [0, n) on the host: on the threads of Kokkos's host
-    execution space when MadVoro is built with Kokkos, one after the other otherwise.
-    f must not throw. */
+    execution space when MadVoro is built with Kokkos (unless in a SerialGeometryScope),
+    one after the other otherwise. f must not throw. */
 template<typename F>
 void HostParallelFor(flat_index_t n, const F &f)
 {
 #ifdef MADVORO_WITH_GPU
-    KokkosInitializer::Instance();
-    Kokkos::parallel_for("MadVoro::HostParallelFor", executor_detail::HostPolicy(0, static_cast<std::int64_t>(n)),
-                         [&f](const std::int64_t i) { f(static_cast<flat_index_t>(i)); });
-    Kokkos::DefaultHostExecutionSpace().fence();
-#else
+    if(not InSerialGeometryScope())
+    {
+        KokkosInitializer::Instance();
+        Kokkos::parallel_for("MadVoro::HostParallelFor", executor_detail::HostPolicy(0, static_cast<std::int64_t>(n)),
+                             [&f](const std::int64_t i) { f(static_cast<flat_index_t>(i)); });
+        Kokkos::DefaultHostExecutionSpace().fence();
+        return;
+    }
+#endif
     for(flat_index_t i = 0; i < n; ++i)
     {
         f(i);
     }
-#endif
 }
 
 //! \brief A face-building failure, at the earliest point (in build order) where it occurred.
@@ -156,10 +199,16 @@ inline FaceBuildReport BuildFacesHost(const FlatMeshView &mesh, const flat_index
     std::vector<executor_detail::PointFaces> pointFaces(pointCount);
     // One face buffer and scratch per concurrently running thread (a Kokkos unique token)
 #ifdef MADVORO_WITH_GPU
-    KokkosInitializer::Instance();
-    const Kokkos::Experimental::UniqueToken<Kokkos::DefaultHostExecutionSpace> tokens;
-    const int slotCount = tokens.size();
+    const bool parallel = not InSerialGeometryScope();
+    std::optional<Kokkos::Experimental::UniqueToken<Kokkos::DefaultHostExecutionSpace>> tokens;
+    if(parallel)
+    {
+        KokkosInitializer::Instance();
+        tokens.emplace();
+    }
+    const int slotCount = parallel ? tokens->size() : 1;
 #else
+    const bool parallel = false;
     const int slotCount = 1;
 #endif
     std::vector<executor_detail::ThreadFaces> buffers(slotCount);
@@ -179,17 +228,22 @@ inline FaceBuildReport BuildFacesHost(const FlatMeshView &mesh, const flat_index
         record.vertexCount = buffer.vertices.size() - record.firstVertex;
     };
 #ifdef MADVORO_WITH_GPU
-    Kokkos::parallel_for("MadVoro::BuildFacesHost", executor_detail::HostPolicy(0, static_cast<std::int64_t>(pointCount)),
-                         [&](const std::int64_t i) {
-                             const int slot = tokens.acquire();
-                             buildPoint(static_cast<flat_index_t>(i), slot);
-                             tokens.release(slot);
-                         });
-    Kokkos::DefaultHostExecutionSpace().fence();
-#else
-    for(flat_index_t i = 0; i < pointCount; ++i)
-        buildPoint(i, 0);
+    if(parallel)
+    {
+        Kokkos::parallel_for("MadVoro::BuildFacesHost", executor_detail::HostPolicy(0, static_cast<std::int64_t>(pointCount)),
+                             [&](const std::int64_t i) {
+                                 const int slot = tokens->acquire();
+                                 buildPoint(static_cast<flat_index_t>(i), slot);
+                                 tokens->release(slot);
+                             });
+        Kokkos::DefaultHostExecutionSpace().fence();
+    }
 #endif
+    if(not parallel)
+    {
+        for(flat_index_t i = 0; i < pointCount; ++i)
+            buildPoint(i, 0);
+    }
     FaceBuildReport report;
     for(flat_index_t i = 0; i < pointCount; ++i)
     {

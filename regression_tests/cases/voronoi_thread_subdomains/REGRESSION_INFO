@@ -1,0 +1,7 @@
+# Building from thread subdomains gives the tessellation of a build as one domain (one subdomain: bit for bit)
+TAGS="serial mpi"
+CATEGORY="code_correctness"
+CHECK_FUNCTION="check_voronoi_thread_subdomains_case"
+TIMEOUT=1800
+MPI_NP=1
+SLURM_PARTITION=bigrun
