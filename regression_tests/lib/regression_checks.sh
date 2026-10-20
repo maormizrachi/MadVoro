@@ -220,3 +220,59 @@ check_voronoi_partial_build_case() {
     REGRESSION_CHECK_MSG="PASS (half_box rel_error=$(awk '$1 == "half_box_max_rel_error" { print $2 }' "$metrics_file"), scattered_third rel_error=$(awk '$1 == "scattered_third_max_rel_error" { print $2 }' "$metrics_file"))"
     return 0
 }
+
+check_voronoi_flat_layout_case() {
+    local run_dir="$1"
+    local start_epoch="$2"
+    local stdout_log="$3"
+    local stderr_log="$4"
+    local metrics_file="${run_dir}/voronoi_flat_layout_metrics.txt"
+    local pass_flag
+    local mesh_errors
+    local voronoi_errors
+
+    check_no_fatal_markers "$stdout_log" "$stderr_log" || return 1
+    is_nonempty_and_newer "$metrics_file" "$start_epoch" || return 1
+
+    pass_flag=$(awk '$1 == "pass" { print $2 }' "$metrics_file")
+    mesh_errors=$(awk '$1 == "flat_mesh_errors" { print $2 }' "$metrics_file")
+    voronoi_errors=$(awk '$1 == "flat_voronoi_errors" { print $2 }' "$metrics_file")
+    if [[ -z "$pass_flag" || -z "$mesh_errors" || -z "$voronoi_errors" ]]; then
+        REGRESSION_CHECK_MSG="failed to parse voronoi flat layout metrics"
+        return 1
+    fi
+    if [[ "$pass_flag" != "1" ]]; then
+        REGRESSION_CHECK_MSG="voronoi_flat_layout failed (flat_mesh_errors=${mesh_errors}, flat_voronoi_errors=${voronoi_errors})"
+        return 1
+    fi
+
+    REGRESSION_CHECK_MSG="PASS (flat mesh and Voronoi layouts consistent)"
+    return 0
+}
+
+check_voronoi_geometry_backends_case() {
+    local run_dir="$1"
+    local start_epoch="$2"
+    local stdout_log="$3"
+    local stderr_log="$4"
+    local metrics_file="${run_dir}/voronoi_geometry_backends_metrics.txt"
+    local pass_flag
+    local backend
+
+    check_no_fatal_markers "$stdout_log" "$stderr_log" || return 1
+    is_nonempty_and_newer "$metrics_file" "$start_epoch" || return 1
+
+    pass_flag=$(awk '$1 == "pass" { print $2 }' "$metrics_file")
+    backend=$(awk '$1 == "backend" { print $2 }' "$metrics_file")
+    if [[ -z "$pass_flag" ]]; then
+        REGRESSION_CHECK_MSG="failed to parse voronoi geometry backends metrics"
+        return 1
+    fi
+    if [[ "$pass_flag" != "1" ]]; then
+        REGRESSION_CHECK_MSG="voronoi_geometry_backends: ${backend} executor differs from the host ($(grep -E '_differences' "$metrics_file" | tr '\n' ' '))"
+        return 1
+    fi
+
+    REGRESSION_CHECK_MSG="PASS (${backend} executor matches the host)"
+    return 0
+}

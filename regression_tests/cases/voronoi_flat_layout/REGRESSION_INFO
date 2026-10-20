@@ -1,0 +1,7 @@
+# MadVoro flat (CSR) mesh and Voronoi layouts match the meshes they are built from (serial + MPI)
+TAGS="serial mpi"
+CATEGORY="code_correctness"
+CHECK_FUNCTION="check_voronoi_flat_layout_case"
+TIMEOUT=1800
+MPI_NP=16
+SLURM_PARTITION=bigrun

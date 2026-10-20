@@ -53,23 +53,47 @@ namespace {
 		return state;
 	}
 
+	template<typename PointT>
+	struct PointRange
+	{
+		const PointT* first;
+		const PointT* last;
+	};
+
 	class LatticePredicateScope
 	{
 	public:
 		template<typename PointT>
 		explicit LatticePredicateScope(const std::vector<PointT>& points)
+			: LatticePredicateScope(std::array<PointRange<PointT>, 1>{
+				{{points.data(), points.data() + points.size()}}})
+		{
+		}
+
+		// The ranges are read in order, exactly as if they were one concatenated
+		// vector, so callers need not copy them together. No pointer is kept after
+		// construction.
+		template<typename PointT, std::size_t N>
+		explicit LatticePredicateScope(const std::array<PointRange<PointT>, N>& ranges)
 			: previous_(lattice_predicate_state())
 		{
 			LatticePredicateState next;
-			if(points.size() < 8) {
+			std::size_t count = 0;
+			const PointT* front = nullptr;
+			for(const PointRange<PointT>& range : ranges) {
+				if(front == nullptr && range.first != range.last)
+					front = range.first;
+				count += static_cast<std::size_t>(range.last - range.first);
+			}
+			if(count < 8) {
 				lattice_predicate_state() = next;
 				return;
 			}
 
 			std::int64_t anchor[3];
-			if(!lattice_integer(points[0].x, anchor[0]) ||
-				!lattice_integer(points[0].y, anchor[1]) ||
-				!lattice_integer(points[0].z, anchor[2])) {
+			if(!lattice_integer(front->x, anchor[0]) ||
+				!lattice_integer(front->y, anchor[1]) ||
+				!lattice_integer(front->z, anchor[2])) {
 				lattice_predicate_state() = next;
 				return;
 			}
@@ -77,7 +101,9 @@ namespace {
 			std::int64_t minimum[3] = {anchor[0], anchor[1], anchor[2]};
 			std::int64_t maximum[3] = {anchor[0], anchor[1], anchor[2]};
 			std::uint64_t divisor = 0;
-			for(const PointT& point : points) {
+			for(const PointRange<PointT>& range : ranges)
+			for(const PointT* it = range.first; it != range.last; ++it) {
+				const PointT& point = *it;
 				std::int64_t coordinate[3];
 				if(!lattice_integer(point.x, coordinate[0]) ||
 					!lattice_integer(point.y, coordinate[1]) ||
@@ -111,10 +137,12 @@ namespace {
 
 			next.active = true;
 			next.spacing = std::ldexp(static_cast<double>(divisor), -40);
-			next.minX = next.maxX = points[0].x;
-			next.minY = next.maxY = points[0].y;
-			next.minZ = next.maxZ = points[0].z;
-			for(const PointT& point : points) {
+			next.minX = next.maxX = front->x;
+			next.minY = next.maxY = front->y;
+			next.minZ = next.maxZ = front->z;
+			for(const PointRange<PointT>& range : ranges)
+			for(const PointT* it = range.first; it != range.last; ++it) {
+				const PointT& point = *it;
 				next.minX = std::min(next.minX, point.x);
 				next.maxX = std::max(next.maxX, point.x);
 				next.minY = std::min(next.minY, point.y);

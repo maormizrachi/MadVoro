@@ -1,0 +1,7 @@
+# MadVoro geometry executor (Kokkos or host) matches the host executor bit for bit (serial + MPI)
+TAGS="serial mpi"
+CATEGORY="code_correctness"
+CHECK_FUNCTION="check_voronoi_geometry_backends_case"
+TIMEOUT=1800
+MPI_NP=16
+SLURM_PARTITION=bigrun

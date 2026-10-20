@@ -44,9 +44,6 @@ template <typename PointT>
 bool InsideBigTetra(PointT const& tocheck, vector<PointT> const& cor, size_t Norg)
 {
     int sum = 0;
-#if defined(__INTEL_COMPILER) || defined(__INTEL_LLVM_COMPILER)
-#pragma omp simd reduction(+:sum)
-#endif 
     for(size_t i = 0; i < 4; ++i) {
         PointT normal = CrossProduct(cor[Norg + (1 + i) % 4] - cor[Norg + i], cor[Norg + (2 + i) % 4] - cor[Norg + i]);
         double s1 = ScalarProd(normal, cor[Norg + (3 + i) % 4] - cor[Norg + i]);
@@ -706,14 +703,14 @@ void Delaunay3D<PointT>::BuildExtra(vector<PointT> const& points)
     if(points.empty())
         return;
 
-    std::vector<PointT> predicatePoints;
-    predicatePoints.reserve((points_.size() - 4) + points.size());
-    predicatePoints.insert(predicatePoints.end(), points_.begin(),
-        points_.begin() + Norg_);
-    predicatePoints.insert(predicatePoints.end(), points_.begin() + Norg_ + 4,
-        points_.end());
-    predicatePoints.insert(predicatePoints.end(), points.begin(), points.end());
-    LatticePredicateScope predicateScope(predicatePoints);
+    // The predicate scope sees every point except the four bounding-tetrahedron
+    // points, in this order. It is built before points_ grows, since growing can
+    // reallocate it.
+    const std::array<PointRange<PointT>, 3> predicateRanges = {{
+        {points_.data(), points_.data() + Norg_},
+        {points_.data() + Norg_ + 4, points_.data() + points_.size()},
+        {points.data(), points.data() + points.size()}}};
+    LatticePredicateScope predicateScope(predicateRanges);
     size_t Nstart = points_.size();
     points_.insert(points_.end(), points.begin(), points.end());
     size_t N = points.size();
