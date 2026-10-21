@@ -46,7 +46,7 @@ struct SubdomainMeshes
 template <typename PointT>
 struct SubdomainMerge
 {
-    //! The rank's points, the four bounding points, then the mirror ghosts of every subdomain
+    //! The rank's points, the four bounding points, the points other ranks sent, then the mirror ghosts of every subdomain
     std::vector<PointT> points;
     //! The faces of each of the rank's points
     std::vector<face_vec> cellFaces;
@@ -65,30 +65,38 @@ struct SubdomainMerge
 };
 
 /*! \brief Merges the tessellations of thread subdomains.
-    Each subdomain is a partial build of `points` (the rank's points): its own points
-    are some of `points`, and its ghosts are either other points of `points` (the
-    points of other subdomains) or mirror ghosts of its own points. A face between
-    cells of two subdomains is built by both; the copy of the first subdomain that
-    built it is kept, and it is listed by both cells. Each cell's volume and centroid
-    are those of the subdomain that owns it.
+    Each subdomain is a partial build of the rank's points followed by the points other
+    ranks sent (the all-points indices of these follow the rank's points): its own
+    points are some of the rank's points, and its ghosts are other points of the rank
+    (the points of other subdomains), points other ranks sent, or mirror ghosts of its
+    own points. A face between cells of two subdomains is built by both; the copy of the
+    first subdomain that built it is kept, and it is listed by both cells. Each cell's
+    volume and centroid are those of the subdomain that owns it.
     \param subdomains The subdomains, in order
-    \param points The rank's points; together, the subdomains own each of them once */
+    \param points The rank's points (`pointsNum` of them; together, the subdomains own
+           each of them once), four places for the bounding points, then the points
+           other ranks sent */
 template <typename PointT>
-SubdomainMerge<PointT> MergeSubdomains(const std::vector<const Voronoi3D<PointT> *> &subdomains, const std::vector<PointT> &points)
+SubdomainMerge<PointT> MergeSubdomains(const std::vector<const Voronoi3D<PointT> *> &subdomains, const std::vector<PointT> &points,
+                                       std::size_t pointsNum)
 {
     constexpr std::size_t INVALID = std::numeric_limits<std::size_t>::max();
     constexpr std::size_t BOUNDING_POINTS = 4;
-    const std::size_t pointsNum = points.size();
 
     SubdomainMerge<PointT> merged;
     merged.points = points;
-    const Voronoi3D<PointT> &first = *subdomains.front();
-    const std::vector<PointT> &firstPoints = first.getMeshPoints();
-    merged.points.insert(merged.points.end(), firstPoints.begin() + first.GetPointNo(),
-                         firstPoints.begin() + first.GetPointNo() + BOUNDING_POINTS);
+    if(not subdomains.empty())
+    {
+        const Voronoi3D<PointT> &first = *subdomains.front();
+        const std::vector<PointT> &firstPoints = first.getMeshPoints();
+        std::copy(firstPoints.begin() + first.GetPointNo(), firstPoints.begin() + first.GetPointNo() + BOUNDING_POINTS,
+                  merged.points.begin() + pointsNum);
+    }
     merged.CM.resize(merged.points.size());
     merged.cellFaces.resize(pointsNum);
     merged.volume.resize(pointsNum);
+    // a point's index among all the points of a subdomain, in the merged tessellation
+    const auto fromAllPoints = [pointsNum](std::size_t index) { return (index < pointsNum) ? index : index + BOUNDING_POINTS; };
 
     // Faces between cells of two subdomains, by their (smaller, larger) cell pair
     std::unordered_map<std::uint64_t, std::size_t> sharedFaces;
@@ -108,15 +116,15 @@ SubdomainMerge<PointT> MergeSubdomains(const std::vector<const Voronoi3D<PointT>
         std::vector<std::size_t> toMerged(subPoints.size(), INVALID);
         for(std::size_t j = 0; j < ownNum; ++j)
         {
-            toMerged[j] = indicesInPoints.at(j);
+            toMerged[j] = fromAllPoints(indicesInPoints.at(j));
         }
         for(std::size_t j = ownNum + BOUNDING_POINTS; j < subPoints.size(); ++j)
         {
             const auto it = indicesInPoints.find(j);
             if(it != indicesInPoints.cend())
             {
-                // a point of another subdomain
-                toMerged[j] = it->second;
+                // a point of another subdomain, or a point another rank sent
+                toMerged[j] = fromAllPoints(it->second);
             }
             else
             {

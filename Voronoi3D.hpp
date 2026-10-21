@@ -20,6 +20,7 @@
 #include <string>
 #include <memory>
 #include <set>
+#include <map>
 #include <array>
 #include <tuple>
 #include <limits>
@@ -324,6 +325,8 @@ private:
   
   #ifdef MADVORO_WITH_MPI
     std::vector<PointT> PrepareToBuildParallel(const std::vector<PointT> &allPoints, const std::vector<double> &allWeights, const std::vector<size_t> &indicesToBuild, bool suppressRebalancing, bool suppressExchange);
+
+    void ExchangeGhostVolumes(void);
     void FilterRealGhostPoints();
     void UpdateDuplicatedPoints(const std::vector<int> &sentProc, const std::vector<std::vector<size_t>> &sentPoints);
     void EnsureSymmetry(const std::vector<int> &sentProc, const std::vector<std::vector<int>> &recvProcLists);
@@ -391,10 +394,34 @@ private:
   SubdomainMeshes<PointT> threadSubdomains_;
   std::shared_ptr<OctTree<IVec>> sharedPointsTree_;
   std::shared_ptr<RangeFinder<PointT>> sharedRangeFinder_;
+  // A thread subdomain's ghost search between its rounds
+  struct SubdomainGhostSearch;
+  std::shared_ptr<SubdomainGhostSearch> subdomainSearch_;
+  bool reportedUnusedSubdomains_ = false;
 
   bool UsesThreadSubdomains(void) const;
 
-  void BuildFromThreadSubdomains(void);
+  void ReportUnusedThreadSubdomains(void);
+
+  void BuildFromThreadSubdomains(bool otherRanks);
+
+  bool IsThreadSubdomain(void) const { return this->sharedRangeFinder_ != nullptr; }
+
+  // The parts of a thread subdomain's build (see BuildFromThreadSubdomains)
+  void BeginSubdomain(const std::vector<PointT> &points, const std::vector<size_t> &indicesToBuild);
+
+  bool PrepareSubdomainRound(void);
+
+  void FinishSubdomainRound(const RankGhostPoints<PointT> &otherRankPoints);
+
+  void EndSubdomain(void);
+
+  // The parts of BuildPartially
+  std::vector<PointT> PreparePartialBuild(const std::vector<PointT> &allPoints, const std::vector<size_t> &indicesToBuild);
+
+  std::vector<size_t> BuildPartialDelaunay(const std::vector<PointT> &activePoints);
+
+  void FinishPartialBuild(const std::vector<size_t> &order);
   #ifdef MADVORO_WITH_MPI
     std::shared_ptr<PointsManager<PointT, VoronoiPayload<PointT>>> pointsManager;
     std::shared_ptr<const Kernelization3D::IndexingKernel3D<PointT>> indexingToSave = std::shared_ptr<const Kernelization3D::IndexingKernel3D<PointT>>();
@@ -1944,11 +1971,16 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
         std::cout << "Time for preparing (hilbert tree + load balancing): " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
     }
 
-    if(size == 1 and this->UsesThreadSubdomains())
+    // every rank builds the same way (the subdomains exchange ghosts collectively)
+    int useSubdomains = this->UsesThreadSubdomains() ? 1 : 0;
+    MPI_Allreduce(MPI_IN_PLACE, &useSubdomains, 1, MPI_INT, MPI_LAND, MPI_COMM_WORLD);
+    if(useSubdomains == 1)
     {
-        this->BuildFromThreadSubdomains();
+        this->BuildFromThreadSubdomains(size > 1);
+        this->ExchangeGhostVolumes();
         return activePoints;
     }
+    this->ReportUnusedThreadSubdomains();
 
     {
         int myPts = static_cast<int>(activePoints.size());
@@ -2057,19 +2089,7 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
 
     this->UpdateCMs();
 
-    {
-        const std::vector<rank_t> &correspondents = this->GetDuplicatedProcs();
-        const std::vector<std::vector<size_t>> &indices = this->GetDuplicatedPoints();
-        std::vector<std::vector<double>> exchange = MPI_exchange_data_indexed(correspondents, this->volume_, indices);
-        const std::vector<std::vector<size_t>> &ghost_indices = this->GetGhostIndeces();
-        this->volume_.resize(this->GetTotalPointNumber(), 0.0);
-        for(size_t i = 0; i < correspondents.size(); ++i)
-        {
-            const std::vector<double> &data = exchange[i];
-            for(size_t j = 0; j < data.size(); ++j)
-                this->volume_.at(ghost_indices.at(i).at(j)) = data[j];
-        }
-    }
+    this->ExchangeGhostVolumes();
 
     end = std::chrono::high_resolution_clock::now();
 
@@ -2081,6 +2101,25 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
     // save the list of the real ghost points
     // this->FilterRealGhostPoints();
     return activePoints;
+}
+
+/**
+ * \brief Gives the ghost points the volumes of their cells in the ranks that own them.
+*/
+template <typename PointT>
+void Voronoi3D<PointT>::ExchangeGhostVolumes(void)
+{
+    const std::vector<rank_t> &correspondents = this->GetDuplicatedProcs();
+    const std::vector<std::vector<size_t>> &indices = this->GetDuplicatedPoints();
+    std::vector<std::vector<double>> exchange = MPI_exchange_data_indexed(correspondents, this->volume_, indices);
+    const std::vector<std::vector<size_t>> &ghost_indices = this->GetGhostIndeces();
+    this->volume_.resize(this->GetTotalPointNumber(), 0.0);
+    for(size_t i = 0; i < correspondents.size(); ++i)
+    {
+        const std::vector<double> &data = exchange[i];
+        for(size_t j = 0; j < data.size(); ++j)
+            this->volume_.at(ghost_indices.at(i).at(j)) = data[j];
+    }
 }
 
 inline boost::container::flat_map<size_t, std::pair<rank_t, size_t>> GetGhostInfo(const std::vector<rank_t> &duplicatedProcs, const std::vector<std::vector<size_t>> &duplicatedPoints, const std::vector<std::vector<size_t>> &Nghost, const boost::container::flat_map<size_t, std::pair<rank_t, size_t>> &whereNow)
@@ -3886,6 +3925,32 @@ void Voronoi3D<PointT>::BuildNoBox(vector<PointT> const &points, vector<vector<P
 template <typename PointT>
 void Voronoi3D<PointT>::BuildPartially(const std::vector<PointT> &allPoints, const std::vector<size_t> &indicesToBuild)
 {
+    const std::vector<PointT> activePoints = this->PreparePartialBuild(allPoints, indicesToBuild);
+    if(this->UsesThreadSubdomains())
+    {
+        this->BuildFromThreadSubdomains(false);
+        return;
+    }
+    this->ReportUnusedThreadSubdomains();
+
+    const std::vector<size_t> order = this->BuildPartialDelaunay(activePoints);
+
+    #ifdef MADVORO_WITH_MPI
+        this->BringGhostPointsToBuild(MPI_COMM_SELF);
+    #else // MADVORO_WITH_MPI
+        this->BringGhostPointsToBuild(); 
+    #endif // MADVORO_WITH_MPI
+
+    this->FinishPartialBuild(order);
+}
+
+/**
+ * \brief The start of a partial build: the points of this build (`indicesToBuild` of
+ * `allPoints`, returned), and the cleared tessellation.
+*/
+template <typename PointT>
+std::vector<PointT> Voronoi3D<PointT>::PreparePartialBuild(const std::vector<PointT> &allPoints, const std::vector<size_t> &indicesToBuild)
+{
     if(this->radiuses.size() < allPoints.size())
     {
         this->radiuses.resize(allPoints.size(), RADIUS_UNINITIALIZED);
@@ -3909,11 +3974,17 @@ void Voronoi3D<PointT>::BuildPartially(const std::vector<PointT> &allPoints, con
     }
 
     this->BuildInitialize(activePoints.size());
-    if(this->UsesThreadSubdomains())
-    {
-        this->BuildFromThreadSubdomains();
-        return;
-    }
+    return activePoints;
+}
+
+/**
+ * \brief The Delaunay of a partial build's points, and what its ghost search needs: the
+ * trees of the points, the points' radii, and the range finder. Returns the points'
+ * Hilbert order.
+*/
+template <typename PointT>
+std::vector<size_t> Voronoi3D<PointT>::BuildPartialDelaunay(const std::vector<PointT> &activePoints)
+{
     // Norg_ = points.size();
     // // Clear data
     // PointTetras_.clear();
@@ -3974,7 +4045,8 @@ void Voronoi3D<PointT>::BuildPartially(const std::vector<PointT> &allPoints, con
     this->bigtet_ = SetPointTetras();
     
     end = std::chrono::high_resolution_clock::now();
-    std::cout << "Time for initial build: " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
+    if(not this->IsThreadSubdomain())
+        std::cout << "Time for initial build: " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
 
     start = std::chrono::high_resolution_clock::now();
     if(this->sharedPointsTree_ != nullptr)
@@ -4015,14 +4087,17 @@ void Voronoi3D<PointT>::BuildPartially(const std::vector<PointT> &allPoints, con
     
     end = std::chrono::high_resolution_clock::now();
 
-    std::cout << "Time for data structures initialization: " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
+    if(not this->IsThreadSubdomain())
+        std::cout << "Time for data structures initialization: " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
+    return order;
+}
 
-    #ifdef MADVORO_WITH_MPI
-        this->BringGhostPointsToBuild(MPI_COMM_SELF);
-    #else // MADVORO_WITH_MPI
-        this->BringGhostPointsToBuild(); 
-    #endif // MADVORO_WITH_MPI
-
+/**
+ * \brief The end of a partial build, after its ghost search: the tessellation.
+*/
+template <typename PointT>
+void Voronoi3D<PointT>::FinishPartialBuild(const std::vector<size_t> &order)
+{
     // vector<std::pair<std::size_t, std::size_t>> ghost_index = SerialFirstIntersections();
     // vector<vector<size_t>> past_duplicates;
     // vector<PointT> extra_points = CreateBoundaryPoints(ghost_index, past_duplicates);
@@ -4068,27 +4143,287 @@ void Voronoi3D<PointT>::BuildPartially(const std::vector<PointT> &allPoints, con
 template <typename PointT>
 bool Voronoi3D<PointT>::UsesThreadSubdomains(void) const
 {
-    return this->threadSubdomainCount_ > 0 and this->Norg_ > 0 and this->Norg_ == this->allMyPoints.size() and
-           not this->HasPeriodicBoundaries();
+    return this->threadSubdomainCount_ > 0 and this->Norg_ == this->allMyPoints.size() and not this->HasPeriodicBoundaries();
+}
+
+/**
+ * \brief Says once that thread subdomains were asked for but this build cannot use them.
+*/
+template <typename PointT>
+void Voronoi3D<PointT>::ReportUnusedThreadSubdomains(void)
+{
+    if(this->threadSubdomainCount_ == 0 or this->reportedUnusedSubdomains_)
+        return;
+    this->reportedUnusedSubdomains_ = true;
+    int rank = 0;
+    #ifdef MADVORO_WITH_MPI
+        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    #endif // MADVORO_WITH_MPI
+    if(rank == 0)
+    {
+        std::cout << "MadVoro: " << this->threadSubdomainCount_ << " thread subdomains were asked for, but "
+                  << (this->HasPeriodicBoundaries() ? "periodic boundaries are" : "partial builds are")
+                  << " not supported with them yet; building one domain per rank" << std::endl;
+    }
+}
+
+/**
+ * \brief A thread subdomain's ghost search between its rounds: the state of
+ * BringGhostPointsToBuild's loop.
+*/
+template <typename PointT>
+struct Voronoi3D<PointT>::SubdomainGhostSearch
+{
+    explicit SubdomainGhostSearch(const RangeFinder<PointT> *rangeFinder)
+        #ifdef MADVORO_WITH_MPI
+            : bigAgent(rangeFinder, nullptr, pointsContainer, MPI_COMM_SELF), smallAgent(rangeFinder, nullptr, pointsContainer, MPI_COMM_SELF)
+        #else // MADVORO_WITH_MPI
+            : bigAgent(rangeFinder), smallAgent(rangeFinder)
+        #endif // MADVORO_WITH_MPI
+    {}
+
+    std::vector<size_t> order; // the Hilbert order of the subdomain's points
+    std::vector<Face3D<PointT>> box;
+    std::vector<PointT> normals;
+    boost::container::flat_set<size_t> smallPoints, largePoints;
+    boost::container::flat_map<size_t, size_t> firstLargeIteration;
+    std::vector<double> currentRadiuses;
+    PeriodicIgnoreSets<PointT> ignorePoints;
+    std::set<std::pair<size_t, size_t>> mirrored;
+    size_t iterations = 0;
+    // the searches of the current round
+    std::vector<SmallRangeQueryData<PointT>> smallQueries;
+    std::vector<BigRangeQueryData<PointT>> bigQueries;
+    std::vector<std::pair<size_t, size_t>> mirroredPoints;
+    boost::container::flat_map<size_t, size_t> smallResults, bigResults;
+    // the searches of the current round that reach other ranks (positions in smallQueries
+    // and bigQueries), and the points other ranks sent for them (all-points indices)
+    std::vector<size_t> otherRankSmall, otherRankBig;
+    struct OtherRankAnswer
+    {
+        bool big;
+        size_t query;
+        std::vector<size_t> points;
+    };
+    std::vector<OtherRankAnswer> otherRankAnswers;
+    #ifdef MADVORO_WITH_MPI
+        // the rank's domain decomposition, when the rank searches other ranks
+        std::shared_ptr<EnvironmentAgent<PointT>> envAgent;
+        int rank = 0;
+        SentPointsContainer pointsContainer; // (unused: a subdomain sends nothing)
+    #endif // MADVORO_WITH_MPI
+    BigRangeAgent<PointT> bigAgent;
+    SmallRangeAgent<PointT> smallAgent;
+};
+
+/**
+ * \brief The start of a thread subdomain's build: its Delaunay, and the start of its
+ * ghost search (as at the start of BringGhostPointsToBuild).
+*/
+template <typename PointT>
+void Voronoi3D<PointT>::BeginSubdomain(const std::vector<PointT> &points, const std::vector<size_t> &indicesToBuild)
+{
+    const std::vector<PointT> activePoints = this->PreparePartialBuild(points, indicesToBuild);
+    SubdomainGhostSearch &search = *this->subdomainSearch_;
+    search.order = this->BuildPartialDelaunay(activePoints);
+
+    search.box.clear();
+    search.normals.clear();
+    this->InitialBoxBuild(search.box, search.normals);
+    this->periodicImageTranslation_.assign(this->del_.points_.size(), PointT());
+    search.smallPoints.clear();
+    search.largePoints.clear();
+    search.firstLargeIteration.clear();
+    search.currentRadiuses.assign(this->Norg_, RADIUS_UNINITIALIZED);
+    search.ignorePoints = PeriodicIgnoreSets<PointT>();
+    for(const std::pair<size_t, size_t> &indices : this->indicesInAllMyPoints)
+    {
+        search.smallPoints.insert(indices.first);
+        search.currentRadiuses[indices.first] = this->radiuses[indices.second];
+        search.ignorePoints[ZERO_IMAGE_CODE].insert(indices.second);
+    }
+    search.mirrored.clear();
+    search.iterations = 0;
+}
+
+/**
+ * \brief The first part of a round of a thread subdomain's ghost search: its searches
+ * and mirrors (as in a round of BringGhostPointsToBuild). Returns whether it searches.
+*/
+template <typename PointT>
+bool Voronoi3D<PointT>::PrepareSubdomainRound(void)
+{
+    SubdomainGhostSearch &search = *this->subdomainSearch_;
+    search.iterations++;
+    std::tie(search.smallQueries, search.bigQueries) = this->CreateBatches(search.smallPoints, search.largePoints, search.firstLargeIteration,
+                                                                           search.currentRadiuses, search.iterations);
+    search.mirroredPoints = MirrorPoints(search.smallQueries, search.box, search.normals);
+    const std::vector<std::pair<size_t, size_t>> moreMirroredPoints = MirrorPoints(search.bigQueries, search.box, search.normals);
+    search.mirroredPoints.insert(search.mirroredPoints.end(), moreMirroredPoints.begin(), moreMirroredPoints.end());
+    search.smallResults.clear();
+    search.bigResults.clear();
+    for(const SmallRangeQueryData<PointT> &query : search.smallQueries)
+    {
+        search.smallResults[query.pointIdx] = 0;
+    }
+    for(const BigRangeQueryData<PointT> &query : search.bigQueries)
+    {
+        search.bigResults[query.pointIdx] = 0;
+    }
+
+    // the searches that reach other ranks' domains (the others need no message)
+    search.otherRankSmall.clear();
+    search.otherRankBig.clear();
+    #ifdef MADVORO_WITH_MPI
+        if(search.envAgent != nullptr)
+        {
+            const auto reachesOtherRanks = [&search](const auto &query)
+            {
+                for(int otherRank : search.envAgent->getIntersectingRanks(PointT(query.center.x, query.center.y, query.center.z), query.radius))
+                {
+                    if(otherRank != search.rank)
+                        return true;
+                }
+                return false;
+            };
+            for(size_t j = 0; j < search.smallQueries.size(); ++j)
+            {
+                if(reachesOtherRanks(search.smallQueries[j]))
+                    search.otherRankSmall.push_back(j);
+            }
+            for(size_t j = 0; j < search.bigQueries.size(); ++j)
+            {
+                if(reachesOtherRanks(search.bigQueries[j]))
+                    search.otherRankBig.push_back(j);
+            }
+        }
+    #endif // MADVORO_WITH_MPI
+    return not (search.smallQueries.empty() and search.bigQueries.empty());
+}
+
+/**
+ * \brief The second part of a round of a thread subdomain's ghost search, after the
+ * points other ranks sent were added to `otherRankPoints`: the searches in the points
+ * of the other subdomains and of other ranks, the mirrors, and the points of the next
+ * round (as in a round of BringGhostPointsToBuild).
+*/
+template <typename PointT>
+void Voronoi3D<PointT>::FinishSubdomainRound(const RankGhostPoints<PointT> &otherRankPoints)
+{
+    SubdomainGhostSearch &search = *this->subdomainSearch_;
+    // the points other ranks sent follow the rank's points
+    const std::vector<PointT> &sent = otherRankPoints.Points();
+    for(size_t i = this->allMyPoints.size() - otherRankPoints.FirstIndex(); i < sent.size(); ++i)
+    {
+        this->allMyPoints.push_back(sent[i]);
+    }
+    if(search.smallQueries.empty() and search.bigQueries.empty())
+    {
+        return;
+    }
+
+    // The points other ranks sent for this subdomain's searches, added as BringRemoteGhostPoints
+    // adds them: those of the big searches, then those of the small ones, each in the order
+    // they arrived (their order among the rank's points). So one subdomain adds the points in
+    // the order of a build as one domain, which decides the Delaunay of degenerate points.
+    std::array<std::vector<size_t>, 2> received; // (big, small)
+    for(const typename SubdomainGhostSearch::OtherRankAnswer &answer : search.otherRankAnswers)
+    {
+        std::vector<size_t> &into = received[answer.big ? 0 : 1];
+        into.insert(into.end(), answer.points.begin(), answer.points.end());
+        if(answer.big)
+            search.bigResults[search.bigQueries[answer.query].pointIdx] += answer.points.size();
+        else
+            search.smallResults[search.smallQueries[answer.query].pointIdx] += answer.points.size();
+    }
+    search.otherRankAnswers.clear();
+    for(std::vector<size_t> &indices : received)
+    {
+        std::sort(indices.begin(), indices.end());
+        std::vector<PointT> answered;
+        for(const size_t &pointIdxInAll : indices)
+        {
+            if(search.ignorePoints[ZERO_IMAGE_CODE].insert(pointIdxInAll).second)
+            {
+                this->indicesInAllMyPoints[this->del_.points_.size() + answered.size()] = pointIdxInAll;
+                answered.push_back(this->allMyPoints[pointIdxInAll]);
+            }
+        }
+        this->BuildExtraTracked(answered);
+    }
+
+    // then the points of the other subdomains, and the points other ranks sent for other subdomains
+    const bool selfQueriesCanFindPoints = (search.ignorePoints[ZERO_IMAGE_CODE].size() < this->allMyPoints.size());
+    if(selfQueriesCanFindPoints)
+    {
+        this->BringSelfGhostPoints(search.bigQueries, search.smallQueries, search.bigAgent, search.smallAgent, search.bigResults,
+                                   search.smallResults, search.ignorePoints);
+    }
+    else
+    {
+        this->RecordEmptySelfAnswers(search.bigQueries, search.smallQueries, search.bigAgent, search.smallAgent, search.bigResults,
+                                     search.smallResults, search.ignorePoints);
+    }
+
+    std::vector<PointT> newPoints;
+    newPoints.reserve(search.mirroredPoints.size());
+    for(const std::pair<size_t, size_t> &pairFacePoint : search.mirroredPoints)
+    {
+        if(search.mirrored.insert(pairFacePoint).second)
+        {
+            newPoints.push_back(MirrorPoint(search.box[pairFacePoint.first], this->del_.points_[pairFacePoint.second]));
+        }
+    }
+    this->BuildExtraTracked(newPoints);
+
+    this->R_.resize(this->del_.tetras_.size(), RADIUS_UNINITIALIZED);
+    ContainerOps::conditional_shrink(this->R_);
+    this->tetra_centers_.resize(this->R_.size());
+    ContainerOps::conditional_shrink(this->tetra_centers_);
+    this->bigtet_ = SetPointTetras();
+
+    std::tie(search.smallPoints, search.largePoints) = this->DetermineNextIterationPoints(search.iterations, search.firstLargeIteration, search.currentRadiuses,
+                                                                                          search.smallResults, search.bigResults);
+}
+
+/**
+ * \brief The end of a thread subdomain's build, after its ghost search: its tessellation.
+*/
+template <typename PointT>
+void Voronoi3D<PointT>::EndSubdomain(void)
+{
+    this->FinishPartialBuild(this->subdomainSearch_->order);
 }
 
 /**
  * \brief Builds the tessellation of the points (allMyPoints) from thread subdomains.
  * The points are cut into contiguous ranges of their Hilbert order. Each range is a
- * subdomain, built by its own Voronoi3D as a partial build of the points: the points
- * of the other subdomains are searched for in one tree of all the points, shared by
- * every subdomain, and are added to the subdomain's Delaunay as ghosts. The
- * subdomains' tessellations are then merged (see MergeSubdomains). Expects the build
- * to be prepared up to and including BuildInitialize.
+ * subdomain, built by its own Voronoi3D as a partial build of the rank's points. The
+ * subdomains search for their ghosts together, round by round, as one domain does:
+ * in each round each subdomain prepares its searches; with `otherRanks`, the rank
+ * sends the searches that reach other ranks in one exchange, and adds the points it
+ * receives to the points the subdomains search; then each subdomain searches the
+ * rank's points and the received points, and adds what it finds. The rounds end when
+ * no subdomain, on any rank, searches any more. The subdomains' tessellations are then
+ * merged (see MergeSubdomains), and the ghosts the rank received are recorded as in a
+ * build as one domain. Expects the build to be prepared up to and including
+ * BuildInitialize.
+ * The subdomains' work runs in parallel, with Kokkos on host threads (one subdomain
+ * after another without Kokkos), and touches only the subdomain's own Voronoi3D and
+ * what the rank shares with it read-only; only the rank's own thread talks to other
+ * ranks, between the parallel parts. Kokkos cannot launch a parallel loop from inside
+ * one, so a subdomain built in parallel runs its own geometry serially (in a
+ * SerialGeometryScope). When the geometry kernels run on a device, the subdomains are
+ * built one after another, so only one thread launches kernels.
 */
 template <typename PointT>
-void Voronoi3D<PointT>::BuildFromThreadSubdomains(void)
+void Voronoi3D<PointT>::BuildFromThreadSubdomains([[maybe_unused]] bool otherRanks)
 {
     const size_t pointsNum = this->Norg_;
-    // (a subdomain's id is a SubdomainGrid::subdomain_t)
-    const size_t count = std::min({this->threadSubdomainCount_, pointsNum, static_cast<size_t>(0xFFFE)});
+    const size_t count = std::min({this->threadSubdomainCount_, pointsNum, SubdomainGrid<PointT>::MAX_SUBDOMAINS});
+    const auto searchStart = std::chrono::high_resolution_clock::now();
 
-    // One tree of all the points (a full build: they are also the active points)
+    // One tree of the rank's points (a full build: they are also the active points)
     const PointT width = this->ur_ - this->ll_;
     this->allMyPointsTree = std::make_shared<OctTree<IVec>>(IVec(this->ll_ - width * 0.00001, std::numeric_limits<size_t>::max()),
                                                             IVec(this->ur_ + width * 0.00001, std::numeric_limits<size_t>::max()));
@@ -4103,7 +4438,8 @@ void Voronoi3D<PointT>::BuildFromThreadSubdomains(void)
     const std::vector<size_t> order = HilbertOrder3D(this->allMyPoints);
     const auto subdomainBegin = [pointsNum, count](size_t s) { return s * pointsNum / count; };
 
-    // A subdomain searches for the points of the other subdomains only where there may be some
+    // What the subdomains search: the rank's points, where there may be points of other
+    // subdomains, and the points other ranks send (indices from pointsNum on)
     using subdomain_t = typename SubdomainGrid<PointT>::subdomain_t;
     std::vector<subdomain_t> subdomainOf(pointsNum);
     for(size_t s = 0; s < count; ++s)
@@ -4113,8 +4449,11 @@ void Voronoi3D<PointT>::BuildFromThreadSubdomains(void)
             subdomainOf[order[i]] = static_cast<subdomain_t>(s);
         }
     }
-    const std::shared_ptr<const SubdomainGrid<PointT>> grid = std::make_shared<SubdomainGrid<PointT>>(this->allMyPoints, subdomainOf);
-    const std::shared_ptr<const RangeFinder<PointT>> pointsFinder = std::make_shared<OctTreeFinder<PointT>>(this->allMyPointsTree.get(), this->allMyPoints);
+    const std::shared_ptr<SubdomainGrid<PointT>> grid = std::make_shared<SubdomainGrid<PointT>>(this->allMyPoints, subdomainOf);
+    const std::shared_ptr<RankGhostPoints<PointT>> otherRankPoints = std::make_shared<RankGhostPoints<PointT>>(this->ll_, this->ur_, pointsNum);
+    const std::shared_ptr<OctTreeFinder<PointT>> pointsFinder = std::make_shared<OctTreeFinder<PointT>>(this->allMyPointsTree.get(), this->allMyPoints);
+    // other ranks' searches are answered from the rank's own points
+    this->rangeFinder = pointsFinder;
 
     std::vector<std::unique_ptr<Voronoi3D<PointT>>> &subdomains = this->threadSubdomains_.meshes;
     subdomains.resize(count);
@@ -4124,7 +4463,7 @@ void Voronoi3D<PointT>::BuildFromThreadSubdomains(void)
         {
             subdomains[s] = std::make_unique<Voronoi3D<PointT>>(this->ll_, this->ur_);
             #ifdef MADVORO_WITH_MPI
-                // a subdomain talks to no other rank: its ghost loop runs in serial mode
+                // a subdomain talks to no other rank
                 subdomains[s]->SetPointsManager(nullptr);
             #endif // MADVORO_WITH_MPI
         }
@@ -4134,63 +4473,234 @@ void Voronoi3D<PointT>::BuildFromThreadSubdomains(void)
         subdomain.box_faces_ = this->box_faces_;
         subdomain.periodic_ = this->periodic_;
         subdomain.sharedPointsTree_ = this->allMyPointsTree;
-        subdomain.sharedRangeFinder_ = std::make_shared<SubdomainRangeFinder<PointT>>(pointsFinder, grid, static_cast<subdomain_t>(s));
+        subdomain.sharedRangeFinder_ = std::make_shared<SubdomainRangeFinder<PointT>>(pointsFinder, otherRankPoints, grid, static_cast<subdomain_t>(s));
         subdomain.radiuses = this->radiuses;
+        subdomain.subdomainSearch_ = std::make_shared<SubdomainGhostSearch>(subdomain.sharedRangeFinder_.get());
     }
 
-    // The subdomains are built in parallel, with Kokkos on host threads (one after
-    // another without Kokkos). A subdomain reads only the shared points, tree and
-    // radii, and writes only its own Voronoi3D. Kokkos cannot launch a parallel loop
-    // from inside one, so a subdomain built in parallel runs its own geometry
-    // serially (in a SerialGeometryScope). When the geometry kernels run on a device,
-    // the subdomains are built one after another, so only one thread launches kernels.
     std::vector<std::exception_ptr> errors(count);
-    const auto buildSubdomain = [&](size_t s)
+    const auto forEachSubdomain = [&](const auto &task)
     {
-        try
+        const auto run = [&](size_t s)
         {
-            // in the points' own order, so one subdomain is the same build as one domain
-            std::vector<size_t> indicesToBuild(order.begin() + subdomainBegin(s), order.begin() + subdomainBegin(s + 1));
-            std::sort(indicesToBuild.begin(), indicesToBuild.end());
-            subdomains[s]->BuildPartially(this->allMyPoints, indicesToBuild);
+            try
+            {
+                task(s);
+            }
+            catch(...)
+            {
+                errors[s] = std::current_exception();
+            }
+        };
+        #if defined(MADVORO_WITH_GPU) && !defined(MADVORO_GEOMETRY_ON_HOST)
+            constexpr bool kernelsOnHost = Kokkos::SpaceAccessibility<Kokkos::DefaultExecutionSpace, Kokkos::HostSpace>::accessible;
+        #else // MADVORO_WITH_GPU && !MADVORO_GEOMETRY_ON_HOST
+            constexpr bool kernelsOnHost = true;
+        #endif // MADVORO_WITH_GPU
+        if constexpr(kernelsOnHost)
+        {
+            Geometry::HostParallelFor(count, [&run](size_t s)
+            {
+                const Geometry::SerialGeometryScope serialGeometry;
+                run(s);
+            });
         }
-        catch(...)
+        else
         {
-            errors[s] = std::current_exception();
+            for(size_t s = 0; s < count; ++s)
+            {
+                run(s);
+            }
+        }
+        for(const std::exception_ptr &error : errors)
+        {
+            if(error)
+                std::rethrow_exception(error);
         }
     };
-    #if defined(MADVORO_WITH_GPU) && !defined(MADVORO_GEOMETRY_ON_HOST)
-        constexpr bool kernelsOnHost = Kokkos::SpaceAccessibility<Kokkos::DefaultExecutionSpace, Kokkos::HostSpace>::accessible;
-    #else // MADVORO_WITH_GPU && !MADVORO_GEOMETRY_ON_HOST
-        constexpr bool kernelsOnHost = true;
-    #endif // MADVORO_WITH_GPU
-    if constexpr(kernelsOnHost)
+
+    // The mesh's points while searching: the rank's points, the bounding points (set by
+    // the merge), then the points other ranks send
+    this->del_.points_ = this->allMyPoints;
+    this->del_.points_.resize(pointsNum + 4);
+    const auto addOtherRankPoints = [&](const std::vector<PointT> &received)
     {
-        Geometry::HostParallelFor(count, [&buildSubdomain](size_t s)
+        for(const PointT &point : received)
         {
-            const Geometry::SerialGeometryScope serialGeometry;
-            buildSubdomain(s);
-        });
+            this->del_.points_.push_back(point);
+            otherRankPoints->Add(point);
+        }
+        grid->AddOtherRankPoints(received.begin(), received.end());
+    };
+
+    std::vector<std::vector<size_t>> subdomainIndices(count);
+    for(size_t s = 0; s < count; ++s)
+    {
+        // in the points' own order, so one subdomain is the same build as one domain
+        subdomainIndices[s].assign(order.begin() + subdomainBegin(s), order.begin() + subdomainBegin(s + 1));
+        std::sort(subdomainIndices[s].begin(), subdomainIndices[s].end());
     }
-    else
-    {
-        for(size_t s = 0; s < count; ++s)
+    forEachSubdomain([&](size_t s) { subdomains[s]->BeginSubdomain(this->allMyPoints, subdomainIndices[s]); });
+
+    #ifdef MADVORO_WITH_MPI
+        // As BringGhostPointsToBuild does with other ranks
+        int size = 1;
+        std::vector<int> alreadyRecvProcs;
+        std::optional<SentPointsContainer> pointsContainer;
+        std::optional<BigRangeAgent<PointT>> bigRangeAgent;
+        std::optional<SmallRangeAgent<PointT>> smallRangeAgent;
+        if(otherRanks)
         {
-            buildSubdomain(s);
+            const MPI_Comm comm = MPI_COMM_WORLD;
+            MPI_Comm_size(comm, &size);
+            auto [ghostPointsFromLastBuild, alreadySentPoints1, alreadyRecvPoints1] = this->InitialGhostPointsExchange(comm);
+            std::vector<int> alreadySentProcs;
+            std::vector<std::vector<size_t>> alreadySentPoints2, alreadyRecvPoints2;
+            for(rank_t _rank = 0; _rank < size; _rank++)
+            {
+                if(alreadySentPoints1[_rank].size() > 0)
+                {
+                    alreadySentProcs.push_back(_rank);
+                    alreadySentPoints2.emplace_back(std::move(alreadySentPoints1[_rank]));
+                }
+                if(alreadyRecvPoints1[_rank].size() > 0)
+                {
+                    alreadyRecvProcs.push_back(_rank);
+                    alreadyRecvPoints2.emplace_back(std::move(alreadyRecvPoints1[_rank]));
+                }
+            }
+            this->SetGhostArray(alreadyRecvProcs, alreadyRecvPoints2);
+            addOtherRankPoints(ghostPointsFromLastBuild);
+            pointsContainer.emplace(alreadySentProcs, alreadySentPoints2);
+
+            const std::shared_ptr<EnvironmentAgent<PointT>> envAgent = this->pointsManager->getEnvironmentAgent();
+            if(!envAgent)
+            {
+                throw MadVoro::Exception::MadVoroException("BuildFromThreadSubdomains: environment agent is null");
+            }
+            bigRangeAgent.emplace(pointsFinder.get(), envAgent, *pointsContainer, comm);
+            smallRangeAgent.emplace(pointsFinder.get(), envAgent, *pointsContainer, comm);
+            int rank;
+            MPI_Comm_rank(comm, &rank);
+            for(const std::unique_ptr<Voronoi3D<PointT>> &subdomain : subdomains)
+            {
+                subdomain->subdomainSearch_->envAgent = envAgent;
+                subdomain->subdomainSearch_->rank = rank;
+            }
+        }
+    #else // MADVORO_WITH_MPI
+        const int size = 1;
+    #endif // MADVORO_WITH_MPI
+
+    size_t rounds = 0;
+    std::vector<char> searching(count, 0);
+    while(true)
+    {
+        rounds++;
+        forEachSubdomain([&](size_t s) { searching[s] = subdomains[s]->PrepareSubdomainRound() ? 1 : 0; });
+        int finished = std::none_of(searching.begin(), searching.end(), [](char c) { return c != 0; }) ? 1 : 0;
+        #ifdef MADVORO_WITH_MPI
+            MPI_Request finishedReq;
+            int I_finished = finished;
+            if(otherRanks)
+            {
+                MPI_Iallreduce(&I_finished, &finished, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD, &finishedReq);
+                // The searches of every subdomain that reach other ranks, in one exchange. A
+                // search is sent with its point's index among the rank's points (unique among
+                // the subdomains), and the points sent for it go to the subdomain that asked.
+                std::vector<BigRangeQueryData<PointT>> bigQueries;
+                std::vector<SmallRangeQueryData<PointT>> smallQueries;
+                std::vector<std::pair<size_t, size_t>> bigOrigins, smallOrigins; // (subdomain, search)
+                for(size_t s = 0; s < count; ++s)
+                {
+                    const Voronoi3D<PointT> &subdomain = *subdomains[s];
+                    const SubdomainGhostSearch &search = *subdomain.subdomainSearch_;
+                    for(const size_t &j : search.otherRankBig)
+                    {
+                        bigQueries.push_back(search.bigQueries[j]);
+                        bigQueries.back().pointIdx = subdomain.indicesInAllMyPoints.at(search.bigQueries[j].pointIdx);
+                        bigOrigins.emplace_back(s, j);
+                    }
+                    for(const size_t &j : search.otherRankSmall)
+                    {
+                        smallQueries.push_back(search.smallQueries[j]);
+                        smallQueries.back().pointIdx = subdomain.indicesInAllMyPoints.at(search.smallQueries[j].pointIdx);
+                        smallOrigins.emplace_back(s, j);
+                    }
+                }
+                const auto giveAnswers = [&](const auto &batchInfo, const std::vector<std::pair<size_t, size_t>> &origins, bool big)
+                {
+                    // the points of this batch, by position (a received point is in exactly one answer)
+                    std::map<std::array<double, 3>, size_t> received;
+                    const size_t first = pointsNum + otherRankPoints->Points().size();
+                    for(size_t i = 0; i < batchInfo.result.size(); ++i)
+                    {
+                        received.emplace(std::array<double, 3>{batchInfo.result[i].x, batchInfo.result[i].y, batchInfo.result[i].z}, first + i);
+                    }
+                    for(const auto &answer : batchInfo.queriesAnswers)
+                    {
+                        if(answer.finalResults.empty())
+                            continue;
+                        typename SubdomainGhostSearch::OtherRankAnswer given{big, origins[answer.id].second, {}};
+                        for(const PointT &point : answer.finalResults)
+                        {
+                            given.points.push_back(received.at(std::array<double, 3>{point.x, point.y, point.z}));
+                        }
+                        subdomains[origins[answer.id].first]->subdomainSearch_->otherRankAnswers.push_back(std::move(given));
+                    }
+                };
+                QueryBatchInfo<BigRangeQueryData<PointT>, PointT> bigBatchInfo = bigRangeAgent->runBatch(bigQueries);
+                this->SetGhostArray(bigRangeAgent->getRecvProc(), bigRangeAgent->getRecvPoints());
+                giveAnswers(bigBatchInfo, bigOrigins, true);
+                addOtherRankPoints(bigBatchInfo.result);
+                QueryBatchInfo<SmallRangeQueryData<PointT>, PointT> smallBatchInfo = smallRangeAgent->runBatch(smallQueries);
+                this->SetGhostArray(smallRangeAgent->getRecvProc(), smallRangeAgent->getRecvPoints());
+                giveAnswers(smallBatchInfo, smallOrigins, false);
+                addOtherRankPoints(smallBatchInfo.result);
+            }
+        #endif // MADVORO_WITH_MPI
+        forEachSubdomain([&](size_t s) { subdomains[s]->FinishSubdomainRound(*otherRankPoints); });
+        #ifdef MADVORO_WITH_MPI
+            if(otherRanks)
+            {
+                MPI_Wait(&finishedReq, MPI_STATUS_IGNORE);
+            }
+        #endif // MADVORO_WITH_MPI
+        if(finished == size)
+        {
+            break;
         }
     }
-    for(const std::exception_ptr &error : errors)
+
+    #ifdef MADVORO_WITH_MPI
+        if(otherRanks)
+        {
+            // as at the end of BringGhostPointsToBuild
+            const std::vector<std::vector<size_t>> &sentPoints = pointsContainer->getSentData();
+            const std::vector<int> &sentProc = pointsContainer->getSentProc();
+            this->UpdateDuplicatedPoints(sentProc, sentPoints);
+            this->EnsureSymmetry(sentProc, {alreadyRecvProcs, smallRangeAgent->getRecvProc(), bigRangeAgent->getRecvProc()});
+        }
+    #endif // MADVORO_WITH_MPI
+    int rank = 0;
+    #ifdef MADVORO_WITH_MPI
+        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    #endif // MADVORO_WITH_MPI
+    if(rank == 0)
     {
-        if(error)
-            std::rethrow_exception(error);
+        std::cout << "Time for bringing ghosts (" << count << " thread subdomains): "
+                  << std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - searchStart).count()
+                  << " seconds, " << rounds << " rounds" << std::endl;
     }
+
+    forEachSubdomain([&](size_t s) { subdomains[s]->EndSubdomain(); });
 
     std::vector<const Voronoi3D<PointT> *> parts;
     for(const std::unique_ptr<Voronoi3D<PointT>> &subdomain : subdomains)
     {
         parts.push_back(subdomain.get());
     }
-    SubdomainMerge<PointT> merged = MergeSubdomains(parts, this->allMyPoints);
+    SubdomainMerge<PointT> merged = MergeSubdomains(parts, this->del_.points_, pointsNum);
     this->del_.points_ = std::move(merged.points);
     this->del_.Norg_ = pointsNum;
     this->FacesInCell_ = std::move(merged.cellFaces);
