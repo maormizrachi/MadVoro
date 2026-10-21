@@ -4415,6 +4415,8 @@ void Voronoi3D<PointT>::EndSubdomain(void)
  * one, so a subdomain built in parallel runs its own geometry serially (in a
  * SerialGeometryScope). When the geometry kernels run on a device, the subdomains are
  * built one after another, so only one thread launches kernels.
+ * Octree nodes come from one pool without a lock, so the subdomains neither build nor
+ * destroy trees: the rank builds them and releases the last build's here.
 */
 template <typename PointT>
 void Voronoi3D<PointT>::BuildFromThreadSubdomains([[maybe_unused]] bool otherRanks)
@@ -4472,6 +4474,11 @@ void Voronoi3D<PointT>::BuildFromThreadSubdomains([[maybe_unused]] bool otherRan
         subdomain.ur_ = this->ur_;
         subdomain.box_faces_ = this->box_faces_;
         subdomain.periodic_ = this->periodic_;
+        // Octree nodes come from one pool without a lock (spatial_ds), so subdomain threads
+        // must neither build nor destroy trees: release the trees of the last build here
+        subdomain.allMyPointsTree = this->allMyPointsTree;
+        subdomain.myPointsTree.reset();
+        subdomain.rangeFinder.reset(); // (the last build's finder owns that build's tree of points other ranks sent)
         subdomain.sharedPointsTree_ = this->allMyPointsTree;
         subdomain.sharedRangeFinder_ = std::make_shared<SubdomainRangeFinder<PointT>>(pointsFinder, otherRankPoints, grid, static_cast<subdomain_t>(s));
         subdomain.radiuses = this->radiuses;
