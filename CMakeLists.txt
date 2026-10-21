@@ -38,6 +38,8 @@ option(MADVORO_WITH_HDF5  "Build with HDF5 support"  OFF)
 option(MADVORO_WITH_VTK   "Build with VTK support"   OFF)
 option(MADVORO_WITH_VCL   "Build with VCL (Vector Class Library) support" OFF)
 option(MADVORO_WITH_GPU   "Build with Kokkos (GPU or host-thread) support" OFF)
+option(MADVORO_GEOMETRY_ON_HOST
+  "With MADVORO_WITH_GPU: run the geometry kernels on Kokkos' host execution space (e.g. OpenMP) instead of the default one (e.g. the GPU)" OFF)
 option(MADVORO_BUILD_EXAMPLES "Build example programs" OFF)
 option(MADVORO_BUILD_REGRESSION_TESTS "Build THUNDER regression test executables" OFF)
 option(MADVORO_USE_EXACT_INTEGER_FALLBACK
@@ -193,7 +195,14 @@ if(MADVORO_WITH_GPU)
     target_link_options(madvoro PUBLIC $<$<LINK_LANGUAGE:CXX>:-fopenmp>)
   endif()
   target_link_libraries(madvoro PUBLIC Kokkos::kokkos)
+endif()
 
+if(MADVORO_WITH_GPU AND MADVORO_GEOMETRY_ON_HOST)
+  # HostGeometryExecutor runs the kernels on Kokkos' host threads; the device
+  # executor is not built. Other Kokkos users (e.g. STORM) keep the default space.
+  target_compile_definitions(madvoro PUBLIC MADVORO_GEOMETRY_ON_HOST)
+  message(STATUS "MadVoro geometry kernels: Kokkos host execution space")
+elseif(MADVORO_WITH_GPU)
   # The Kokkos geometry executor is a static library of its own, so that its objects
   # join the final executable (which links Kokkos) even when madvoro is a shared
   # library, and so that its compile options stay within its kernels.

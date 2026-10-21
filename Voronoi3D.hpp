@@ -4159,9 +4159,9 @@ void Voronoi3D<PointT>::BuildFromThreadSubdomains(void)
             errors[s] = std::current_exception();
         }
     };
-    #ifdef MADVORO_WITH_GPU
+    #if defined(MADVORO_WITH_GPU) && !defined(MADVORO_GEOMETRY_ON_HOST)
         constexpr bool kernelsOnHost = Kokkos::SpaceAccessibility<Kokkos::DefaultExecutionSpace, Kokkos::HostSpace>::accessible;
-    #else // MADVORO_WITH_GPU
+    #else // MADVORO_WITH_GPU && !MADVORO_GEOMETRY_ON_HOST
         constexpr bool kernelsOnHost = true;
     #endif // MADVORO_WITH_GPU
     if constexpr(kernelsOnHost)
