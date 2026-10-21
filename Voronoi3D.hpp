@@ -4445,19 +4445,21 @@ void Voronoi3D<PointT>::BuildFromThreadSubdomains([[maybe_unused]] bool otherRan
     const size_t count = std::min({this->threadSubdomainCount_, pointsNum, SubdomainGrid<PointT>::MAX_SUBDOMAINS});
     const auto searchStart = std::chrono::high_resolution_clock::now();
 
-    // One tree of the rank's points (a full build: they are also the active points)
+    // Subdomain s is the range [s * pointsNum / count, (s + 1) * pointsNum / count) of the Hilbert order
+    const std::vector<size_t> order = HilbertOrder3D(this->allMyPoints);
+
+    // One tree of the rank's points (a full build: they are also the active points). The
+    // tree does not depend on the order of insertion; inserting along the Hilbert curve
+    // keeps consecutive insertions in the same part of the tree.
     const PointT width = this->ur_ - this->ll_;
     this->allMyPointsTree = std::make_shared<OctTree<IVec>>(IVec(this->ll_ - width * 0.00001, std::numeric_limits<size_t>::max()),
                                                             IVec(this->ur_ + width * 0.00001, std::numeric_limits<size_t>::max()));
-    for(size_t pointIdx = 0; pointIdx < pointsNum; pointIdx++)
+    for(const size_t &pointIdx : order)
     {
         const PointT &point = this->allMyPoints[pointIdx];
         this->allMyPointsTree->insert(IVec(point.x, point.y, point.z, pointIdx));
     }
     this->myPointsTree = this->allMyPointsTree;
-
-    // Subdomain s is the range [s * pointsNum / count, (s + 1) * pointsNum / count) of the Hilbert order
-    const std::vector<size_t> order = HilbertOrder3D(this->allMyPoints);
     const auto subdomainBegin = [pointsNum, count](size_t s) { return s * pointsNum / count; };
 
     // What the subdomains search: the rank's points, where there may be points of other
