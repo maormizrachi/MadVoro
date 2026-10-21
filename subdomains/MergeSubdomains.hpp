@@ -16,6 +16,8 @@
 #include <vector>
 
 #include "../types.hpp"
+#include "../exception/MadVoroException.hpp"
+#include "../geometry/HostGeometryExecutor.hpp"
 
 namespace MadVoro
 {
@@ -72,19 +74,34 @@ struct SubdomainMerge
     own points. A face between cells of two subdomains is built by both; the copy of the
     first subdomain that built it is kept, and it is listed by both cells. Each cell's
     volume and centroid are those of the subdomain that owns it.
+    The subdomains are merged in parallel (HostParallelFor), with the result of merging
+    them one after another: each finds its points and the faces it keeps on its own,
+    prefix sums place every subdomain's faces, vertices and mirror ghosts after those of
+    the subdomains before it, and each then writes its part.
     \param subdomains The subdomains, in order
     \param points The rank's points (`pointsNum` of them; together, the subdomains own
            each of them once), four places for the bounding points, then the points
-           other ranks sent */
+           other ranks sent
+    \param storage Arrays whose memory the result reuses (e.g. the last merge's); their
+           contents are discarded */
 template <typename PointT>
 SubdomainMerge<PointT> MergeSubdomains(const std::vector<const Voronoi3D<PointT> *> &subdomains, const std::vector<PointT> &points,
-                                       std::size_t pointsNum)
+                                       std::size_t pointsNum, SubdomainMerge<PointT> storage = SubdomainMerge<PointT>())
 {
     constexpr std::size_t INVALID = std::numeric_limits<std::size_t>::max();
     constexpr std::size_t BOUNDING_POINTS = 4;
+    const std::size_t count = subdomains.size();
 
-    SubdomainMerge<PointT> merged;
-    merged.points = points;
+    SubdomainMerge<PointT> merged = std::move(storage);
+    merged.cellFaces.clear();
+    merged.faceNeighbors.clear();
+    merged.faceVertices.clear();
+    merged.faceArea.clear();
+    merged.faceCM.clear();
+    merged.vertices.clear();
+    merged.volume.clear();
+    merged.CM.clear();
+    merged.points.assign(points.begin(), points.end());
     if(not subdomains.empty())
     {
         const Voronoi3D<PointT> &first = *subdomains.front();
@@ -92,87 +109,189 @@ SubdomainMerge<PointT> MergeSubdomains(const std::vector<const Voronoi3D<PointT>
         std::copy(firstPoints.begin() + first.GetPointNo(), firstPoints.begin() + first.GetPointNo() + BOUNDING_POINTS,
                   merged.points.begin() + pointsNum);
     }
-    merged.CM.resize(merged.points.size());
+    const std::size_t mirrorsBegin = merged.points.size();
     merged.cellFaces.resize(pointsNum);
     merged.volume.resize(pointsNum);
     // a point's index among all the points of a subdomain, in the merged tessellation
     const auto fromAllPoints = [pointsNum](std::size_t index) { return (index < pointsNum) ? index : index + BOUNDING_POINTS; };
-
-    // Faces between cells of two subdomains, by their (smaller, larger) cell pair
-    std::unordered_map<std::uint64_t, std::size_t> sharedFaces;
+    // a face between cells of two subdomains, by its (smaller, larger) cell pair
     const auto sharedFaceKey = [pointsNum](std::size_t a, std::size_t b)
     {
         return static_cast<std::uint64_t>(std::min(a, b)) * pointsNum + std::max(a, b);
     };
 
-    for(const Voronoi3D<PointT> *subdomainPtr : subdomains)
+    // What each subdomain finds on its own
+    struct Part
     {
-        const Voronoi3D<PointT> &subdomain = *subdomainPtr;
-        const std::size_t ownNum = subdomain.GetPointNo();
-        const std::vector<PointT> &subPoints = subdomain.getMeshPoints();
-        const AllPointsMap &indicesInPoints = subdomain.GetIndicesInAllPoints();
+        std::vector<std::size_t> toMerged;   // its points in the merged tessellation (mirrors: INVALID until placed)
+        std::vector<std::size_t> mirrors;    // its mirror ghosts, in order
+        std::unordered_map<std::uint64_t, std::size_t> sharedFaces; // its first face of each pair of cells of two subdomains
+        std::vector<std::size_t> keptIndex;  // each face's index among the faces it keeps (INVALID: a copy)
+        std::vector<std::pair<std::size_t, std::size_t>> copyOf; // a copy's (subdomain, face) that is kept
+        std::size_t keptCount = 0;
+        std::vector<std::pair<std::size_t, std::size_t>> missing; // (cell, face) only the other cell's subdomain built
+        bool unknownPoint = false;
+    };
+    std::vector<Part> parts(count);
+    std::vector<std::size_t> cellSubdomain(pointsNum, INVALID);
 
-        // The subdomain's points in the merged tessellation
-        std::vector<std::size_t> toMerged(subPoints.size(), INVALID);
+    // 1. Each subdomain's points, and its faces between cells of two subdomains
+    Geometry::HostParallelFor(count, [&](std::size_t s)
+    {
+        const Voronoi3D<PointT> &subdomain = *subdomains[s];
+        Part &part = parts[s];
+        const std::size_t ownNum = subdomain.GetPointNo();
+        const std::size_t subPointsNum = subdomain.getMeshPoints().size();
+        const AllPointsMap &indicesInPoints = subdomain.GetIndicesInAllPoints();
+        part.toMerged.assign(subPointsNum, INVALID);
+        part.mirrors.clear();
         for(std::size_t j = 0; j < ownNum; ++j)
         {
-            toMerged[j] = fromAllPoints(indicesInPoints.at(j));
+            const auto it = indicesInPoints.find(j);
+            if(it == indicesInPoints.cend())
+            {
+                part.unknownPoint = true;
+                continue;
+            }
+            part.toMerged[j] = fromAllPoints(it->second);
+            if(part.toMerged[j] < pointsNum)
+                cellSubdomain[part.toMerged[j]] = s;
         }
-        for(std::size_t j = ownNum + BOUNDING_POINTS; j < subPoints.size(); ++j)
+        for(std::size_t j = ownNum + BOUNDING_POINTS; j < subPointsNum; ++j)
         {
             const auto it = indicesInPoints.find(j);
             if(it != indicesInPoints.cend())
-            {
-                // a point of another subdomain, or a point another rank sent
-                toMerged[j] = fromAllPoints(it->second);
-            }
+                part.toMerged[j] = fromAllPoints(it->second); // a point of another subdomain, or a point another rank sent
             else
+                part.mirrors.push_back(j); // a mirror ghost of one of the subdomain's points
+        }
+        const std::vector<std::pair<std::size_t, std::size_t>> &faceNeighbors = subdomain.GetAllFaceNeighbors();
+        for(std::size_t f = 0; f < faceNeighbors.size(); ++f)
+        {
+            const std::size_t a = part.toMerged[faceNeighbors[f].first];
+            const std::size_t b = part.toMerged[faceNeighbors[f].second];
+            if(a < pointsNum and b < pointsNum and ((faceNeighbors[f].first >= ownNum) or (faceNeighbors[f].second >= ownNum)))
+                part.sharedFaces.emplace(sharedFaceKey(a, b), f);
+        }
+    });
+    for(const Part &part : parts)
+    {
+        if(part.unknownPoint)
+            throw MadVoro::Exception::MadVoroException("MergeSubdomains: a subdomain's point is not among the rank's points");
+    }
+
+    // 2. The faces each subdomain keeps: a face between cells of two subdomains is kept by
+    //    the first subdomain (in order) that built it, as its first face of that pair
+    Geometry::HostParallelFor(count, [&](std::size_t s)
+    {
+        const Voronoi3D<PointT> &subdomain = *subdomains[s];
+        Part &part = parts[s];
+        const std::size_t ownNum = subdomain.GetPointNo();
+        const std::vector<std::pair<std::size_t, std::size_t>> &faceNeighbors = subdomain.GetAllFaceNeighbors();
+        part.keptIndex.assign(faceNeighbors.size(), INVALID);
+        part.copyOf.assign(faceNeighbors.size(), {INVALID, INVALID});
+        part.keptCount = 0;
+        for(std::size_t f = 0; f < faceNeighbors.size(); ++f)
+        {
+            const std::size_t a = part.toMerged[faceNeighbors[f].first];
+            const std::size_t b = part.toMerged[faceNeighbors[f].second];
+            if(a < pointsNum and b < pointsNum and ((faceNeighbors[f].first >= ownNum) or (faceNeighbors[f].second >= ownNum)))
             {
-                // a mirror ghost of one of the subdomain's points
-                toMerged[j] = merged.points.size();
-                merged.points.push_back(subPoints[j]);
-                merged.CM.push_back(subdomain.GetCellCM(j));
+                // only the subdomains of its two cells can build it
+                const std::uint64_t key = sharedFaceKey(a, b);
+                std::size_t owner = s;
+                for(const std::size_t cell : {a, b})
+                {
+                    const std::size_t other = cellSubdomain[cell];
+                    if(other < owner and parts[other].sharedFaces.count(key) != 0)
+                        owner = other;
+                }
+                const std::size_t first = parts[owner].sharedFaces.at(key);
+                if(owner != s or first != f)
+                {
+                    part.copyOf[f] = {owner, first};
+                    continue;
+                }
             }
+            part.keptIndex[f] = part.keptCount++;
+        }
+    });
+
+    // 3. Where each subdomain's faces, vertices and mirror ghosts go
+    std::vector<std::size_t> faceOffset(count + 1, 0), vertexOffset(count + 1, 0), mirrorOffset(count + 1, 0);
+    for(std::size_t s = 0; s < count; ++s)
+    {
+        faceOffset[s + 1] = faceOffset[s] + parts[s].keptCount;
+        vertexOffset[s + 1] = vertexOffset[s] + subdomains[s]->GetFacePoints().size();
+        mirrorOffset[s + 1] = mirrorOffset[s] + parts[s].mirrors.size();
+    }
+    merged.points.resize(mirrorsBegin + mirrorOffset[count]);
+    merged.CM.resize(merged.points.size());
+    merged.faceNeighbors.resize(faceOffset[count]);
+    merged.faceVertices.resize(faceOffset[count]);
+    merged.faceArea.resize(faceOffset[count]);
+    merged.faceCM.resize(faceOffset[count]);
+    merged.vertices.resize(vertexOffset[count]);
+
+    // 4. Each subdomain writes its part
+    Geometry::HostParallelFor(count, [&](std::size_t s)
+    {
+        const Voronoi3D<PointT> &subdomain = *subdomains[s];
+        Part &part = parts[s];
+        const std::size_t ownNum = subdomain.GetPointNo();
+        const std::vector<PointT> &subPoints = subdomain.getMeshPoints();
+        for(std::size_t m = 0; m < part.mirrors.size(); ++m)
+        {
+            const std::size_t j = part.mirrors[m];
+            const std::size_t index = mirrorsBegin + mirrorOffset[s] + m;
+            part.toMerged[j] = index;
+            merged.points[index] = subPoints[j];
+            merged.CM[index] = subdomain.GetCellCM(j);
         }
 
-        // Faces, with their vertices moved past the vertices of the previous subdomains
-        const std::size_t vertexOffset = merged.vertices.size();
         const std::vector<std::pair<std::size_t, std::size_t>> &faceNeighbors = subdomain.GetAllFaceNeighbors();
         std::vector<std::size_t> faceToMerged(faceNeighbors.size());
         for(std::size_t f = 0; f < faceNeighbors.size(); ++f)
         {
-            const std::size_t a = toMerged[faceNeighbors[f].first];
-            const std::size_t b = toMerged[faceNeighbors[f].second];
-            const bool shared = (a < pointsNum) and (b < pointsNum) and
-                                ((faceNeighbors[f].first >= ownNum) or (faceNeighbors[f].second >= ownNum));
-            if(shared)
+            if(part.keptIndex[f] == INVALID)
             {
-                const auto [it, inserted] = sharedFaces.emplace(sharedFaceKey(a, b), merged.faceNeighbors.size());
-                if(not inserted)
-                {
-                    // already built by a previous subdomain
-                    faceToMerged[f] = it->second;
-                    continue;
-                }
+                const auto [owner, first] = part.copyOf[f];
+                faceToMerged[f] = faceOffset[owner] + parts[owner].keptIndex[first];
+                continue;
             }
-            faceToMerged[f] = merged.faceNeighbors.size();
-            merged.faceNeighbors.emplace_back(a, b);
+            const std::size_t face = faceOffset[s] + part.keptIndex[f];
+            faceToMerged[f] = face;
+            const std::size_t a = part.toMerged[faceNeighbors[f].first];
+            const std::size_t b = part.toMerged[faceNeighbors[f].second];
+            merged.faceNeighbors[face] = {a, b};
             point_vec faceVertices = subdomain.GetPointsInFace(f);
             for(std::size_t &vertex : faceVertices)
             {
-                vertex += vertexOffset;
+                vertex += vertexOffset[s];
             }
-            merged.faceVertices.push_back(std::move(faceVertices));
-            merged.faceArea.push_back(subdomain.GetArea(f));
-            merged.faceCM.push_back(subdomain.FaceCM(f));
+            merged.faceVertices[face] = std::move(faceVertices);
+            merged.faceArea[face] = subdomain.GetArea(f);
+            merged.faceCM[face] = subdomain.FaceCM(f);
+            // a face between two subdomains that the other did not build (e.g. a face so
+            // small that it dropped it) is a face of both cells
+            if(a < pointsNum and b < pointsNum and ((faceNeighbors[f].first >= ownNum) or (faceNeighbors[f].second >= ownNum)))
+            {
+                const std::uint64_t key = sharedFaceKey(a, b);
+                for(const std::size_t cell : {a, b})
+                {
+                    const std::size_t other = cellSubdomain[cell];
+                    if(other != s and other < count and parts[other].sharedFaces.count(key) == 0)
+                        part.missing.emplace_back(cell, face);
+                }
+            }
         }
         const std::vector<PointT> &vertices = subdomain.GetFacePoints();
-        merged.vertices.insert(merged.vertices.end(), vertices.begin(), vertices.end());
+        std::copy(vertices.begin(), vertices.end(), merged.vertices.begin() + vertexOffset[s]);
 
         // Cells
         for(std::size_t j = 0; j < ownNum; ++j)
         {
-            const std::size_t cell = toMerged[j];
+            const std::size_t cell = part.toMerged[j];
             face_vec &cellFaces = merged.cellFaces[cell];
             for(const std::size_t &face : subdomain.GetCellFaces(j))
             {
@@ -181,21 +300,21 @@ SubdomainMerge<PointT> MergeSubdomains(const std::vector<const Voronoi3D<PointT>
             merged.volume[cell] = subdomain.GetVolume(j);
             merged.CM[cell] = subdomain.GetCellCM(j);
         }
-    }
+    });
 
-    // A face between two subdomains that only one of them built (e.g. a face so small
-    // that the other dropped it) is a face of both cells
-    for(const std::pair<const std::uint64_t, std::size_t> &sharedFace : sharedFaces)
+    // 5. The faces only one of their two cells' subdomains built, in a fixed order
+    std::vector<std::pair<std::size_t, std::size_t>> missing;
+    for(const Part &part : parts)
     {
-        const std::size_t face = sharedFace.second;
-        const std::array<std::size_t, 2> cells = {merged.faceNeighbors[face].first, merged.faceNeighbors[face].second};
-        for(const std::size_t cell : cells)
+        missing.insert(missing.end(), part.missing.begin(), part.missing.end());
+    }
+    std::sort(missing.begin(), missing.end());
+    for(const auto &[cell, face] : missing)
+    {
+        face_vec &cellFaces = merged.cellFaces[cell];
+        if(std::find(cellFaces.begin(), cellFaces.end(), face) == cellFaces.end())
         {
-            face_vec &cellFaces = merged.cellFaces[cell];
-            if(std::find(cellFaces.begin(), cellFaces.end(), face) == cellFaces.end())
-            {
-                cellFaces.push_back(face);
-            }
+            cellFaces.push_back(face);
         }
     }
     return merged;

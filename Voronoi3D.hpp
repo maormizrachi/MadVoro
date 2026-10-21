@@ -4501,7 +4501,6 @@ void Voronoi3D<PointT>::BuildFromThreadSubdomains([[maybe_unused]] bool otherRan
         subdomain.rangeFinder.reset(); // (the last build's finder owns that build's tree of points other ranks sent)
         subdomain.sharedPointsTree_ = this->allMyPointsTree;
         subdomain.sharedRangeFinder_ = std::make_shared<SubdomainRangeFinder<PointT>>(pointsFinder, otherRankPoints, grid, static_cast<subdomain_t>(s));
-        subdomain.radiuses = this->radiuses;
         subdomain.subdomainSearch_ = std::make_shared<SubdomainGhostSearch>(subdomain.sharedRangeFinder_.get());
     }
 
@@ -4554,7 +4553,11 @@ void Voronoi3D<PointT>::BuildFromThreadSubdomains([[maybe_unused]] bool otherRan
         subdomainIndices[s].assign(order.begin() + subdomainBegin(s), order.begin() + subdomainBegin(s + 1));
         std::sort(subdomainIndices[s].begin(), subdomainIndices[s].end());
     }
-    forEachSubdomain([&](size_t s) { subdomains[s]->BeginSubdomain(this->allMyPoints, subdomainIndices[s]); });
+    forEachSubdomain([&](size_t s)
+    {
+        subdomains[s]->radiuses = this->radiuses; // (copied here, in parallel)
+        subdomains[s]->BeginSubdomain(this->allMyPoints, subdomainIndices[s]);
+    });
 
     #ifdef MADVORO_WITH_MPI
         // As BringGhostPointsToBuild does with other ranks
@@ -4714,7 +4717,18 @@ void Voronoi3D<PointT>::BuildFromThreadSubdomains([[maybe_unused]] bool otherRan
     {
         parts.push_back(subdomain.get());
     }
-    SubdomainMerge<PointT> merged = MergeSubdomains(parts, this->del_.points_, pointsNum);
+    // The merge reuses the memory of the rank's arrays (BuildInitialize emptied them), so a
+    // rebuild neither frees nor allocates them again
+    SubdomainMerge<PointT> storage;
+    storage.cellFaces = std::move(this->FacesInCell_);
+    storage.faceNeighbors = std::move(this->FaceNeighbors_);
+    storage.faceVertices = std::move(this->PointsInFace_);
+    storage.faceArea = std::move(this->area_);
+    storage.faceCM = std::move(this->Face_CM_);
+    storage.vertices = std::move(this->tetra_centers_);
+    storage.volume = std::move(this->volume_);
+    storage.CM = std::move(this->CM_);
+    SubdomainMerge<PointT> merged = MergeSubdomains(parts, this->del_.points_, pointsNum, std::move(storage));
     this->del_.points_ = std::move(merged.points);
     this->del_.Norg_ = pointsNum;
     this->FacesInCell_ = std::move(merged.cellFaces);
@@ -4728,14 +4742,15 @@ void Voronoi3D<PointT>::BuildFromThreadSubdomains([[maybe_unused]] bool otherRan
     this->periodicImageTranslation_.assign(this->del_.points_.size(), PointT());
 
     // the radii carried to the next build: each point's, from the subdomain that built it
-    for(const std::unique_ptr<Voronoi3D<PointT>> &subdomain : subdomains)
+    forEachSubdomain([&](size_t s)
     {
-        for(size_t j = 0; j < subdomain->Norg_; ++j)
+        const Voronoi3D<PointT> &subdomain = *subdomains[s];
+        for(size_t j = 0; j < subdomain.Norg_; ++j)
         {
-            const size_t pointIdx = subdomain->indicesInAllMyPoints.at(j);
-            this->radiuses[pointIdx] = subdomain->radiuses[pointIdx];
+            const size_t pointIdx = subdomain.indicesInAllMyPoints.at(j);
+            this->radiuses[pointIdx] = subdomain.radiuses[pointIdx];
         }
-    }
+    });
     this->SyncPartialBuildData(this->CM_, this->all_CM);
 }
 
