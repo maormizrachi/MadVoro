@@ -1,0 +1,7 @@
+# On several ranks, building each rank's mesh from thread subdomains gives the tessellation of building each rank as one domain, with the ghosts recorded for exchanges between ranks
+TAGS="mpi"
+CATEGORY="code_correctness"
+CHECK_FUNCTION="check_voronoi_thread_subdomains_mpi_case"
+TIMEOUT=1800
+MPI_NP=8
+SLURM_PARTITION=bigrun
