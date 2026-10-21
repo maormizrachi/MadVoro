@@ -359,6 +359,25 @@ private:
   Geometry::FlatVoronoi flatVoronoi_;
   // Runs the geometry kernels (with Kokkos when MadVoro is built with it, on host threads otherwise)
   Geometry::GeometryExecutor geometryExecutor_;
+  #if defined(MADVORO_WITH_GPU) && !defined(MADVORO_GEOMETRY_ON_HOST)
+    // A thread subdomain runs its geometry on its own host thread (see WithGeometryExecutor)
+    Geometry::HostGeometryExecutor hostGeometryExecutor_;
+  #endif // MADVORO_WITH_GPU && !MADVORO_GEOMETRY_ON_HOST
+
+  /*! \brief Calls f with the executor of this mesh's geometry. A thread subdomain is built
+      inside one host thread of BuildFromThreadSubdomains, so it always uses the host
+      executor there, whichever executor the build has; every other mesh uses
+      geometryExecutor_. So thread subdomains are built the same way with or without a
+      device. */
+  template <typename F>
+  decltype(auto) WithGeometryExecutor(F &&f)
+  {
+    #if defined(MADVORO_WITH_GPU) && !defined(MADVORO_GEOMETRY_ON_HOST)
+      if(this->IsThreadSubdomain())
+        return f(this->hostGeometryExecutor_);
+    #endif // MADVORO_WITH_GPU && !MADVORO_GEOMETRY_ON_HOST
+    return f(this->geometryExecutor_);
+  }
   
   #ifdef MADVORO_WITH_MPI
   vector<int> sentprocs_;
@@ -2944,7 +2963,7 @@ void Voronoi3D<PointT>::UpdateCMs(void)
         throw eo;
     }
     if(Norg_ > 0)
-        geometryExecutor_.CellMoments(flatVoronoi_);
+        this->WithGeometryExecutor([this](auto &executor) { executor.CellMoments(this->flatVoronoi_); });
     Geometry::HostParallelFor(Norg_, [this](std::size_t c)
     {
         volume_[c] = flatVoronoi_.cellVolume[c];
@@ -3901,7 +3920,7 @@ void Voronoi3D<PointT>::BuildNoBox(vector<PointT> const &points, vector<vector<P
         throw eo;
     }
     if(Norg_ > 0)
-        geometryExecutor_.CellMoments(flatVoronoi_);
+        this->WithGeometryExecutor([this](auto &executor) { executor.CellMoments(this->flatVoronoi_); });
     Geometry::HostParallelFor(Norg_, [this](std::size_t c)
     {
         volume_[c] = flatVoronoi_.cellVolume[c];
@@ -4413,8 +4432,9 @@ void Voronoi3D<PointT>::EndSubdomain(void)
  * what the rank shares with it read-only; only the rank's own thread talks to other
  * ranks, between the parallel parts. Kokkos cannot launch a parallel loop from inside
  * one, so a subdomain built in parallel runs its own geometry serially (in a
- * SerialGeometryScope). When the geometry kernels run on a device, the subdomains are
- * built one after another, so only one thread launches kernels.
+ * SerialGeometryScope), on the host also when the build's geometry kernels run on a
+ * device (see WithGeometryExecutor): the subdomains are built the same way on one host
+ * thread, on many, and next to a device.
  * Octree nodes come from one pool without a lock, so the subdomains neither build nor
  * destroy trees: the rank builds them and releases the last build's here.
 */
@@ -4499,26 +4519,13 @@ void Voronoi3D<PointT>::BuildFromThreadSubdomains([[maybe_unused]] bool otherRan
                 errors[s] = std::current_exception();
             }
         };
-        #if defined(MADVORO_WITH_GPU) && !defined(MADVORO_GEOMETRY_ON_HOST)
-            constexpr bool kernelsOnHost = Kokkos::SpaceAccessibility<Kokkos::DefaultExecutionSpace, Kokkos::HostSpace>::accessible;
-        #else // MADVORO_WITH_GPU && !MADVORO_GEOMETRY_ON_HOST
-            constexpr bool kernelsOnHost = true;
-        #endif // MADVORO_WITH_GPU
-        if constexpr(kernelsOnHost)
+        // On Kokkos' host threads (one after another without Kokkos), also in a device
+        // build: a subdomain's geometry runs on its own thread (WithGeometryExecutor)
+        Geometry::HostParallelFor(count, [&run](size_t s)
         {
-            Geometry::HostParallelFor(count, [&run](size_t s)
-            {
-                const Geometry::SerialGeometryScope serialGeometry;
-                run(s);
-            });
-        }
-        else
-        {
-            for(size_t s = 0; s < count; ++s)
-            {
-                run(s);
-            }
-        }
+            const Geometry::SerialGeometryScope serialGeometry;
+            run(s);
+        });
         for(const std::exception_ptr &error : errors)
         {
             if(error)
@@ -4777,8 +4784,11 @@ void Voronoi3D<PointT>::BuildVoronoi(std::vector<size_t> const &order)
         else
             computeCenter[i] = 1;
     });
-    geometryExecutor_.SetMesh(flatMesh_);
-    geometryExecutor_.Circumcenters(computeCenter, flatVoronoi_);
+    this->WithGeometryExecutor([&](auto &executor)
+    {
+        executor.SetMesh(flatMesh_);
+        executor.Circumcenters(computeCenter, flatVoronoi_);
+    });
     Geometry::HostParallelFor(Ntetra, [&](std::size_t i)
     {
         if(computeCenter[i] != 0)
@@ -4808,7 +4818,7 @@ void Voronoi3D<PointT>::BuildVoronoi(std::vector<size_t> const &order)
             voronoi.tetraStatus[i] = Geometry::GeometryStatus::Ok;
         }
     }
-    geometryExecutor_.SetVertices(flatVoronoi_);
+    this->WithGeometryExecutor([this](auto &executor) { executor.SetVertices(this->flatVoronoi_); });
     reportTime("circumcenters");
 
     // Faces. Faces against points outside the domain (that are not periodic images) use a looser small-area cut.
@@ -4817,7 +4827,10 @@ void Voronoi3D<PointT>::BuildVoronoi(std::vector<size_t> const &order)
     {
         looseAreaCut[p] = (IsPointOutsideBox(p) and not IsPeriodicImage(p)) ? 1 : 0;
     });
-    const Geometry::FaceBuildReport report = geometryExecutor_.BuildFaces(order, looseAreaCut, flatVoronoi_);
+    const Geometry::FaceBuildReport report = this->WithGeometryExecutor([&](auto &executor)
+    {
+        return executor.BuildFaces(order, looseAreaCut, flatVoronoi_);
+    });
     if(report.result.error != Geometry::FaceBuildError::None)
     {
         const size_t point = report.point;
