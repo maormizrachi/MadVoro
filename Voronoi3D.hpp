@@ -45,6 +45,7 @@
 #include "types.hpp"
 #include "elementary/Face3D.hpp"
 #include "delaunay/Delaunay3D.hpp"
+#include "delaunay/Delaunay2D.hpp"
 #include "geometry/Intersections.hpp"
 #include "utils/Predicates3D.hpp"
 #include <MeshDecomposer3D/hilbert/HilbertOrder3D.hpp>
@@ -161,6 +162,7 @@ struct PlaneFaceStats
 };
 
 #define LARGE_POINTS_SHRINK_RADIUS_RATIO 0.95
+#define PLANE_AXIS_MIRROR_LABEL (std::size_t(1) << 63) // a plane build's mirror of local point k across y = 0 has label k | this
 #define PLANE_FACE_EDGE_TOLERANCE 1e-12 // BuildPlaneFaces drops in-plane edges shorter than this times their generators' distance
 #define RANGE_MAX_POINTS_TO_GET 15 // 15
 #define RADIUSES_GROWING_FACTOR 1.1
@@ -356,6 +358,24 @@ private:
 
   void BuildPlaneFaces(void);
 
+  void BuildLocalPlane(const std::vector<PointT> &activePoints, std::vector<size_t> &order);
+
+  void RefreshPlaneIncidence(void);
+
+  bool SimplexCheckBig(size_t index) const { return this->planeMesh_ ? this->plane_.Triangles()[index].checkBig : this->del_.tetras_[index].checkBig; }
+
+  void ClearSimplexCheckBig(size_t index)
+  {
+      if(this->planeMesh_)
+      {
+          this->plane_.Triangles()[index].checkBig = false;
+      }
+      else
+      {
+          this->del_.tetras_[index].checkBig = false;
+      }
+  }
+
   void FinishFaces(size_t faceCount);
 
   size_t SetPointTetras(void);
@@ -462,6 +482,8 @@ private:
   bool alwaysMirroredInDelaunay_ = false; // the current build inserted those mirrors with the local points
   bool planeFaces_ = false; // SetPlaneFaces
   PlaneFaceStats planeFaceStats_;
+  bool planeMesh_ = false; // SetPlaneMesh
+  Delaunay2D<PointT> plane_; // the in-plane triangulation of a plane build (labels: point store indices)
 
   std::shared_ptr<OctTree<IVec>> myPointsTree;
   std::shared_ptr<OctTree<IVec>> allMyPointsTree;
@@ -566,6 +588,13 @@ public:
     walls, through the x-axis. Each cell is then its in-plane polygon, cut at y = 0, extended between the walls.
    */
   void SetPlaneFaces(bool planeFaces);
+
+  /*! \brief Plane build of a wedge: SetPlaneFaces, and the local triangulation is the 2D Delaunay of the in-plane points
+    (with each local generator's mirror across the axis y = 0) instead of the 3D Delaunay of the points and their wall
+    mirrors, which is degenerate by construction (six cospherical points per in-plane triangle). The ghost search uses the
+    triangles' circumcircles. The wall mirrors are still stored, at N + 4 + f N + k, as the walls' ghost points.
+   */
+  void SetPlaneMesh(bool planeMesh);
 
   //! What the last build of the plane faces did on this rank
   const PlaneFaceStats &GetPlaneFaceStats(void) const { return this->planeFaceStats_; }
@@ -1368,6 +1397,11 @@ namespace
 template <typename PointT>
 size_t Voronoi3D<PointT>::SetPointTetras(void)
 {
+    if(this->planeMesh_)
+    {
+        this->RefreshPlaneIncidence();
+        return 0;
+    }
     std::vector<Tetrahedron> &tetras = this->del_.tetras_;
     std::vector<std::pair<size_t, Tetrahedron>> &changed_tetras = this->del_.changed_tetras_;
     boost::container::flat_set<size_t> const &empty_tetras = this->del_.empty_tetras_;
@@ -1640,6 +1674,12 @@ double Voronoi3D<PointT>::GetMinRadius(const size_t &index) const
 template <typename PointT>
 PointT Voronoi3D<PointT>::GetSearchCenter(const size_t &tetraIdx) const
 {
+    if(this->planeMesh_)
+    {
+        double cx, cy, radius;
+        this->plane_.Circumcircle(tetraIdx, cx, cy, radius);
+        return PointT(cx, cy, 0);
+    }
     this->GetRadius(tetraIdx); // computes the centre if it is not cached yet
     const PointT &center = this->tetra_centers_[tetraIdx];
     if(not this->hasGeneratorPlane_)
@@ -2797,7 +2837,14 @@ void Voronoi3D<PointT>::MockMesh(void)
         bounding_box.second.z = std::max(bounding_box.second.z, point.z);
     }
     order = HilbertOrder3D(new_points);
-    this->del_.Build(new_points, bounding_box.second, bounding_box.first, order);
+    if(this->planeMesh_)
+    {
+        this->BuildLocalPlane(new_points, order);
+    }
+    else
+    {
+        this->del_.Build(new_points, bounding_box.second, bounding_box.first, order);
+    }
     if(periodic)
     {
         this->periodicImageTranslation_.assign(this->del_.points_.size(), PointT());
@@ -2873,7 +2920,24 @@ void Voronoi3D<PointT>::MockMesh(void)
     {
         if(this->Norg_ > 0 && !incomingMirrors.empty())
         {
-            this->del_.BuildExtra(incomingMirrors);
+            if(this->planeMesh_)
+            {
+                // BuildLocalPlane recreated the wall mirrors; keep each in-plane box mirror once (two old cells can share one)
+                std::set<std::array<double, 3>> seen;
+                std::vector<PointT> inPlaneMirrors;
+                for(const PointT &mirror : incomingMirrors)
+                {
+                    if(mirror.z == 0 and seen.insert({mirror.x, mirror.y, mirror.z}).second)
+                    {
+                        inPlaneMirrors.push_back(mirror);
+                    }
+                }
+                this->BuildExtraTracked(inPlaneMirrors);
+            }
+            else
+            {
+                this->del_.BuildExtra(incomingMirrors);
+            }
         }
     }
 #ifdef TIMING
@@ -2984,7 +3048,7 @@ void Voronoi3D<PointT>::MockMesh(void)
         }
     }
 
-    if(periodic && !buildExtra.empty())
+    if((periodic or this->planeMesh_) && !buildExtra.empty())
     {
         this->BuildExtraTracked(buildExtra);
     }
@@ -3161,6 +3225,101 @@ void Voronoi3D<PointT>::SetPlaneFaces(bool planeFaces)
     this->planeFaces_ = planeFaces;
 }
 
+template <typename PointT>
+void Voronoi3D<PointT>::SetPlaneMesh(bool planeMesh)
+{
+    this->planeMesh_ = planeMesh;
+    if(planeMesh)
+    {
+        this->planeFaces_ = true;
+    }
+}
+
+/**
+ * Local build of a plane mesh (SetPlaneMesh). The local generators are triangulated in the plane z = 0, followed by their
+ * mirrors across the axis y = 0, which close the cells of the first row: for y >= 0 a mirror is never closer than its
+ * original, so only a cell's own axis mirror bounds it and ghosts need none. Those mirrors stay out of the point store.
+ * The store keeps the layout of a 3D build: the local points, four unused slots where a 3D build keeps its bounding
+ * tetrahedron, then each local point's mirror across the f-th always-mirrored face at N + 4 + f N + k. The wall mirrors are
+ * not triangulated, since every bisector between two in-plane points is vertical.
+*/
+template <typename PointT>
+void Voronoi3D<PointT>::BuildLocalPlane(const std::vector<PointT> &activePoints, std::vector<size_t> &order)
+{
+    if(this->HasPeriodicBoundaries() or this->alwaysMirroredFaces_.size() != 2)
+    {
+        MadVoro::Exception::MadVoroException eo("BuildLocalPlane: a plane mesh needs two always-mirrored faces and no periodicity");
+        eo.addEntry("Always-mirrored faces", this->alwaysMirroredFaces_.size());
+        throw eo;
+    }
+    std::vector<Face3D<PointT>> box;
+    std::vector<PointT> normals;
+    this->InitialBoxBuild(box, normals);
+    const size_t N = activePoints.size();
+    this->del_.points_ = activePoints;
+    const PointT span = this->ur_ - this->ll_;
+    for(size_t i = 0; i < 4; ++i)
+    {
+        this->del_.points_.push_back(this->ur_ + static_cast<double>(10 + i) * span);
+    }
+    for(const size_t &faceIdx : this->alwaysMirroredFaces_)
+    {
+        if(faceIdx >= box.size())
+        {
+            MadVoro::Exception::MadVoroException eo("BuildLocalPlane: always-mirrored face index out of range");
+            eo.addEntry("Face index", faceIdx);
+            eo.addEntry("Number of box faces", box.size());
+            throw eo;
+        }
+        for(const PointT &point : activePoints)
+        {
+            this->del_.points_.push_back(MirrorPoint(box[faceIdx], point));
+        }
+    }
+    this->alwaysMirroredInDelaunay_ = true;
+    if(order.empty() and N > 0)
+    {
+        order = HilbertOrder3D(activePoints);
+    }
+    // In-plane points reach one box size beyond the box (mirrors across its sides) and down to -y_max (axis mirrors)
+    const double width = this->ur_.x - this->ll_.x, height = this->ur_.y - this->ll_.y;
+    this->plane_.Reset(this->ll_.x - width, this->ur_.x + width, this->ll_.y - height - std::abs(this->ur_.y), this->ur_.y + height);
+    for(const size_t &k : order)
+    {
+        this->plane_.Insert(activePoints[k].x, activePoints[k].y, k);
+    }
+    for(const size_t &k : order)
+    {
+        if(activePoints[k].y != 0)
+        {
+            this->plane_.Insert(activePoints[k].x, -activePoints[k].y, k | PLANE_AXIS_MIRROR_LABEL);
+        }
+    }
+}
+
+//! A plane mesh's PointTetras_: the triangles of each local point
+template <typename PointT>
+void Voronoi3D<PointT>::RefreshPlaneIncidence(void)
+{
+    this->PointTetras_.resize(this->Norg_);
+    for(tetra_vec &triangles : this->PointTetras_)
+    {
+        triangles.clear();
+    }
+    const std::vector<typename Delaunay2D<PointT>::Triangle> &triangles = this->plane_.Triangles();
+    for(size_t t = 0; t < triangles.size(); ++t)
+    {
+        for(const size_t &vertex : triangles[t].vertices)
+        {
+            const size_t label = this->plane_.Label(vertex);
+            if(label < this->Norg_)
+            {
+                this->PointTetras_[label].push_back(t);
+            }
+        }
+    }
+}
+
 /**
  * Builds del_ from the local points. With always-mirrored faces the mirrors of every local point across those faces go
  * into the same pass, each point followed by its mirrors along the points' Hilbert order. Inserting the mirrors afterwards
@@ -3171,6 +3330,11 @@ void Voronoi3D<PointT>::SetPlaneFaces(bool planeFaces)
 template <typename PointT>
 void Voronoi3D<PointT>::BuildLocalDelaunay(const std::vector<PointT> &activePoints, std::pair<PointT, PointT> boundingBox, std::vector<size_t> &order)
 {
+    if(this->planeMesh_)
+    {
+        this->BuildLocalPlane(activePoints, order);
+        return;
+    }
     this->alwaysMirroredInDelaunay_ = false;
     if(this->alwaysMirroredFaces_.empty() || activePoints.empty())
     {
@@ -3374,6 +3538,28 @@ PointT Voronoi3D<PointT>::InferPeriodicTranslation(const PointT &p) const
 template <typename PointT>
 void Voronoi3D<PointT>::BuildExtraTracked(const std::vector<PointT> &pts)
 {
+    if(this->planeMesh_)
+    {
+        // In-plane points (ghosts, mirrors across the box's sides) go into the triangulation; mirrors across the walls
+        // are only stored
+        const size_t first = this->del_.points_.size();
+        this->del_.points_.insert(this->del_.points_.end(), pts.begin(), pts.end());
+        this->periodicImageTranslation_.resize(this->del_.points_.size(), PointT());
+        std::vector<size_t> order(pts.size());
+        std::iota(order.begin(), order.end(), 0);
+        if(pts.size() > 64)
+        {
+            order = HilbertOrder3D(pts);
+        }
+        for(const size_t &j : order)
+        {
+            if(pts[j].z == 0)
+            {
+                this->plane_.Insert(pts[j].x, pts[j].y, first + j);
+            }
+        }
+        return;
+    }
     const size_t first = this->del_.points_.size();
     this->del_.BuildExtra(pts);
     this->periodicImageTranslation_.resize(this->del_.points_.size(), PointT());
@@ -3563,7 +3749,7 @@ std::pair<std::vector<SmallRangeQueryData<PointT>>, std::vector<BigRangeQueryDat
 
             for(const size_t &tetraIdx : this->PointTetras_[pointIdx])
             {
-                if(not this->del_.tetras_[tetraIdx].checkBig)
+                if(not this->SimplexCheckBig(tetraIdx))
                 {
                     continue; // tetra does not need to be checked
                 }
@@ -3615,7 +3801,7 @@ std::pair<std::vector<SmallRangeQueryData<PointT>>, std::vector<BigRangeQueryDat
 
     for(const size_t &tetraIdx : tetraToCancel)
     {
-        this->del_.tetras_[tetraIdx].checkBig = false;
+        this->ClearSimplexCheckBig(tetraIdx);
     }
     return {smallQueries, bigQueries};
 }
@@ -4368,6 +4554,10 @@ void Voronoi3D<PointT>::ReleaseMemory(void)
 template <typename PointT>
 void Voronoi3D<PointT>::BuildNoBox(vector<PointT> const &points, vector<vector<PointT>> const &ghosts, vector<size_t> toduplicate)
 {
+    if(this->planeMesh_)
+    {
+        throw MadVoro::Exception::MadVoroException("BuildNoBox: not available for a plane mesh (SetPlaneMesh)");
+    }
     assert(points.size() > 0);
     // Clear data
     PointTetras_.clear();
@@ -4913,8 +5103,36 @@ void Voronoi3D<PointT>::BuildPlaneFaces(void)
         const std::array<PointT, 2> ownMirrors = {MirrorPoint(*walls[0], point), MirrorPoint(*walls[1], point)};
         std::array<size_t, 2> mirrorIndices = {axisEdge, axisEdge};
         inPlane.clear();
+        if(this->planeMesh_)
+        {
+            // The vertices of the cell's triangles (the axis mirrors and the starting triangle's corners have labels
+            // beyond the point store) and the wall mirrors where BuildLocalPlane stored them
+            for(const size_t &triangleIdx : PointTetras_[cell])
+            {
+                for(const size_t &vertex : this->plane_.Triangles()[triangleIdx].vertices)
+                {
+                    const size_t label = this->plane_.Label(vertex);
+                    if(label != cell and label < del_.points_.size())
+                    {
+                        inPlane.push_back(label);
+                    }
+                }
+            }
+            for(size_t f = 0; f < 2; ++f)
+            {
+                const size_t index = Norg_ + 4 + f * Norg_ + cell;
+                if(index < del_.points_.size() and del_.points_[index] == ownMirrors[f])
+                {
+                    mirrorIndices[f] = index;
+                }
+            }
+        }
         for(const size_t &tetraIdx : PointTetras_[cell])
         {
+            if(this->planeMesh_)
+            {
+                break;
+            }
             for(const size_t &other : del_.tetras_[tetraIdx].points)
             {
                 if(other == cell or (other >= Norg_ and other < Norg_ + 4))
@@ -5067,6 +5285,12 @@ void Voronoi3D<PointT>::BuildPlaneFaces(void)
 template <typename PointT>
 inline double Voronoi3D<PointT>::GetRadius(const size_t &index) const
 { 
+    if(this->planeMesh_)
+    {
+        double cx, cy, radius;
+        this->plane_.Circumcircle(index, cx, cy, radius);
+        return radius;
+    }
     R_[index] = (R_[index] < 0)? CalcTetraRadiusCenter(index) : R_[index];
     if(std::isnan(this->R_[index]) or not std::isfinite(this->R_[index]))
     {
@@ -5643,7 +5867,7 @@ Voronoi3D<PointT>::Voronoi3D(Voronoi3D<PointT> const &other) : ll_(other.ll_), u
                                                 hasGeneratorPlane_(other.hasGeneratorPlane_), generatorPlaneNormal_(other.generatorPlaneNormal_),
                                                 generatorPlaneOffset_(other.generatorPlaneOffset_), alwaysMirroredFaces_(other.alwaysMirroredFaces_),
                                                 alwaysMirroredInDelaunay_(other.alwaysMirroredInDelaunay_), planeFaces_(other.planeFaces_),
-                                                planeFaceStats_(other.planeFaceStats_),
+                                                planeFaceStats_(other.planeFaceStats_), planeMesh_(other.planeMesh_), plane_(other.plane_),
                                                 #ifdef MADVORO_WITH_MPI
                                                     pointsManager(other.pointsManager->clone()), indexingToSave(other.indexingToSave),
                                                     rangeFinder(other.rangeFinder), radiuses(other.radiuses), allMyPoints(other.allMyPoints), allPointsWeights(other.allPointsWeights),
