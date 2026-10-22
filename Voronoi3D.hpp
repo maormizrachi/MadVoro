@@ -293,6 +293,9 @@ private:
 
   void InitialBoxBuild(std::vector<Face3D<PointT>> &box, std::vector<PointT> &normals);
 
+  // Builds del_ from the local points; with always-mirrored faces, each point is inserted followed by its mirrors
+  void BuildLocalDelaunay(const std::vector<PointT> &activePoints, std::pair<PointT, PointT> boundingBox, std::vector<size_t> &order);
+
   void BringSelfGhostPoints(const std::vector<BigRangeQueryData<PointT>> &bigQueries, const std::vector<SmallRangeQueryData<PointT>> &smallQueries,
                               BigRangeAgent<PointT> &bigRangeAgent, SmallRangeAgent<PointT> &smallRangeAgent,
                               boost::container::flat_map<size_t, size_t> &numOfResultsForBigPoints,
@@ -387,6 +390,7 @@ private:
   PointT generatorPlaneNormal_;
   double generatorPlaneOffset_ = 0;
   std::vector<size_t> alwaysMirroredFaces_;
+  bool alwaysMirroredInDelaunay_ = false; // the current build inserted those mirrors with the local points
 
   std::shared_ptr<OctTree<IVec>> myPointsTree;
   std::shared_ptr<OctTree<IVec>> allMyPointsTree;
@@ -2309,7 +2313,7 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
     }
 
     order = HilbertOrder3D(activePoints);
-    this->del_.Build(activePoints, bounding_box.second, bounding_box.first, order);
+    this->BuildLocalDelaunay(activePoints, bounding_box, order);
 
     // updates the radiuses array of the tetrahedra, as well as the lists for each point what tetras it belongs to
     this->R_.resize(this->del_.tetras_.size());
@@ -3062,6 +3066,68 @@ void Voronoi3D<PointT>::SetAlwaysMirroredFaces(const std::vector<size_t> &faces)
     this->alwaysMirroredFaces_ = faces;
 }
 
+/**
+ * Builds del_ from the local points. With always-mirrored faces the mirrors of every local point across those faces go
+ * into the same pass, each point followed by its mirrors along the points' Hilbert order. Inserting the mirrors afterwards
+ * into the layer of coplanar wedge generators re-triangulated large regions per mirror (6-15x slower, growing with the
+ * number of points per rank, 2026-10-22 MirrorOrderTest); interleaved, every insertion stays local. The mirrors are
+ * stored after the bounding tetrahedron, as BuildExtra would store them.
+*/
+template <typename PointT>
+void Voronoi3D<PointT>::BuildLocalDelaunay(const std::vector<PointT> &activePoints, std::pair<PointT, PointT> boundingBox, std::vector<size_t> &order)
+{
+    this->alwaysMirroredInDelaunay_ = false;
+    if(this->alwaysMirroredFaces_.empty() || activePoints.empty())
+    {
+        this->del_.Build(activePoints, boundingBox.second, boundingBox.first, order);
+        return;
+    }
+    std::vector<Face3D<PointT>> box;
+    std::vector<PointT> normals;
+    this->InitialBoxBuild(box, normals);
+    const size_t N = activePoints.size(), faces = this->alwaysMirroredFaces_.size();
+    std::vector<PointT> mirrors;
+    mirrors.reserve(faces * N);
+    for(const size_t &faceIdx : this->alwaysMirroredFaces_)
+    {
+        if(faceIdx >= box.size())
+        {
+            MadVoro::Exception::MadVoroException eo("BuildLocalDelaunay: always-mirrored face index out of range");
+            eo.addEntry("Face index", faceIdx);
+            eo.addEntry("Number of box faces", box.size());
+            throw eo;
+        }
+        for(const PointT &point : activePoints)
+        {
+            mirrors.push_back(MirrorPoint(box[faceIdx], point));
+            const PointT &mirror = mirrors.back();
+            boundingBox.first.x = std::min(boundingBox.first.x, mirror.x);
+            boundingBox.second.x = std::max(boundingBox.second.x, mirror.x);
+            boundingBox.first.y = std::min(boundingBox.first.y, mirror.y);
+            boundingBox.second.y = std::max(boundingBox.second.y, mirror.y);
+            boundingBox.first.z = std::min(boundingBox.first.z, mirror.z);
+            boundingBox.second.z = std::max(boundingBox.second.z, mirror.z);
+        }
+    }
+    if(order.empty())
+    {
+        order = HilbertOrder3D(activePoints);
+    }
+    // Point k is index k, its mirror across the f-th always-mirrored face is index N + f N + k
+    std::vector<size_t> combined;
+    combined.reserve((faces + 1) * N);
+    for(const size_t &k : order)
+    {
+        combined.push_back(k);
+        for(size_t f = 0; f < faces; ++f)
+        {
+            combined.push_back(N + f * N + k);
+        }
+    }
+    this->del_.BuildWithExtras(activePoints, mirrors, boundingBox.second, boundingBox.first, combined);
+    this->alwaysMirroredInDelaunay_ = true;
+}
+
 template <typename PointT>
 std::array<bool, 3> Voronoi3D<PointT>::GetPeriodicBoundaries() const
 {
@@ -3797,12 +3863,17 @@ template <typename PointT>
     // Use a set for O(1) lookup instead of O(n) linear search in the loop
     std::set<std::pair<size_t, size_t>> allMirroredSet;
 
-    // Every local point is mirrored across the always-mirrored faces (SetAlwaysMirroredFaces) before the search starts. It
-    // needs those images whatever its search sphere, and with a generator plane the sphere need not reach those faces.
+    // Every local point needs its mirrors across the always-mirrored faces (SetAlwaysMirroredFaces) whatever its search
+    // sphere, and with a generator plane the sphere need not reach those faces. BuildLocalDelaunay normally inserted them
+    // together with the local points: record them so the search does not mirror them again, or insert them now if not.
     if(not this->alwaysMirroredFaces_.empty())
     {
+        const bool insertNow = not this->alwaysMirroredInDelaunay_;
         std::vector<PointT> mirrors;
-        mirrors.reserve(this->alwaysMirroredFaces_.size() * this->indicesInAllMyPoints.size());
+        if(insertNow)
+        {
+            mirrors.reserve(this->alwaysMirroredFaces_.size() * this->indicesInAllMyPoints.size());
+        }
         for(const size_t &faceIdx : this->alwaysMirroredFaces_)
         {
             if(faceIdx >= box.size())
@@ -3815,15 +3886,21 @@ template <typename PointT>
             for(const std::pair<size_t, size_t> &indices : this->indicesInAllMyPoints)
             {
                 allMirroredSet.insert(std::make_pair(faceIdx, indices.first));
-                mirrors.push_back(MirrorPoint(box[faceIdx], this->del_.points_[indices.first]));
+                if(insertNow)
+                {
+                    mirrors.push_back(MirrorPoint(box[faceIdx], this->del_.points_[indices.first]));
+                }
             }
         }
-        this->BuildExtraTracked(mirrors);
-        this->R_.resize(this->del_.tetras_.size(), RADIUS_UNINITIALIZED);
-        ContainerOps::conditional_shrink(this->R_);
-        this->tetra_centers_.resize(this->R_.size());
-        ContainerOps::conditional_shrink(this->tetra_centers_);
-        this->bigtet_ = SetPointTetras();
+        if(insertNow)
+        {
+            this->BuildExtraTracked(mirrors);
+            this->R_.resize(this->del_.tetras_.size(), RADIUS_UNINITIALIZED);
+            ContainerOps::conditional_shrink(this->R_);
+            this->tetra_centers_.resize(this->R_.size());
+            ContainerOps::conditional_shrink(this->tetra_centers_);
+            this->bigtet_ = SetPointTetras();
+        }
     }
 
     size_t iterations = 0;
@@ -4337,7 +4414,7 @@ void Voronoi3D<PointT>::BuildPartially(const std::vector<PointT> &allPoints, con
         // order = HilbertOrder3D(activePoints);
         
         // initial build for the points
-        this->del_.Build(activePoints, bounding_box.second, bounding_box.first, order);    
+        this->BuildLocalDelaunay(activePoints, bounding_box, order);
     }        
     // updates the radiuses array of the tetrahedra, as well as the lists for each point what tetras it belongs to
     this->R_.resize(this->del_.tetras_.size());
@@ -5173,6 +5250,7 @@ Voronoi3D<PointT>::Voronoi3D(Voronoi3D<PointT> const &other) : ll_(other.ll_), u
                                                 periodic_(other.periodic_), periodicImageTranslation_(other.periodicImageTranslation_),
                                                 hasGeneratorPlane_(other.hasGeneratorPlane_), generatorPlaneNormal_(other.generatorPlaneNormal_),
                                                 generatorPlaneOffset_(other.generatorPlaneOffset_), alwaysMirroredFaces_(other.alwaysMirroredFaces_),
+                                                alwaysMirroredInDelaunay_(other.alwaysMirroredInDelaunay_),
                                                 #ifdef MADVORO_WITH_MPI
                                                     pointsManager(other.pointsManager->clone()), indexingToSave(other.indexingToSave),
                                                     rangeFinder(other.rangeFinder), radiuses(other.radiuses), allMyPoints(other.allMyPoints), allPointsWeights(other.allPointsWeights),

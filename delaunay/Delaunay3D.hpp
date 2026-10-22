@@ -196,6 +196,19 @@ public:
    */ 
   void Build(vector<PointT> const& points, PointT const& maxv, PointT const& minv, std::vector<size_t> &order);
 
+  /*! \brief Build triangulation of points and extra points in one pass. The extra points are stored after the bounding
+    tetrahedron, as BuildExtra stores them, but they are inserted together with the points, in the given order. This lets
+    a caller interleave each point with points that depend on it (e.g. its mirror images), which keeps every insertion
+    local where inserting them afterwards would re-triangulate large regions.
+    \param points Mesh generating points
+    \param extras Extra points
+    \param maxv Bounding point (must bound the extra points too)
+    \param minv Bounding point
+    \param order Insertion order: indices 0..N-1 are points, N..N+M-1 are extras; every index exactly once
+   */
+  void BuildWithExtras(vector<PointT> const& points, vector<PointT> const& extras, PointT const& maxv, PointT const& minv,
+    std::vector<size_t> const& order);
+
   /*! \brief Add new points and rebuild
     \param points New points
    */
@@ -220,6 +233,8 @@ public:
   //! \brief Drops spare capacity of every container while keeping the mesh valid.
   void ShrinkToFit(void);
 private:
+  // Shared start of Build and BuildWithExtras: stores the points and the bounding tetrahedron
+  void InitializeBuild(vector<PointT> const& points, PointT const& maxv, PointT const& minv, std::size_t extraCount);
   void InsertPoint(std::size_t index);
   std::size_t Walk(std::size_t point, std::size_t first_guess);
   void flip14(std::size_t point,std::size_t tetra);
@@ -733,11 +748,52 @@ void Delaunay3D<PointT>::Build(vector<PointT> const& points, PointT const& maxv,
     std::vector<size_t>& order)
 {
     LatticePredicateScope predicateScope(points);
+    InitializeBuild(points, maxv, minv, 0);
+    if(order.empty()) {
+        order = HilbertOrder3D(points);
+    }
+    if(predicateScope.active())
+        ShuffleDegenerateInsertionOrder(order);
+    for(std::size_t i = 0; i < Norg_; ++i) {
+        InsertPoint(order[i]);
+    }
+}
+
+template <typename PointT>
+void Delaunay3D<PointT>::BuildWithExtras(vector<PointT> const& points, vector<PointT> const& extras, PointT const& maxv, PointT const& minv,
+    std::vector<size_t> const& order)
+{
+    if(order.size() != points.size() + extras.size())
+    {
+        MadVoro::Exception::MadVoroException eo("Delaunay3D::BuildWithExtras: the order must list every point once");
+        eo.addEntry("order size", order.size());
+        eo.addEntry("points", points.size());
+        eo.addEntry("extras", extras.size());
+        throw eo;
+    }
+    std::vector<PointT> predicatePoints(points);
+    predicatePoints.insert(predicatePoints.end(), extras.begin(), extras.end());
+    LatticePredicateScope predicateScope(predicatePoints);
+    InitializeBuild(points, maxv, minv, extras.size());
+    std::size_t const Norg = Norg_;
+    // Extras go after the four bounding-tetrahedron vertices, where BuildExtra puts them
+    points_.insert(points_.end(), extras.begin(), extras.end());
+    std::vector<size_t> insertion(order);
+    if(predicateScope.active())
+        ShuffleDegenerateInsertionOrder(insertion);
+    for(std::size_t const index : insertion) {
+        InsertPoint(index < Norg ? index : index + 4);
+    }
+}
+
+template <typename PointT>
+void Delaunay3D<PointT>::InitializeBuild(vector<PointT> const& points, PointT const& maxv, PointT const& minv, std::size_t extraCount)
+{
     empty_tetras_.clear();
     std::size_t Norg = points.size();
     Norg_ = Norg;
     points_.clear();
-    points_.reserve(Norg + static_cast<std::size_t>(std::pow(Norg, 0.6666) * 14));
+    points_.reserve(Norg + extraCount + static_cast<std::size_t>(std::pow(Norg + extraCount, 0.6666) * 14));
     points_.assign(points.begin(), points.end());
     // Create bounding tetrahedron: equilateral-triangle base at z_base, apex above
     double const cx = 0.5 * (minv.x + maxv.x);
@@ -776,14 +832,6 @@ void Delaunay3D<PointT>::Build(vector<PointT> const& points, PointT const& maxv,
     last_checked_ = 0;
 
     assert(to_check_.empty());
-    if(order.empty()) {
-        order = HilbertOrder3D(points);
-    }
-    if(predicateScope.active())
-        ShuffleDegenerateInsertionOrder(order);
-    for(std::size_t i = 0; i < Norg; ++i) {
-        InsertPoint(order[i]);
-    }
 }
 
 template <typename PointT>
