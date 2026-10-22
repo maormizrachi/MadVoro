@@ -2504,11 +2504,22 @@ void Voronoi3D<PointT>::MockMesh(void)
     _prof("MirrorsExchange", std::chrono::duration<double>(_t1 - _t0).count());
     _t0 = std::chrono::high_resolution_clock::now();
 #endif
+    // A mirror comes once for each old cell it bordered that moved here (possibly from several
+    // ranks): add each once (the Delaunay cannot take a point twice)
+    std::set<std::array<typename PointT::coord_type, 3>> addedMirrors;
     for(const auto &[_senderRank, incomingMirrors] : _mirrorsResult)
     {
-        if(this->Norg_ > 0 && !incomingMirrors.empty())
+        std::vector<PointT> newMirrors;
+        for(const PointT &mirror : incomingMirrors)
         {
-            this->del_.BuildExtra(incomingMirrors);
+            if(addedMirrors.insert({mirror.x, mirror.y, mirror.z}).second)
+            {
+                newMirrors.push_back(mirror);
+            }
+        }
+        if(this->Norg_ > 0 && !newMirrors.empty())
+        {
+            this->del_.BuildExtra(newMirrors);
         }
     }
 #ifdef TIMING
