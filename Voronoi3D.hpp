@@ -2130,7 +2130,14 @@ void Voronoi3D<PointT>::ExchangeGhostVolumes(void)
 {
     const std::vector<rank_t> &correspondents = this->GetDuplicatedProcs();
     const std::vector<std::vector<size_t>> &indices = this->GetDuplicatedPoints();
-    std::vector<std::vector<double>> exchange = MPI_exchange_data_indexed(correspondents, this->volume_, indices);
+    // The records list the points sent by their indices among all the rank's points, which
+    // in a partial build are not the cells' indices (and a point not built has no volume)
+    std::vector<double> allVolumes(this->GetAllPointsNo(), 0.0);
+    for(size_t k = 0; k < this->Norg_; ++k)
+    {
+        allVolumes[this->indicesInAllMyPoints.at(k)] = this->volume_[k];
+    }
+    std::vector<std::vector<double>> exchange = MPI_exchange_data_indexed(correspondents, allVolumes, indices);
     const std::vector<std::vector<size_t>> &ghost_indices = this->GetGhostIndeces();
     this->volume_.resize(this->GetTotalPointNumber(), 0.0);
     for(size_t i = 0; i < correspondents.size(); ++i)
