@@ -23,7 +23,14 @@
 // (with subdomains, from them, with the ghosts the old mesh tells it): a rebalance to
 // uneven weights, a switch back to the load balance before it, then a build on moved
 // points, each compared with the same steps on a mesh built as one domain.
+// The comparison also holds in a periodic box (all axes, or x only) and for partial
+// builds (a scattered third of the points, also in a periodic box): there the ghosts
+// include the rank's points that are not built and periodic images, and an image's data
+// comes translated. Building again with 4 subdomains must give the same result bit for
+// bit, and when only some ranks ask for subdomains every rank builds as one domain.
 #include <algorithm>
+#include <array>
+#include <cstdint>
 #include <cmath>
 #include <cstddef>
 #include <fstream>
@@ -122,6 +129,42 @@ void BuildTwice(VoronoiGrid &grid, const std::vector<Vector3D> &points, const st
     grid.BuildParallel(Moved(mine, kind));
 }
 
+// The box's boundaries and which points are built
+struct Setup
+{
+    std::string name;
+    std::array<bool, 3> periodic;
+    bool partial;
+};
+
+// A scattered third of the points, by position
+std::vector<std::size_t> InScatteredThird(const std::vector<Vector3D> &points)
+{
+    std::vector<std::size_t> active;
+    for(std::size_t i = 0; i < points.size(); ++i)
+    {
+        const std::uint64_t qx = static_cast<std::uint64_t>(points[i].x * 1048576.0);
+        const std::uint64_t qy = static_cast<std::uint64_t>(points[i].y * 1048576.0);
+        const std::uint64_t qz = static_cast<std::uint64_t>(points[i].z * 1048576.0);
+        if(((qx * 73856093ULL) ^ (qy * 19349663ULL) ^ (qz * 83492791ULL)) % 3 == 0)
+            active.push_back(i);
+    }
+    return active;
+}
+
+void BuildTwice(VoronoiGrid &grid, const std::vector<Vector3D> &points, const std::string &kind, const Setup &setup)
+{
+    grid.SetPeriodicBoundaries(setup.periodic[0], setup.periodic[1], setup.periodic[2]);
+    if(not setup.partial)
+    {
+        BuildTwice(grid, points, kind);
+        return;
+    }
+    grid.BuildPartiallyParallel(points, InScatteredThird(points));
+    const std::vector<Vector3D> moved = Moved(grid.getAllPoints(), kind);
+    grid.BuildPartiallyParallel(moved, InScatteredThird(moved));
+}
+
 // Uneven weights by position: the corner near the origin is 20 times heavier
 std::vector<double> UnevenWeights(const std::vector<Vector3D> &points)
 {
@@ -195,21 +238,23 @@ void CheckGhosts(VoronoiGrid &grid, Comparison &result)
     std::set<std::size_t> recorded;
     for(const std::vector<std::size_t> &indices : grid.GetGhostIndeces())
         recorded.insert(indices.begin(), indices.end());
+    // (the rank's own points among the ghosts, built or not, need no exchange)
+    const auto &local = grid.GetIndicesInAllPoints();
     for(std::size_t c = 0; c < cells; ++c)
     {
         for(std::size_t face : grid.GetCellFaces(c))
         {
             const auto &pair = grid.GetFaceNeighbors(face);
             const std::size_t other = (pair.first == c) ? pair.second : pair.first;
-            if(other >= cells and not grid.IsPointOutsideBox(other) and recorded.count(other) == 0)
+            if(other >= cells and not grid.IsPointOutsideBox(other) and recorded.count(other) == 0 and local.find(other) == local.end())
                 result.unrecordedGhosts++;
         }
     }
-    // each rank sends its points' positions; they must land on the ghosts at those positions
+    // each rank sends its points' positions (the records index all its points, which in a
+    // partial build are not only its cells); they must land on the ghosts at those positions
     std::vector<double> coordinates;
-    for(std::size_t c = 0; c < cells; ++c)
+    for(const Vector3D &p : grid.getAllPoints())
     {
-        const Vector3D &p = grid.GetMeshPoint(c);
         coordinates.insert(coordinates.end(), {p.x, p.y, p.z});
     }
     const std::vector<std::vector<double>> received =
@@ -224,8 +269,10 @@ void CheckGhosts(VoronoiGrid &grid, Comparison &result)
         }
         for(std::size_t j = 0; j < ghosts[i].size(); ++j)
         {
+            // (a periodic image is its point moved by a period)
             const Vector3D &p = grid.GetMeshPoint(ghosts[i][j]);
-            if(received[i][3 * j] != p.x or received[i][3 * j + 1] != p.y or received[i][3 * j + 2] != p.z)
+            const Vector3D &t = grid.GetPeriodicImageTranslation(ghosts[i][j]);
+            if(received[i][3 * j] + t.x != p.x or received[i][3 * j + 1] + t.y != p.y or received[i][3 * j + 2] + t.z != p.z)
                 result.wrongExchangedData++;
         }
     }
@@ -280,9 +327,11 @@ Comparison Compare(VoronoiGrid &subdomains, VoronoiGrid &reference)
             const auto it = referenceGhost.find(KeyOf(subdomains.GetMeshPoint(g)));
             if(it == referenceGhost.end())
                 continue;
+            // (a point its rank does not build, in a partial build, has no cell: volume 0)
             const auto &[volume, CM] = it->second;
-            result.maxGhostVolumeError = std::max(result.maxGhostVolumeError, std::abs(subdomains.GetVolume(g) - volume) / volume);
-            result.maxGhostCMError = std::max(result.maxGhostCMError, Distance(subdomains.GetCellCM(g), CM) / std::cbrt(volume));
+            const double scale = (volume > 0) ? volume : 1.0;
+            result.maxGhostVolumeError = std::max(result.maxGhostVolumeError, std::abs(subdomains.GetVolume(g) - volume) / scale);
+            result.maxGhostCMError = std::max(result.maxGhostCMError, Distance(subdomains.GetCellCM(g), CM) / std::cbrt(scale));
         }
     }
     CheckGhosts(subdomains, result);
@@ -453,10 +502,14 @@ int main()
             c.maxCMError = GlobalMax(local.maxCMError);
             c.maxGhostVolumeError = GlobalMax(local.maxGhostVolumeError);
             c.maxGhostCMError = GlobalMax(local.maxGhostCMError);
-            double volume = 0;
+            double volume = 0, oneDomainVolume = 0;
             for(std::size_t cell = 0; cell < grid.GetPointNo(); ++cell)
                 volume += grid.GetVolume(cell);
-            const double totalVolumeError = std::abs(MadVoro::regression_tests::ReduceGlobalVolume(volume) - 1.0);
+            for(std::size_t cell = 0; cell < oneDomain.GetPointNo(); ++cell)
+                oneDomainVolume += oneDomain.GetVolume(cell);
+            // (the whole box in a full build)
+            oneDomainVolume = MadVoro::regression_tests::ReduceGlobalVolume(oneDomainVolume);
+            const double totalVolumeError = std::abs(MadVoro::regression_tests::ReduceGlobalVolume(volume) - oneDomainVolume) / oneDomainVolume;
             const bool ok = c.ownershipMismatches == 0 && c.neighborMismatches == 0 && c.unlistedFaces == 0 && c.unrecordedGhosts == 0 &&
                             c.wrongExchangedData == 0 && c.maxVolumeError < MOMENTS_TOLERANCE && c.maxCMError < MOMENTS_TOLERANCE &&
                             c.maxGhostVolumeError < MOMENTS_TOLERANCE && c.maxGhostCMError < MOMENTS_TOLERANCE &&
@@ -595,6 +648,39 @@ int main()
                     else
                         compareWith(grid, oneDomain, at + names[i]);
                 }
+            }
+        }
+
+        // Periodic boxes and partial builds
+        for(const Setup &setup : {Setup{"periodic", {true, true, true}, false}, Setup{"periodic_x", {true, false, false}, false},
+                                  Setup{"partial", {false, false, false}, true}, Setup{"partial_periodic", {true, true, true}, true}})
+        {
+            VoronoiGrid oneDomain(Vector3D(0, 0, 0), Vector3D(1, 1, 1));
+            BuildTwice(oneDomain, points, kind, setup);
+            Comparison oneDomainGhosts;
+            CheckGhosts(oneDomain, oneDomainGhosts);
+            if(GlobalSum(oneDomainGhosts.unrecordedGhosts + oneDomainGhosts.wrongExchangedData) != 0 and rank == 0)
+                std::cout << kind << " " << setup.name << ": the build as one domain fails the ghost checks too" << std::endl;
+            for(std::size_t count : {1, 4, 7})
+            {
+                VoronoiGrid grid(Vector3D(0, 0, 0), Vector3D(1, 1, 1));
+                grid.SetThreadSubdomains(count);
+                BuildTwice(grid, points, kind, setup);
+                compareWith(grid, oneDomain, setup.name + "_subdomains=" + std::to_string(count));
+                if(count == 4)
+                {
+                    VoronoiGrid again(Vector3D(0, 0, 0), Vector3D(1, 1, 1));
+                    again.SetThreadSubdomains(count);
+                    BuildTwice(again, points, kind, setup);
+                    compareExactly(again, grid, setup.name + "_subdomains=4_repeated", true);
+                }
+            }
+            if(worldSize > 1)
+            {
+                VoronoiGrid grid(Vector3D(0, 0, 0), Vector3D(1, 1, 1));
+                grid.SetThreadSubdomains((rank % 2 == 1) ? 4 : 0);
+                BuildTwice(grid, points, kind, setup);
+                compareExactly(grid, oneDomain, setup.name + "_mixed_requests_vs_one_domain", true);
             }
         }
     }

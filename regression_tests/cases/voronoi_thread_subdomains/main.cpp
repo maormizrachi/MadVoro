@@ -11,7 +11,14 @@
 // points, so its slivers differ from those of a build as one domain: faces against
 // mirrors are compared above SLIVER_AREA, and volumes and centroids to MOMENTS_TOLERANCE,
 // orders of magnitude below the error of a missing neighbor.
+// The same comparison holds in a periodic box (all axes, or x only) and for partial
+// builds (a scattered third of the points, also in a periodic box), where a subdomain
+// adds its ghosts in another order than one domain does, so one subdomain is compared
+// within the tolerances too; there, building again with 4 subdomains must give the same
+// result bit for bit.
 #include <algorithm>
+#include <array>
+#include <cstdint>
 #include <cmath>
 #include <cstddef>
 #include <fstream>
@@ -89,10 +96,48 @@ std::vector<Vector3D> Moved(const std::vector<Vector3D> &points, const std::stri
     return moved;
 }
 
-void BuildTwice(VoronoiGrid &grid, const std::vector<Vector3D> &points, const std::string &kind)
+// The box's boundaries and which points are built
+struct Setup
 {
-    MadVoro::regression_tests::BuildVoronoiMesh(grid, points);
-    MadVoro::regression_tests::BuildVoronoiMesh(grid, Moved(points, kind));
+    std::string name;
+    std::array<bool, 3> periodic;
+    bool partial;
+};
+
+// A scattered third of the points, by position
+bool InScatteredThird(const Vector3D &point)
+{
+    const std::uint64_t qx = static_cast<std::uint64_t>(point.x * 1048576.0);
+    const std::uint64_t qy = static_cast<std::uint64_t>(point.y * 1048576.0);
+    const std::uint64_t qz = static_cast<std::uint64_t>(point.z * 1048576.0);
+    return ((qx * 73856093ULL) ^ (qy * 19349663ULL) ^ (qz * 83492791ULL)) % 3 == 0;
+}
+
+void Build(VoronoiGrid &grid, const std::vector<Vector3D> &points, const std::vector<std::size_t> &active, const Setup &setup)
+{
+    if(not setup.partial)
+    {
+        MadVoro::regression_tests::BuildVoronoiMesh(grid, points);
+        return;
+    }
+#ifdef MADVORO_WITH_MPI
+    grid.BuildPartiallyParallel(points, active);
+#else
+    grid.BuildPartially(points, active);
+#endif
+}
+
+void BuildTwice(VoronoiGrid &grid, const std::vector<Vector3D> &points, const std::string &kind, const Setup &setup)
+{
+    grid.SetPeriodicBoundaries(setup.periodic[0], setup.periodic[1], setup.periodic[2]);
+    std::vector<std::size_t> active;
+    for(std::size_t i = 0; i < points.size(); ++i)
+    {
+        if(InScatteredThird(points[i]))
+            active.push_back(i);
+    }
+    Build(grid, points, active, setup);
+    Build(grid, Moved(points, kind), active, setup);
 }
 
 // Differences between two builds that must be the same bit for bit
@@ -176,7 +221,7 @@ Comparison Compare(const VoronoiGrid &subdomains, const VoronoiGrid &reference)
         result.neighborMismatches = cells + 1;
         return result;
     }
-    double totalVolume = 0;
+    double totalVolume = 0, referenceVolume = 0;
     for(std::size_t c = 0; c < cells; ++c)
     {
         const double width = std::cbrt(reference.GetVolume(c));
@@ -185,9 +230,11 @@ Comparison Compare(const VoronoiGrid &subdomains, const VoronoiGrid &reference)
                                          std::abs(subdomains.GetVolume(c) - reference.GetVolume(c)) / reference.GetVolume(c));
         result.maxCMError = std::max(result.maxCMError, Distance(subdomains.GetCellCM(c), reference.GetCellCM(c)) / width);
         totalVolume += subdomains.GetVolume(c);
+        referenceVolume += reference.GetVolume(c);
     }
-    result.totalVolumeError = MadVoro::regression_tests::ReduceGlobalVolume(totalVolume);
-    result.totalVolumeError = std::abs(result.totalVolumeError - 1.0);
+    // (the whole box in a full build)
+    referenceVolume = MadVoro::regression_tests::ReduceGlobalVolume(referenceVolume);
+    result.totalVolumeError = std::abs(MadVoro::regression_tests::ReduceGlobalVolume(totalVolume) - referenceVolume) / referenceVolume;
     for(std::size_t f = 0; f < subdomains.GetTotalFacesNumber(); ++f)
     {
         const auto &pair = subdomains.GetFaceNeighbors(f);
@@ -224,43 +271,69 @@ int main()
     bool pass = (worldSize == 1);
     if(rank == 0 && worldSize != 1)
         std::cout << "voronoi_thread_subdomains runs on one rank" << std::endl;
+    const std::vector<Setup> setups = {{"box", {false, false, false}, false},
+                                       {"periodic", {true, true, true}, false},
+                                       {"periodic_x", {true, false, false}, false},
+                                       {"partial", {false, false, false}, true},
+                                       {"partial_periodic", {true, true, true}, true}};
+    for(const Setup &setup : setups)
     for(const std::string kind : {"uniform", "lattice"})
     {
+        // (the box keeps the names of its metrics)
+        const std::string name = (setup.name == "box") ? kind : setup.name + "_" + kind;
         const std::vector<Vector3D> points = MakePoints(kind, numPoints, rank);
         VoronoiGrid reference(Vector3D(0, 0, 0), Vector3D(1, 1, 1));
-        BuildTwice(reference, points, kind);
+        BuildTwice(reference, points, kind, setup);
 
-        VoronoiGrid one(Vector3D(0, 0, 0), Vector3D(1, 1, 1));
-        one.SetThreadSubdomains(1);
-        BuildTwice(one, points, kind);
-        const std::size_t exactDifferences = CountExactDifferences(one, reference);
-        pass = pass && (exactDifferences == 0);
-        if(rank == 0)
+        if(setup.name == "box")
         {
-            std::cout << kind << " subdomains=1: differences=" << exactDifferences << std::endl;
-            metrics << kind << "_1_differences " << exactDifferences << "\n";
+            VoronoiGrid one(Vector3D(0, 0, 0), Vector3D(1, 1, 1));
+            one.SetThreadSubdomains(1);
+            BuildTwice(one, points, kind, setup);
+            const std::size_t exactDifferences = CountExactDifferences(one, reference);
+            pass = pass && (exactDifferences == 0);
+            if(rank == 0)
+            {
+                std::cout << name << " subdomains=1: differences=" << exactDifferences << std::endl;
+                metrics << name << "_1_differences " << exactDifferences << "\n";
+            }
         }
 
-        for(std::size_t count : {2, 4, 8})
+        const std::vector<std::size_t> counts = (setup.name == "box") ? std::vector<std::size_t>{2, 4, 8} : std::vector<std::size_t>{1, 2, 4, 8};
+        for(std::size_t count : counts)
         {
             VoronoiGrid grid(Vector3D(0, 0, 0), Vector3D(1, 1, 1));
             grid.SetThreadSubdomains(count);
-            BuildTwice(grid, points, kind);
+            BuildTwice(grid, points, kind, setup);
             const Comparison c = Compare(grid, reference);
             const bool ok = c.neighborMismatches == 0 && c.unlistedFaces == 0 && c.maxVolumeError < MOMENTS_TOLERANCE &&
                             c.maxCMError < MOMENTS_TOLERANCE && c.totalVolumeError < MOMENTS_TOLERANCE;
             pass = pass && ok;
             if(rank == 0)
             {
-                std::cout << kind << " subdomains=" << count << ": neighbor_mismatches=" << c.neighborMismatches
+                std::cout << name << " subdomains=" << count << ": neighbor_mismatches=" << c.neighborMismatches
                           << " unlisted_faces=" << c.unlistedFaces << " max_volume_error=" << c.maxVolumeError
                           << " max_cm_error=" << c.maxCMError << " total_volume_error=" << c.totalVolumeError
                           << (ok ? "" : " FAIL") << std::endl;
-                metrics << kind << "_" << count << "_neighbor_mismatches " << c.neighborMismatches << "\n"
-                        << kind << "_" << count << "_unlisted_faces " << c.unlistedFaces << "\n"
-                        << kind << "_" << count << "_max_volume_error " << c.maxVolumeError << "\n"
-                        << kind << "_" << count << "_max_cm_error " << c.maxCMError << "\n"
-                        << kind << "_" << count << "_total_volume_error " << c.totalVolumeError << "\n";
+                metrics << name << "_" << count << "_neighbor_mismatches " << c.neighborMismatches << "\n"
+                        << name << "_" << count << "_unlisted_faces " << c.unlistedFaces << "\n"
+                        << name << "_" << count << "_max_volume_error " << c.maxVolumeError << "\n"
+                        << name << "_" << count << "_max_cm_error " << c.maxCMError << "\n"
+                        << name << "_" << count << "_total_volume_error " << c.totalVolumeError << "\n";
+            }
+            if(count == 4 and setup.name != "box")
+            {
+                VoronoiGrid again(Vector3D(0, 0, 0), Vector3D(1, 1, 1));
+                again.SetThreadSubdomains(count);
+                BuildTwice(again, points, kind, setup);
+                const std::size_t repeatedDifferences = CountExactDifferences(again, grid);
+                pass = pass && (repeatedDifferences == 0);
+                if(rank == 0)
+                {
+                    std::cout << name << " subdomains=4_repeated: differences=" << repeatedDifferences
+                              << (repeatedDifferences == 0 ? "" : " FAIL") << std::endl;
+                    metrics << name << "_4_repeated_differences " << repeatedDifferences << "\n";
+                }
             }
         }
     }

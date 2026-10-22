@@ -18,6 +18,7 @@
 #include "../types.hpp"
 #include "../exception/MadVoroException.hpp"
 #include "../geometry/HostGeometryExecutor.hpp"
+#include "../range/RangeQueryData.h"
 
 namespace MadVoro
 {
@@ -48,8 +49,13 @@ struct SubdomainMeshes
 template <typename PointT>
 struct SubdomainMerge
 {
-    //! The rank's points, the four bounding points, the points other ranks sent, then the mirror ghosts of every subdomain
+    //! The built points, the four bounding points, the points other ranks sent, the ghosts
+    //! that are copies of the rank's points (rankPointGhosts), then the mirror ghosts of
+    //! every subdomain
     std::vector<PointT> points;
+    //! The all-points index of each ghost that is a copy of one of the rank's points: a
+    //! point not built (in a partial build), or a periodic image of a point
+    std::vector<std::size_t> rankPointGhosts;
     //! The faces of each of the rank's points
     std::vector<face_vec> cellFaces;
     //! The two points of each face
@@ -69,9 +75,11 @@ struct SubdomainMerge
 /*! \brief Merges the tessellations of thread subdomains.
     Each subdomain is a partial build of the rank's points followed by the points other
     ranks sent (the all-points indices of these follow the rank's points): its own
-    points are some of the rank's points, and its ghosts are other points of the rank
-    (the points of other subdomains), points other ranks sent, or mirror ghosts of its
-    own points. A face between cells of two subdomains is built by both; the copy of the
+    points are some of the built points, and its ghosts are other points of the rank
+    (the points of other subdomains, or points not built), periodic images of the rank's
+    points, points other ranks sent, or mirror ghosts of its own points. Ghosts that are
+    copies of the rank's points (not built, or images) are placed once each, ordered by
+    point and image, after the points other ranks sent. A face between cells of two subdomains is built by both; the copy of the
     first subdomain that built it is kept, and it is listed by both cells. Each cell's
     volume and centroid are those of the subdomain that owns it.
     The subdomains are merged in parallel (HostParallelFor), with the result of merging
@@ -79,14 +87,18 @@ struct SubdomainMerge
     prefix sums place every subdomain's faces, vertices and mirror ghosts after those of
     the subdomains before it, and each then writes its part.
     \param subdomains The subdomains, in order
-    \param points The rank's points (`pointsNum` of them; together, the subdomains own
+    \param points The built points (`pointsNum` of them; together, the subdomains own
            each of them once), four places for the bounding points, then the points
            other ranks sent
+    \param mergedIndexOf Each point's index in `points` by its all-points index (the
+           rank's `rankPointsNum` points, then the points other ranks sent), INVALID for
+           a point of the rank that is not built
     \param storage Arrays whose memory the result reuses (e.g. the last merge's); their
            contents are discarded */
 template <typename PointT>
 SubdomainMerge<PointT> MergeSubdomains(const std::vector<const Voronoi3D<PointT> *> &subdomains, const std::vector<PointT> &points,
-                                       std::size_t pointsNum, SubdomainMerge<PointT> storage = SubdomainMerge<PointT>())
+                                       std::size_t pointsNum, const std::vector<std::size_t> &mergedIndexOf, std::size_t rankPointsNum,
+                                       SubdomainMerge<PointT> storage = SubdomainMerge<PointT>())
 {
     constexpr std::size_t INVALID = std::numeric_limits<std::size_t>::max();
     constexpr std::size_t BOUNDING_POINTS = 4;
@@ -101,6 +113,7 @@ SubdomainMerge<PointT> MergeSubdomains(const std::vector<const Voronoi3D<PointT>
     merged.vertices.clear();
     merged.volume.clear();
     merged.CM.clear();
+    merged.rankPointGhosts.clear();
     merged.points.assign(points.begin(), points.end());
     if(not subdomains.empty())
     {
@@ -109,11 +122,14 @@ SubdomainMerge<PointT> MergeSubdomains(const std::vector<const Voronoi3D<PointT>
         std::copy(firstPoints.begin() + first.GetPointNo(), firstPoints.begin() + first.GetPointNo() + BOUNDING_POINTS,
                   merged.points.begin() + pointsNum);
     }
-    const std::size_t mirrorsBegin = merged.points.size();
+    const std::size_t rankGhostsBegin = merged.points.size();
     merged.cellFaces.resize(pointsNum);
     merged.volume.resize(pointsNum);
-    // a point's index among all the points of a subdomain, in the merged tessellation
-    const auto fromAllPoints = [pointsNum](std::size_t index) { return (index < pointsNum) ? index : index + BOUNDING_POINTS; };
+    // a ghost that is a copy of one of the rank's points, by its all-points index and image
+    const auto rankGhostKey = [](std::size_t index, int imageCode)
+    {
+        return static_cast<std::uint64_t>(index) * NUM_IMAGE_CODES + static_cast<std::uint64_t>(imageCode);
+    };
     // a face between cells of two subdomains, by its (smaller, larger) cell pair
     const auto sharedFaceKey = [pointsNum](std::size_t a, std::size_t b)
     {
@@ -125,6 +141,7 @@ SubdomainMerge<PointT> MergeSubdomains(const std::vector<const Voronoi3D<PointT>
     {
         std::vector<std::size_t> toMerged;   // its points in the merged tessellation (mirrors: INVALID until placed)
         std::vector<std::size_t> mirrors;    // its mirror ghosts, in order
+        std::vector<std::pair<std::uint64_t, std::size_t>> rankGhosts; // its copies of the rank's points: (key, point)
         std::unordered_map<std::uint64_t, std::size_t> sharedFaces; // its first face of each pair of cells of two subdomains
         std::vector<std::size_t> keptIndex;  // each face's index among the faces it keeps (INVALID: a copy)
         std::vector<std::pair<std::size_t, std::size_t>> copyOf; // a copy's (subdomain, face) that is kept
@@ -145,25 +162,35 @@ SubdomainMerge<PointT> MergeSubdomains(const std::vector<const Voronoi3D<PointT>
         const AllPointsMap &indicesInPoints = subdomain.GetIndicesInAllPoints();
         part.toMerged.assign(subPointsNum, INVALID);
         part.mirrors.clear();
+        part.rankGhosts.clear();
         for(std::size_t j = 0; j < ownNum; ++j)
         {
             const auto it = indicesInPoints.find(j);
-            if(it == indicesInPoints.cend())
+            if(it == indicesInPoints.cend() or it->second >= rankPointsNum or mergedIndexOf[it->second] >= pointsNum)
             {
                 part.unknownPoint = true;
                 continue;
             }
-            part.toMerged[j] = fromAllPoints(it->second);
-            if(part.toMerged[j] < pointsNum)
-                cellSubdomain[part.toMerged[j]] = s;
+            part.toMerged[j] = mergedIndexOf[it->second];
+            cellSubdomain[part.toMerged[j]] = s;
         }
         for(std::size_t j = ownNum + BOUNDING_POINTS; j < subPointsNum; ++j)
         {
             const auto it = indicesInPoints.find(j);
-            if(it != indicesInPoints.cend())
-                part.toMerged[j] = fromAllPoints(it->second); // a point of another subdomain, or a point another rank sent
-            else
+            if(it == indicesInPoints.cend())
+            {
                 part.mirrors.push_back(j); // a mirror ghost of one of the subdomain's points
+                continue;
+            }
+            const std::size_t index = it->second;
+            const PointT &translation = subdomain.GetPeriodicImageTranslation(j);
+            const bool image = (ImageCode(translation) != ZERO_IMAGE_CODE);
+            if(index >= mergedIndexOf.size())
+                part.unknownPoint = true;
+            else if(index >= rankPointsNum or (not image and mergedIndexOf[index] != INVALID))
+                part.toMerged[j] = mergedIndexOf[index]; // a point another rank sent, or a point of another subdomain
+            else
+                part.rankGhosts.emplace_back(rankGhostKey(index, ImageCode(translation)), j); // a point not built, or an image
         }
         const std::vector<std::pair<std::size_t, std::size_t>> &faceNeighbors = subdomain.GetAllFaceNeighbors();
         for(std::size_t f = 0; f < faceNeighbors.size(); ++f)
@@ -179,6 +206,32 @@ SubdomainMerge<PointT> MergeSubdomains(const std::vector<const Voronoi3D<PointT>
         if(part.unknownPoint)
             throw MadVoro::Exception::MadVoroException("MergeSubdomains: a subdomain's point is not among the rank's points");
     }
+
+    // The ghosts that are copies of the rank's points, once each, in the order of their keys
+    std::vector<std::uint64_t> rankGhostKeys;
+    for(const Part &part : parts)
+    {
+        for(const auto &[key, j] : part.rankGhosts)
+            rankGhostKeys.push_back(key);
+    }
+    std::sort(rankGhostKeys.begin(), rankGhostKeys.end());
+    rankGhostKeys.erase(std::unique(rankGhostKeys.begin(), rankGhostKeys.end()), rankGhostKeys.end());
+    merged.points.resize(rankGhostsBegin + rankGhostKeys.size());
+    merged.rankPointGhosts.resize(rankGhostKeys.size());
+    for(std::size_t g = 0; g < rankGhostKeys.size(); ++g)
+        merged.rankPointGhosts[g] = static_cast<std::size_t>(rankGhostKeys[g] / NUM_IMAGE_CODES);
+    Geometry::HostParallelFor(count, [&](std::size_t s)
+    {
+        Part &part = parts[s];
+        const std::vector<PointT> &subPoints = subdomains[s]->getMeshPoints();
+        for(const auto &[key, j] : part.rankGhosts)
+        {
+            const std::size_t index = rankGhostsBegin + (std::lower_bound(rankGhostKeys.begin(), rankGhostKeys.end(), key) - rankGhostKeys.begin());
+            part.toMerged[j] = index;
+            merged.points[index] = subPoints[j]; // (the same point in every subdomain that has it)
+        }
+    });
+    const std::size_t mirrorsBegin = merged.points.size();
 
     // 2. The faces each subdomain keeps: a face between cells of two subdomains is kept by
     //    the first subdomain (in order) that built it, as its first face of that pair
