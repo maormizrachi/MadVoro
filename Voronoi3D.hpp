@@ -422,7 +422,7 @@ private:
 
   void ReportUnusedThreadSubdomains(void);
 
-  void BuildFromThreadSubdomains(bool otherRanks);
+  void BuildFromThreadSubdomains(bool otherRanks, const std::vector<PointT> *knownGhosts = nullptr);
 
   bool IsThreadSubdomain(void) const { return this->sharedRangeFinder_ != nullptr; }
 
@@ -2276,10 +2276,38 @@ void Voronoi3D<PointT>::MockMesh(void)
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     const bool periodic = this->HasPeriodicBoundaries();
+    // Every rank rebuilds the same way (the serial rebuild's exchanges are collective)
+    int useSubdomains = (this->threadSubdomainCount_ > 0 and not periodic) ? 1 : 0;
+    MPI_Allreduce(MPI_IN_PLACE, &useSubdomains, 1, MPI_INT, MPI_LAND, MPI_COMM_WORLD);
+    // MADVORO_LB_TIMING=1 prints each phase's max and average over the ranks (collective)
+    static const bool lbTiming = std::getenv("MADVORO_LB_TIMING") != nullptr;
+    auto _prof = [&](const char *label, double localTime)
+    {
+        if(not lbTiming)
+        {
+            return;
+        }
+        struct { double val; int rank; } localIn{localTime, rank}, globalMax;
+        MPI_Allreduce(&localIn, &globalMax, 1, MPI_DOUBLE_INT, MPI_MAXLOC, MPI_COMM_WORLD);
+        double globalSum = 0;
+        MPI_Allreduce(&localTime, &globalSum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        if(rank == 0)
+            std::cout << label << ": max=" << globalMax.val << "s (rank " << globalMax.rank
+                      << "), avg=" << globalSum / size << "s" << std::endl;
+    };
+    auto _t0 = std::chrono::high_resolution_clock::now();
+    auto _t1 = _t0;
+    auto _mark = _t0;
+    auto _phase = [&](const char *label)
+    {
+        _prof(label, std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - _mark).count());
+        _mark = std::chrono::high_resolution_clock::now();
+    };
     
     boost::container::flat_map<size_t, std::pair<rank_t, size_t>> whereNow = GetRemoteIndices(this->self_index_, this->sentprocs_, this->sentpoints_); // previous point -> holder (rank + index)
     assert(whereNow.size() == this->Norg_);
     boost::container::flat_map<size_t, std::pair<rank_t, size_t>> ghostsInfo = GetGhostInfo(this->duplicatedprocs_, this->duplicated_points_, this->Nghost_, whereNow); // previous ghost -> holder (rank + index)
+    _phase("MockMesh: RemoteIndices+GhostInfo");
 
     std::vector<PointT> delaunayPoints = this->del_.points_;
 
@@ -2416,117 +2444,8 @@ void Voronoi3D<PointT>::MockMesh(void)
 
     // mirrorsToSend = std::vector<std::vector<PointT>>(size, allMirrors); // todo: remove
     
-    this->BuildInitialize(new_points.size());
-    std::vector<size_t> order;
-    // A rebalanced rank may own no cells.  It must still initialize the
-    // bounding tetrahedron before participating in ghost reconstruction.
-    std::pair<PointT, PointT> bounding_box =
-        std::make_pair(this->ll_, this->ur_);
-    for(const PointT &point : new_points)
-    {
-        bounding_box.first.x = std::min(bounding_box.first.x, point.x);
-        bounding_box.second.x = std::max(bounding_box.second.x, point.x);
-        bounding_box.first.y = std::min(bounding_box.first.y, point.y);
-        bounding_box.second.y = std::max(bounding_box.second.y, point.y);
-        bounding_box.first.z = std::min(bounding_box.first.z, point.z);
-        bounding_box.second.z = std::max(bounding_box.second.z, point.z);
-    }
-    order = HilbertOrder3D(new_points);
-    this->del_.Build(new_points, bounding_box.second, bounding_box.first, order);
-    if(periodic)
-    {
-        this->periodicImageTranslation_.assign(this->del_.points_.size(), PointT());
-    }
-    // updates the radiuses array of the tetrahedra, as well as the lists for each point what tetras it belongs to
-    this->R_.resize(this->del_.tetras_.size());
-    ContainerOps::conditional_shrink(this->R_);
-    // std::fill(this->R_.begin(), this->R_.end(), RADIUS_UNINITIALIZED);
-    this->tetra_centers_.resize(this->R_.size());
-    ContainerOps::conditional_shrink(this->tetra_centers_);
-    this->bigtet_ = SetPointTetras();
-
-#ifdef TIMING
-    auto _prof = [&](const char *label, double localTime)
-    {
-        struct { double val; int rank; } localIn{localTime, rank}, globalMax;
-        MPI_Allreduce(&localIn, &globalMax, 1, MPI_DOUBLE_INT, MPI_MAXLOC, MPI_COMM_WORLD);
-        double globalSum = 0;
-        MPI_Allreduce(&localTime, &globalSum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-        if(rank == 0)
-            std::cout << label << ": max=" << globalMax.val << "s (rank " << globalMax.rank
-                      << "), avg=" << globalSum / size << "s" << std::endl;
-    };
-    auto _t0 = std::chrono::high_resolution_clock::now();
-    auto _t1 = _t0;
-#endif
-
-    this->UpdatePointsTree(new_points);
-
-#ifdef TIMING
+    _phase("MockMesh: CollectGhostAsks");
     _t0 = std::chrono::high_resolution_clock::now();
-#endif
-    this->UpdateRadiuses(new_points);
-#ifdef TIMING
-    _t1 = std::chrono::high_resolution_clock::now();
-    _prof("UpdateRadiuses", std::chrono::duration<double>(_t1 - _t0).count());
-    _t0 = std::chrono::high_resolution_clock::now();
-#endif
-    this->UpdateRangeFinder();
-#ifdef TIMING
-    _t1 = std::chrono::high_resolution_clock::now();
-    _prof("UpdateRangeFinder", std::chrono::duration<double>(_t1 - _t0).count());
-    _t0 = std::chrono::high_resolution_clock::now();
-#endif
-    if(periodic)
-    {
-        auto periodicExtrasResult = MPI_Exchange_sparse_by_rank(periodicExtrasToBuild, MPI_COMM_WORLD, MPI_EXCHANGE_SPARSE_TAG + 1);
-#ifdef TIMING
-        _t1 = std::chrono::high_resolution_clock::now();
-        _prof("PeriodicExtrasExchange", std::chrono::duration<double>(_t1 - _t0).count());
-        _t0 = std::chrono::high_resolution_clock::now();
-#endif
-        for(const auto &[_senderRank, incomingExtras] : periodicExtrasResult)
-        {
-            if(this->Norg_ > 0 && !incomingExtras.empty())
-            {
-                this->BuildExtraTracked(incomingExtras);
-            }
-        }
-#ifdef TIMING
-        _t1 = std::chrono::high_resolution_clock::now();
-        _prof("BuildExtraTracked(periodic images)", std::chrono::duration<double>(_t1 - _t0).count());
-        _t0 = std::chrono::high_resolution_clock::now();
-#endif
-    }
-    auto _mirrorsResult = MPI_Exchange_sparse_by_rank(mirrorsToSend, MPI_COMM_WORLD, MPI_EXCHANGE_SPARSE_TAG + 1);
-#ifdef TIMING
-    _t1 = std::chrono::high_resolution_clock::now();
-    _prof("MirrorsExchange", std::chrono::duration<double>(_t1 - _t0).count());
-    _t0 = std::chrono::high_resolution_clock::now();
-#endif
-    // A mirror comes once for each old cell it bordered that moved here (possibly from several
-    // ranks): add each once (the Delaunay cannot take a point twice)
-    std::set<std::array<typename PointT::coord_type, 3>> addedMirrors;
-    for(const auto &[_senderRank, incomingMirrors] : _mirrorsResult)
-    {
-        std::vector<PointT> newMirrors;
-        for(const PointT &mirror : incomingMirrors)
-        {
-            if(addedMirrors.insert({mirror.x, mirror.y, mirror.z}).second)
-            {
-                newMirrors.push_back(mirror);
-            }
-        }
-        if(this->Norg_ > 0 && !newMirrors.empty())
-        {
-            this->del_.BuildExtra(newMirrors);
-        }
-    }
-#ifdef TIMING
-    _t1 = std::chrono::high_resolution_clock::now();
-    _prof("BuildExtra(mirrors)", std::chrono::duration<double>(_t1 - _t0).count());
-    _t0 = std::chrono::high_resolution_clock::now();
-#endif
     for(std::vector<MockMeshGhostAsk> &asksForSender : askToSend)
     {
         if(asksForSender.size() > 1)
@@ -2535,18 +2454,14 @@ void Voronoi3D<PointT>::MockMesh(void)
             asksForSender.erase(std::unique(asksForSender.begin(), asksForSender.end()), asksForSender.end());
         }
     }
-#ifdef TIMING
     _t1 = std::chrono::high_resolution_clock::now();
     _prof("BuildAskToSend", std::chrono::duration<double>(_t1 - _t0).count());
     _t0 = std::chrono::high_resolution_clock::now();
-#endif
     std::vector<std::pair<rank_t, std::vector<MockMeshGhostAsk>>> whatIshouldSend =
         MPI_Exchange_sparse_by_rank(askToSend, MPI_COMM_WORLD, MPI_EXCHANGE_SPARSE_TAG + 2);
-#ifdef TIMING
     _t1 = std::chrono::high_resolution_clock::now();
     _prof("AskToSendExchange", std::chrono::duration<double>(_t1 - _t0).count());
     _t0 = std::chrono::high_resolution_clock::now();
-#endif
     std::vector<std::vector<PointT>> whatIShouldSendToRanks(size);
 
     std::vector<rank_t> newDuplicatedProcs;
@@ -2584,51 +2499,156 @@ void Voronoi3D<PointT>::MockMesh(void)
             }
         }
     }
-#ifdef TIMING
     _t1 = std::chrono::high_resolution_clock::now();
     _prof("BuildSendToRanks", std::chrono::duration<double>(_t1 - _t0).count());
-#endif
 
-    // todo: first build delaunay
-    size_t currentIndex = this->del_.points_.size();
-    std::vector<PointT> buildExtra;
-
-    std::vector<std::vector<size_t>> newNghost(newDuplicatedProcs.size());
-
-#ifdef TIMING
     _t0 = std::chrono::high_resolution_clock::now();
-#endif
     std::vector<std::pair<rank_t, std::vector<PointT>>> receivedByRanks =
         MPI_Exchange_sparse_by_rank(whatIShouldSendToRanks, MPI_COMM_WORLD, MPI_EXCHANGE_SPARSE_TAG + 3);
-#ifdef TIMING
     _t1 = std::chrono::high_resolution_clock::now();
     _prof("FinalPointsExchange", std::chrono::duration<double>(_t1 - _t0).count());
-#endif
-    for(const auto &[_rank, receivedFromRank] : receivedByRanks)
-    {
-        if(receivedFromRank.empty())
-        {
-            continue;
-        }
-        assert(_rank != rank); // not me
-        size_t idx = std::distance(newDuplicatedProcs.begin(), std::find(newDuplicatedProcs.begin(), newDuplicatedProcs.end(), _rank));
-        if(idx == newDuplicatedProcs.size())
-        {
-            MadVoro::Exception::MadVoroException eo("Voronoi3D<PointT>::MockMesh: received from an unexpected rank");
-            eo.addEntry("My rank", rank);
-            eo.addEntry("Received from rank", _rank);
-            throw eo;
-        }
-        assert(idx != newDuplicatedProcs.size());
-        std::vector<size_t> &NghostOfRank = newNghost[idx];
 
-        for(const PointT &point : receivedFromRank)
+    // The ghosts other ranks sent, in the order they arrived: their positions, and in `Nghost`
+    // (by rank, as newDuplicatedProcs) their indices in the mesh, from `firstIndex` on
+    const auto receivedGhosts = [&](size_t firstIndex, std::vector<PointT> &ghosts, std::vector<std::vector<size_t>> &Nghost)
+    {
+        size_t currentIndex = firstIndex;
+        for(const auto &[_rank, receivedFromRank] : receivedByRanks)
         {
-            buildExtra.push_back(point);
-            NghostOfRank.push_back(currentIndex);
-            currentIndex++;
+            if(receivedFromRank.empty())
+            {
+                continue;
+            }
+            assert(_rank != rank); // not me
+            size_t idx = std::distance(newDuplicatedProcs.begin(), std::find(newDuplicatedProcs.begin(), newDuplicatedProcs.end(), _rank));
+            if(idx == newDuplicatedProcs.size())
+            {
+                MadVoro::Exception::MadVoroException eo("Voronoi3D<PointT>::MockMesh: received from an unexpected rank");
+                eo.addEntry("My rank", rank);
+                eo.addEntry("Received from rank", _rank);
+                throw eo;
+            }
+            assert(idx != newDuplicatedProcs.size());
+            std::vector<size_t> &NghostOfRank = Nghost[idx];
+
+            for(const PointT &point : receivedFromRank)
+            {
+                ghosts.push_back(point);
+                NghostOfRank.push_back(currentIndex);
+                currentIndex++;
+            }
+        }
+    };
+
+    if(useSubdomains == 1)
+    {
+        // A build from thread subdomains in which the rank already has every ghost it needs:
+        // the subdomains search only each other and these ghosts (no other rank), which
+        // follow the rank's points and the four bounding points. The ghosts are recorded
+        // first: the build gives them the centroids of their cells through the records.
+        this->BuildInitialize(new_points.size());
+        std::vector<PointT> ghosts;
+        std::vector<std::vector<size_t>> newNghost(newDuplicatedProcs.size());
+        receivedGhosts(this->Norg_ + 4, ghosts, newNghost);
+        this->duplicatedprocs_ = std::move(newDuplicatedProcs);
+        this->duplicated_points_ = std::move(newDuplicatedPoints);
+        this->Nghost_ = std::move(newNghost);
+        this->BuildFromThreadSubdomains(false, &ghosts);
+        this->ExchangeGhostVolumes();
+        _phase("MockMesh: thread subdomains");
+        return;
+    }
+
+    _mark = std::chrono::high_resolution_clock::now();
+    this->BuildInitialize(new_points.size());
+    std::vector<size_t> order;
+    // A rebalanced rank may own no cells.  It must still initialize the
+    // bounding tetrahedron before participating in ghost reconstruction.
+    std::pair<PointT, PointT> bounding_box =
+        std::make_pair(this->ll_, this->ur_);
+    for(const PointT &point : new_points)
+    {
+        bounding_box.first.x = std::min(bounding_box.first.x, point.x);
+        bounding_box.second.x = std::max(bounding_box.second.x, point.x);
+        bounding_box.first.y = std::min(bounding_box.first.y, point.y);
+        bounding_box.second.y = std::max(bounding_box.second.y, point.y);
+        bounding_box.first.z = std::min(bounding_box.first.z, point.z);
+        bounding_box.second.z = std::max(bounding_box.second.z, point.z);
+    }
+    order = HilbertOrder3D(new_points);
+    this->del_.Build(new_points, bounding_box.second, bounding_box.first, order);
+    _phase("MockMesh: HilbertOrder+DelaunayBuild");
+    if(periodic)
+    {
+        this->periodicImageTranslation_.assign(this->del_.points_.size(), PointT());
+    }
+    // updates the radiuses array of the tetrahedra, as well as the lists for each point what tetras it belongs to
+    this->R_.resize(this->del_.tetras_.size());
+    ContainerOps::conditional_shrink(this->R_);
+    // std::fill(this->R_.begin(), this->R_.end(), RADIUS_UNINITIALIZED);
+    this->tetra_centers_.resize(this->R_.size());
+    ContainerOps::conditional_shrink(this->tetra_centers_);
+    this->bigtet_ = SetPointTetras();
+    _phase("MockMesh: SetPointTetras");
+
+    this->UpdatePointsTree(new_points);
+    _phase("MockMesh: UpdatePointsTree");
+
+    _t0 = std::chrono::high_resolution_clock::now();
+    this->UpdateRadiuses(new_points);
+    _t1 = std::chrono::high_resolution_clock::now();
+    _prof("UpdateRadiuses", std::chrono::duration<double>(_t1 - _t0).count());
+    _t0 = std::chrono::high_resolution_clock::now();
+    this->UpdateRangeFinder();
+    _t1 = std::chrono::high_resolution_clock::now();
+    _prof("UpdateRangeFinder", std::chrono::duration<double>(_t1 - _t0).count());
+    _t0 = std::chrono::high_resolution_clock::now();
+    if(periodic)
+    {
+        auto periodicExtrasResult = MPI_Exchange_sparse_by_rank(periodicExtrasToBuild, MPI_COMM_WORLD, MPI_EXCHANGE_SPARSE_TAG + 1);
+        _t1 = std::chrono::high_resolution_clock::now();
+        _prof("PeriodicExtrasExchange", std::chrono::duration<double>(_t1 - _t0).count());
+        _t0 = std::chrono::high_resolution_clock::now();
+        for(const auto &[_senderRank, incomingExtras] : periodicExtrasResult)
+        {
+            if(this->Norg_ > 0 && !incomingExtras.empty())
+            {
+                this->BuildExtraTracked(incomingExtras);
+            }
+        }
+        _t1 = std::chrono::high_resolution_clock::now();
+        _prof("BuildExtraTracked(periodic images)", std::chrono::duration<double>(_t1 - _t0).count());
+        _t0 = std::chrono::high_resolution_clock::now();
+    }
+    auto _mirrorsResult = MPI_Exchange_sparse_by_rank(mirrorsToSend, MPI_COMM_WORLD, MPI_EXCHANGE_SPARSE_TAG + 1);
+    _t1 = std::chrono::high_resolution_clock::now();
+    _prof("MirrorsExchange", std::chrono::duration<double>(_t1 - _t0).count());
+    _t0 = std::chrono::high_resolution_clock::now();
+    // A mirror comes once for each old cell it bordered that moved here (possibly from several
+    // ranks): add each once (the Delaunay cannot take a point twice)
+    std::set<std::array<typename PointT::coord_type, 3>> addedMirrors;
+    for(const auto &[_senderRank, incomingMirrors] : _mirrorsResult)
+    {
+        std::vector<PointT> newMirrors;
+        for(const PointT &mirror : incomingMirrors)
+        {
+            if(addedMirrors.insert({mirror.x, mirror.y, mirror.z}).second)
+            {
+                newMirrors.push_back(mirror);
+            }
+        }
+        if(this->Norg_ > 0 && !newMirrors.empty())
+        {
+            this->del_.BuildExtra(newMirrors);
         }
     }
+    _t1 = std::chrono::high_resolution_clock::now();
+    _prof("BuildExtra(mirrors)", std::chrono::duration<double>(_t1 - _t0).count());
+    _mark = std::chrono::high_resolution_clock::now();
+
+    std::vector<PointT> buildExtra;
+    std::vector<std::vector<size_t>> newNghost(newDuplicatedProcs.size());
+    receivedGhosts(this->del_.points_.size(), buildExtra, newNghost);
 
     if(periodic && !buildExtra.empty())
     {
@@ -2638,12 +2658,14 @@ void Voronoi3D<PointT>::MockMesh(void)
     {
         this->del_.BuildExtra(buildExtra);
     }
+    _phase("MockMesh: BuildExtra(final ghosts)");
     this->R_.resize(this->del_.tetras_.size());
     ContainerOps::conditional_shrink(this->R_);
     std::fill(this->R_.begin(), this->R_.end(), RADIUS_UNINITIALIZED);
     this->tetra_centers_.resize(this->R_.size());
     ContainerOps::conditional_shrink(this->tetra_centers_);
     this->bigtet_ = this->SetPointTetras();
+    _phase("MockMesh: SetPointTetras(final)");
 
     this->duplicatedprocs_ = std::move(newDuplicatedProcs);
     this->duplicated_points_ = std::move(newDuplicatedPoints);
@@ -2659,8 +2681,10 @@ void Voronoi3D<PointT>::MockMesh(void)
         // Create Voronoi
         this->BuildVoronoi(order);
     }
+    _phase("MockMesh: BuildVoronoi");
 
     this->UpdateCMs();
+    _phase("MockMesh: UpdateCMs");
 #ifdef MADVORO_WITH_MPI
     {
         const std::vector<rank_t> &correspondents = this->GetDuplicatedProcs();
@@ -2676,6 +2700,7 @@ void Voronoi3D<PointT>::MockMesh(void)
         }
     }
 #endif // MADVORO_WITH_MPI
+    _phase("MockMesh: VolumeExchange");
 }
 
 template <typename PointT>
@@ -2692,7 +2717,17 @@ void Voronoi3D<PointT>::SetLoadBalancer(std::shared_ptr<LoadBalancer<PointT>> lo
     for(size_t i = 0; i < previousPoints.size(); i++)
         payloads[i] = VoronoiPayload<PointT>(this->radiuses[i], this->all_CM[i]);
 
+    const auto _lbStart = std::chrono::high_resolution_clock::now();
     PointsExchangeResult<PointT, VoronoiPayload<PointT>> exchangeResult = this->pointsManager->update(previousPoints, this->allPointsWeights, payloads, allIndices, false);
+    if(std::getenv("MADVORO_LB_TIMING") != nullptr)
+    {
+        int _rank;
+        MPI_Comm_rank(MPI_COMM_WORLD, &_rank);
+        double _local = std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - _lbStart).count(), _max = 0;
+        MPI_Allreduce(&_local, &_max, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+        if(_rank == 0)
+            std::cout << "SetLoadBalancer: points exchange max=" << _max << "s (" << previousPoints.size() << " points on rank 0 before)" << std::endl;
+    }
 
     this->allMyPoints = std::move(exchangeResult.newPoints);
     this->radiuses.resize(exchangeResult.newPayloads.size());
@@ -4438,6 +4473,9 @@ void Voronoi3D<PointT>::EndSubdomain(void)
  * merged (see MergeSubdomains), and the ghosts the rank received are recorded as in a
  * build as one domain. Expects the build to be prepared up to and including
  * BuildInitialize.
+ * `knownGhosts` are points of other ranks the rank already has, which the subdomains
+ * search from the first round, after the rank's points and the four bounding points
+ * (MockMesh knows every ghost the rank needs, and searches no other rank).
  * The subdomains' work runs in parallel, with Kokkos on host threads (one subdomain
  * after another without Kokkos), and touches only the subdomain's own Voronoi3D and
  * what the rank shares with it read-only; only the rank's own thread talks to other
@@ -4450,7 +4488,7 @@ void Voronoi3D<PointT>::EndSubdomain(void)
  * destroy trees: the rank builds them and releases the last build's here.
 */
 template <typename PointT>
-void Voronoi3D<PointT>::BuildFromThreadSubdomains([[maybe_unused]] bool otherRanks)
+void Voronoi3D<PointT>::BuildFromThreadSubdomains([[maybe_unused]] bool otherRanks, const std::vector<PointT> *knownGhosts)
 {
     const size_t pointsNum = this->Norg_;
     const size_t count = std::min({this->threadSubdomainCount_, pointsNum, SubdomainGrid<PointT>::MAX_SUBDOMAINS});
@@ -4571,6 +4609,10 @@ void Voronoi3D<PointT>::BuildFromThreadSubdomains([[maybe_unused]] bool otherRan
         subdomains[s]->radiuses = this->radiuses; // (copied here, in parallel)
         subdomains[s]->BeginSubdomain(this->allMyPoints, subdomainIndices[s]);
     });
+    if(knownGhosts != nullptr)
+    {
+        addOtherRankPoints(*knownGhosts);
+    }
 
     #ifdef MADVORO_WITH_MPI
         // As BringGhostPointsToBuild does with other ranks

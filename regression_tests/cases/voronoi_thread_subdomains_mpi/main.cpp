@@ -4,8 +4,8 @@
 // and every face between two cells must be listed by both. The ghosts must be recorded
 // for the exchange of cell data between ranks: every point another rank sent that is a
 // neighbor of a cell must be among the ghost indices, the data exchanged through the
-// ghost indices must be that of the right points, and the ghosts' volumes must be those
-// of their cells on the ranks that own them. Each case builds twice: on the points, then
+// ghost indices must be that of the right points, and the ghosts' volumes and centroids
+// must be those of their cells on the ranks that own them. Each case builds twice: on the points, then
 // on slightly moved points.
 // Near a wall a build may leave zero-area sliver faces between a cell and the mirror of
 // another point, and these differ between the two builds (see voronoi_thread_subdomains):
@@ -19,12 +19,17 @@
 // - ranks may ask for different numbers of subdomains;
 // - when some ranks ask for subdomains and others do not, every rank must build as one
 //   domain (the choice is collective), bit for bit.
+// The same holds through load balance switches, which rebuild the mesh with MockMesh
+// (with subdomains, from them, with the ghosts the old mesh tells it): a rebalance to
+// uneven weights, a switch back to the load balance before it, then a build on moved
+// points, each compared with the same steps on a mesh built as one domain.
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <random>
 #include <set>
 #include <string>
@@ -117,6 +122,42 @@ void BuildTwice(VoronoiGrid &grid, const std::vector<Vector3D> &points, const st
     grid.BuildParallel(Moved(mine, kind));
 }
 
+// Uneven weights by position: the corner near the origin is 20 times heavier
+std::vector<double> UnevenWeights(const std::vector<Vector3D> &points)
+{
+    std::vector<double> weights;
+    for(const Vector3D &p : points)
+        weights.push_back((p.x < 0.4 and p.y < 0.5) ? 20.0 : 1.0);
+    return weights;
+}
+
+// The load balance switches, step by step: a rebalance to uneven weights, a switch back to
+// the load balance before it (both rebuild the mesh with MockMesh), then a build on moved
+// points
+constexpr std::size_t SWITCH_STEPS = 3;
+const char *const SWITCH_STEP_NAMES[SWITCH_STEPS] = {"rebalanced", "switched_back", "rebuilt"};
+
+struct LoadBalanceSwitches
+{
+    VoronoiGrid grid{Vector3D(0, 0, 0), Vector3D(1, 1, 1)};
+    std::shared_ptr<LoadBalancer<Vector3D>> before;
+    bool rebalanced = false;
+
+    void Step(std::size_t step, const std::string &kind)
+    {
+        if(step == 0)
+        {
+            this->before = this->grid.GetLoadBalancer()->clone();
+            this->grid.Rebalance(UnevenWeights(this->grid.getAllPoints()));
+            this->rebalanced = this->grid.DidRebalance();
+        }
+        else if(step == 1)
+            this->grid.SetLoadBalancer(this->before);
+        else
+            this->grid.BuildParallel(Moved(this->grid.getAllPoints(), kind));
+    }
+};
+
 // A cell's neighbors over faces that are not negligibly small, by position
 std::set<Key> Neighbors(const VoronoiGrid &grid, std::size_t cell, double width)
 {
@@ -143,6 +184,7 @@ struct Comparison
     double maxVolumeError = 0;
     double maxCMError = 0;
     double maxGhostVolumeError = 0;
+    double maxGhostCMError = 0;
 };
 
 // The ghost bookkeeping of `grid`: the ghosts that are neighbors of cells must be
@@ -226,18 +268,21 @@ Comparison Compare(VoronoiGrid &subdomains, VoronoiGrid &reference)
             result.unlistedFaces += (std::find(faces.begin(), faces.end(), f) == faces.end()) ? 1 : 0;
         }
     }
-    // ghost volumes are their cells' volumes on the ranks that own them
-    std::map<Key, double> referenceGhostVolume;
+    // ghost volumes and centroids are those of their cells on the ranks that own them
+    std::map<Key, std::pair<double, Vector3D>> referenceGhost;
     for(const std::vector<std::size_t> &indices : reference.GetGhostIndeces())
         for(std::size_t g : indices)
-            referenceGhostVolume[KeyOf(reference.GetMeshPoint(g))] = reference.GetVolume(g);
+            referenceGhost[KeyOf(reference.GetMeshPoint(g))] = {reference.GetVolume(g), reference.GetCellCM(g)};
     for(const std::vector<std::size_t> &indices : subdomains.GetGhostIndeces())
     {
         for(std::size_t g : indices)
         {
-            const auto it = referenceGhostVolume.find(KeyOf(subdomains.GetMeshPoint(g)));
-            if(it != referenceGhostVolume.end())
-                result.maxGhostVolumeError = std::max(result.maxGhostVolumeError, std::abs(subdomains.GetVolume(g) - it->second) / it->second);
+            const auto it = referenceGhost.find(KeyOf(subdomains.GetMeshPoint(g)));
+            if(it == referenceGhost.end())
+                continue;
+            const auto &[volume, CM] = it->second;
+            result.maxGhostVolumeError = std::max(result.maxGhostVolumeError, std::abs(subdomains.GetVolume(g) - volume) / volume);
+            result.maxGhostCMError = std::max(result.maxGhostCMError, Distance(subdomains.GetCellCM(g), CM) / std::cbrt(volume));
         }
     }
     CheckGhosts(subdomains, result);
@@ -394,10 +439,10 @@ int main()
         if(GlobalSum(referenceGhosts.unrecordedGhosts + referenceGhosts.wrongExchangedData) != 0 and rank == 0)
             std::cout << kind << ": the build as one domain fails the ghost checks too" << std::endl;
 
-        // A comparison with the build as one domain, within tolerances
-        const auto compare = [&](VoronoiGrid &grid, const std::string &name)
+        // A comparison with a build as one domain, within tolerances
+        const auto compareWith = [&](VoronoiGrid &grid, VoronoiGrid &oneDomain, const std::string &name)
         {
-            const Comparison local = Compare(grid, reference);
+            const Comparison local = Compare(grid, oneDomain);
             Comparison c;
             c.ownershipMismatches = GlobalSum(local.ownershipMismatches);
             c.neighborMismatches = GlobalSum(local.neighborMismatches);
@@ -407,13 +452,15 @@ int main()
             c.maxVolumeError = GlobalMax(local.maxVolumeError);
             c.maxCMError = GlobalMax(local.maxCMError);
             c.maxGhostVolumeError = GlobalMax(local.maxGhostVolumeError);
+            c.maxGhostCMError = GlobalMax(local.maxGhostCMError);
             double volume = 0;
             for(std::size_t cell = 0; cell < grid.GetPointNo(); ++cell)
                 volume += grid.GetVolume(cell);
             const double totalVolumeError = std::abs(MadVoro::regression_tests::ReduceGlobalVolume(volume) - 1.0);
             const bool ok = c.ownershipMismatches == 0 && c.neighborMismatches == 0 && c.unlistedFaces == 0 && c.unrecordedGhosts == 0 &&
                             c.wrongExchangedData == 0 && c.maxVolumeError < MOMENTS_TOLERANCE && c.maxCMError < MOMENTS_TOLERANCE &&
-                            c.maxGhostVolumeError < MOMENTS_TOLERANCE && totalVolumeError < MOMENTS_TOLERANCE;
+                            c.maxGhostVolumeError < MOMENTS_TOLERANCE && c.maxGhostCMError < MOMENTS_TOLERANCE &&
+                            totalVolumeError < MOMENTS_TOLERANCE;
             pass = pass && ok;
             if(rank == 0)
             {
@@ -421,7 +468,8 @@ int main()
                           << " neighbor_mismatches=" << c.neighborMismatches << " unlisted_faces=" << c.unlistedFaces
                           << " unrecorded_ghosts=" << c.unrecordedGhosts << " wrong_exchanged_data=" << c.wrongExchangedData
                           << " max_volume_error=" << c.maxVolumeError << " max_cm_error=" << c.maxCMError
-                          << " max_ghost_volume_error=" << c.maxGhostVolumeError << " total_volume_error=" << totalVolumeError
+                          << " max_ghost_volume_error=" << c.maxGhostVolumeError << " max_ghost_cm_error=" << c.maxGhostCMError
+                          << " total_volume_error=" << totalVolumeError
                           << (ok ? "" : " FAIL") << std::endl;
                 const std::string prefix = kind + "_" + name + "_";
                 metrics << prefix << "ownership_mismatches " << c.ownershipMismatches << "\n"
@@ -432,11 +480,13 @@ int main()
                         << prefix << "max_volume_error " << c.maxVolumeError << "\n"
                         << prefix << "max_cm_error " << c.maxCMError << "\n"
                         << prefix << "max_ghost_volume_error " << c.maxGhostVolumeError << "\n"
+                        << prefix << "max_ghost_cm_error " << c.maxGhostCMError << "\n"
                         << prefix << "total_volume_error " << totalVolumeError << "\n";
                 if(not ok)
                     metrics << "failed " << prefix << "comparison\n";
             }
         };
+        const auto compare = [&](VoronoiGrid &grid, const std::string &name) { compareWith(grid, reference, name); };
         // A comparison that must hold bit for bit (up to the numbering of the ghosts, or not)
         const auto compareExactly = [&](VoronoiGrid &a, VoronoiGrid &b, const std::string &name, bool sameGhostNumbering)
         {
@@ -495,6 +545,57 @@ int main()
             grid.SetThreadSubdomains((rank % 2 == 1) ? 4 : 0);
             BuildTwice(grid, points, kind);
             compareExactly(grid, reference, "mixed_requests_vs_one_domain", true);
+        }
+
+        // Load balance switches: with subdomains, MockMesh rebuilds from them with the ghosts
+        // it knows; each step is compared with the same steps on a mesh built as one domain
+        {
+            std::vector<std::unique_ptr<LoadBalanceSwitches>> switches;
+            std::vector<std::string> names;
+            const auto add = [&](std::size_t subdomains, const std::string &name)
+            {
+                switches.push_back(std::make_unique<LoadBalanceSwitches>());
+                switches.back()->grid.SetThreadSubdomains(subdomains);
+                BuildTwice(switches.back()->grid, points, kind);
+                names.push_back(name);
+            };
+            add(0, "one_domain");
+            for(std::size_t count : {1, 2, 4, 7})
+                add(count, "subdomains=" + std::to_string(count));
+            add(4, "subdomains=4_repeated");
+            if(worldSize > 1)
+                add((rank % 2 == 1) ? 4 : 0, "mixed_requests");
+            for(std::size_t step = 0; step < SWITCH_STEPS; ++step)
+            {
+                for(std::unique_ptr<LoadBalanceSwitches> &s : switches)
+                    s->Step(step, kind);
+                VoronoiGrid &oneDomain = switches.front()->grid;
+                const std::string at = std::string("switch_") + SWITCH_STEP_NAMES[step] + "_";
+                if(step == 0)
+                {
+                    // the weights must move points between ranks
+                    const std::size_t notRebalanced = GlobalSum(switches.front()->rebalanced ? 0 : 1);
+                    pass = pass && (notRebalanced == 0);
+                    if(rank == 0 and notRebalanced != 0)
+                    {
+                        std::cout << kind << " " << at << "did_rebalance=0 FAIL" << std::endl;
+                        metrics << "failed " << kind << "_" << at << "did_rebalance\n";
+                    }
+                }
+                for(std::size_t i = 1; i < switches.size(); ++i)
+                {
+                    VoronoiGrid &grid = switches[i]->grid;
+                    if(names[i] == "subdomains=4_repeated")
+                    {
+                        const std::size_t first = std::find(names.begin(), names.end(), "subdomains=4") - names.begin();
+                        compareExactly(grid, switches[first]->grid, at + names[i], true);
+                    }
+                    else if(names[i] == "mixed_requests")
+                        compareExactly(grid, oneDomain, at + "mixed_requests_vs_one_domain", true);
+                    else
+                        compareWith(grid, oneDomain, at + names[i]);
+                }
+            }
         }
     }
 
