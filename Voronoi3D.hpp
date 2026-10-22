@@ -267,6 +267,14 @@ private:
 
   double GetRadius(const size_t &index) const;
 
+  // Sphere the ghost search uses for a tetrahedron: its circumsphere, or with a generator plane (SetGeneratorPlane)
+  // the circle where the circumsphere meets the plane. `point` is a vertex of the tetrahedron on the plane.
+  PointT GetSearchCenter(const size_t &tetraIdx) const;
+
+  double GetSearchRadius(const size_t &tetraIdx, const PointT &point) const;
+
+  double GetMaxSearchRadius(const size_t &pointIdx) const;
+
   void CalcAllCM(void);
 
   vector<std::pair<std::size_t, std::size_t> > SerialFindIntersections(bool first_run);
@@ -374,6 +382,11 @@ private:
   std::array<bool, 3> periodic_ = {false, false, false};
   std::vector<PointT> periodicImageTranslation_;
   mutable std::vector<std::size_t> periodicImagePhysical_;
+  // SetGeneratorPlane / SetAlwaysMirroredFaces
+  bool hasGeneratorPlane_ = false;
+  PointT generatorPlaneNormal_;
+  double generatorPlaneOffset_ = 0;
+  std::vector<size_t> alwaysMirroredFaces_;
 
   std::shared_ptr<OctTree<IVec>> myPointsTree;
   std::shared_ptr<OctTree<IVec>> allMyPointsTree;
@@ -458,6 +471,20 @@ public:
   void BuildPartially(const std::vector<PointT> &allPoints, const std::vector<size_t> &indicesToBuild);
 
   void SetPeriodicBoundaries(bool x, bool y, bool z);
+
+  /*! \brief Declares that every generator lies on the plane normal . x = offset (e.g. a thin wedge that mimics a 2D
+    cylindrical grid). A remote generator is then inside a tetrahedron's circumsphere only if it is inside the circle
+    where the sphere meets the plane, so the ghost search uses that circle. For tall, thin cells it is much smaller than
+    the circumsphere. A local generator off the plane makes the build throw.
+    \param normal Plane normal (any length)
+    \param offset Plane offset, in units of the given normal
+   */
+  void SetGeneratorPlane(const PointT &normal, double offset);
+
+  /*! \brief Box faces across which every local generator is mirrored at the start of each build, whatever its search
+    sphere (e.g. the two walls of a wedge, whose mirror images bound every cell). Indices refer to the box faces.
+   */
+  void SetAlwaysMirroredFaces(const std::vector<size_t> &faces);
 
   std::array<bool, 3> GetPeriodicBoundaries() const;
 
@@ -1522,6 +1549,50 @@ double Voronoi3D<PointT>::GetMinRadius(const size_t &index) const
     for(std::size_t i = 0; i < N; ++i)
     {
         res = std::min(res, GetRadius(PointTetras_[index][i]));
+    }
+    return res;
+}
+
+template <typename PointT>
+PointT Voronoi3D<PointT>::GetSearchCenter(const size_t &tetraIdx) const
+{
+    this->GetRadius(tetraIdx); // computes the centre if it is not cached yet
+    const PointT &center = this->tetra_centers_[tetraIdx];
+    if(not this->hasGeneratorPlane_)
+    {
+        return center;
+    }
+    return center - (ScalarProd(center, this->generatorPlaneNormal_) - this->generatorPlaneOffset_) * this->generatorPlaneNormal_;
+}
+
+/**
+ * Radius of the ghost-search sphere for a tetrahedron that has `point` as a vertex. With a generator plane, `point` is on
+ * the plane, so it lies on the circle where the circumsphere meets the plane, and its distance from the projected centre is
+ * that circle's radius. The small margin covers the round-off of the circumcentre (CalcTetraRadiusCenter accepts 1e-6).
+*/
+template <typename PointT>
+double Voronoi3D<PointT>::GetSearchRadius(const size_t &tetraIdx, const PointT &point) const
+{
+    const double radius = this->GetRadius(tetraIdx);
+    if(not this->hasGeneratorPlane_)
+    {
+        return radius;
+    }
+    return fastabs(this->GetSearchCenter(tetraIdx) - point) + 1e-6 * radius;
+}
+
+template <typename PointT>
+double Voronoi3D<PointT>::GetMaxSearchRadius(const size_t &pointIdx) const
+{
+    if(not this->hasGeneratorPlane_)
+    {
+        return this->GetMaxRadius(pointIdx);
+    }
+    const PointT &point = this->del_.points_[pointIdx];
+    double res = 0;
+    for(const size_t &tetraIdx : PointTetras_[pointIdx])
+    {
+        res = std::max(res, this->GetSearchRadius(tetraIdx, point));
     }
     return res;
 }
@@ -2973,6 +3044,25 @@ void Voronoi3D<PointT>::SetPeriodicBoundaries(bool x, bool y, bool z)
 }
 
 template <typename PointT>
+void Voronoi3D<PointT>::SetGeneratorPlane(const PointT &normal, double offset)
+{
+    const double length = fastabs(normal);
+    if(!(length > 0))
+    {
+        throw MadVoro::Exception::InvalidArgumentException("SetGeneratorPlane: the normal has zero length");
+    }
+    this->generatorPlaneNormal_ = normal / length;
+    this->generatorPlaneOffset_ = offset / length;
+    this->hasGeneratorPlane_ = true;
+}
+
+template <typename PointT>
+void Voronoi3D<PointT>::SetAlwaysMirroredFaces(const std::vector<size_t> &faces)
+{
+    this->alwaysMirroredFaces_ = faces;
+}
+
+template <typename PointT>
 std::array<bool, 3> Voronoi3D<PointT>::GetPeriodicBoundaries() const
 {
     return this->periodic_;
@@ -3316,8 +3406,8 @@ std::pair<std::vector<SmallRangeQueryData<PointT>>, std::vector<BigRangeQueryDat
                 {
                     continue; // tetra does not need to be checked
                 }
-                const PointT &center = this->tetra_centers_[tetraIdx];
-                double radius = this->GetRadius(tetraIdx);
+                const PointT center = this->GetSearchCenter(tetraIdx);
+                double radius = this->GetSearchRadius(tetraIdx, point);
                 // from each big tetrahedron, ask each one of the intersecting ranks to give us the closest point it has to our point
                 // for a large point queries, if the iteration number is 2, we ask only the near ranks to give their closest point.
                 // From the 3rd iteration, we ask all the intersecting ranks to give their closest point.
@@ -3540,7 +3630,7 @@ Voronoi3D<PointT>::DetermineNextIterationPoints(size_t iterations,
         }
         else
         {
-            double maxRadius = this->GetMaxRadius(pointIdxInBuild);
+            double maxRadius = this->GetMaxSearchRadius(pointIdxInBuild);
 
             if(currentRadiuses[pointIdxInBuild] < 2 * maxRadius)
             {
@@ -3628,6 +3718,24 @@ template <typename PointT>
         currentRadiuses[pointIndexInBuild] = this->radiuses[pointIndexInAll];
     }
 
+    if(this->hasGeneratorPlane_)
+    {
+        // The in-plane search circles (GetSearchRadius) are only valid for generators on the plane
+        const double tolerance = 1e-12 * fastabs(this->ur_ - this->ll_);
+        for(const std::pair<size_t, size_t> &indices : this->indicesInAllMyPoints)
+        {
+            const PointT &point = this->del_.points_[indices.first];
+            const double distance = ScalarProd(point, this->generatorPlaneNormal_) - this->generatorPlaneOffset_;
+            if(std::abs(distance) > tolerance)
+            {
+                MadVoro::Exception::MadVoroException eo("BringGhostPointsToBuild: a generator is off the generator plane (SetGeneratorPlane)");
+                eo.addEntry("Point", point);
+                eo.addEntry("Distance from the plane", distance);
+                throw eo;
+            }
+        }
+    }
+
     #ifdef MADVORO_WITH_MPI
     std::vector<int> alreadyRecvProcs;
     std::optional<SentPointsContainer> optPointsContainer;
@@ -3688,6 +3796,35 @@ template <typename PointT>
 
     // Use a set for O(1) lookup instead of O(n) linear search in the loop
     std::set<std::pair<size_t, size_t>> allMirroredSet;
+
+    // Every local point is mirrored across the always-mirrored faces (SetAlwaysMirroredFaces) before the search starts. It
+    // needs those images whatever its search sphere, and with a generator plane the sphere need not reach those faces.
+    if(not this->alwaysMirroredFaces_.empty())
+    {
+        std::vector<PointT> mirrors;
+        mirrors.reserve(this->alwaysMirroredFaces_.size() * this->indicesInAllMyPoints.size());
+        for(const size_t &faceIdx : this->alwaysMirroredFaces_)
+        {
+            if(faceIdx >= box.size())
+            {
+                MadVoro::Exception::MadVoroException eo("BringGhostPointsToBuild: always-mirrored face index out of range");
+                eo.addEntry("Face index", faceIdx);
+                eo.addEntry("Number of box faces", box.size());
+                throw eo;
+            }
+            for(const std::pair<size_t, size_t> &indices : this->indicesInAllMyPoints)
+            {
+                allMirroredSet.insert(std::make_pair(faceIdx, indices.first));
+                mirrors.push_back(MirrorPoint(box[faceIdx], this->del_.points_[indices.first]));
+            }
+        }
+        this->BuildExtraTracked(mirrors);
+        this->R_.resize(this->del_.tetras_.size(), RADIUS_UNINITIALIZED);
+        ContainerOps::conditional_shrink(this->R_);
+        this->tetra_centers_.resize(this->R_.size());
+        ContainerOps::conditional_shrink(this->tetra_centers_);
+        this->bigtet_ = SetPointTetras();
+    }
 
     size_t iterations = 0;
 
@@ -5034,6 +5171,8 @@ Voronoi3D<PointT>::Voronoi3D(Voronoi3D<PointT> const &other) : ll_(other.ll_), u
                                                 #endif // MADVORO_WITH_MPI
                                                 temp_points_(std::array<PointT, 4>()), temp_points2_(std::array<PointT, 5>()), box_faces_(other.box_faces_),
                                                 periodic_(other.periodic_), periodicImageTranslation_(other.periodicImageTranslation_),
+                                                hasGeneratorPlane_(other.hasGeneratorPlane_), generatorPlaneNormal_(other.generatorPlaneNormal_),
+                                                generatorPlaneOffset_(other.generatorPlaneOffset_), alwaysMirroredFaces_(other.alwaysMirroredFaces_),
                                                 #ifdef MADVORO_WITH_MPI
                                                     pointsManager(other.pointsManager->clone()), indexingToSave(other.indexingToSave),
                                                     rangeFinder(other.rangeFinder), radiuses(other.radiuses), allMyPoints(other.allMyPoints), allPointsWeights(other.allPointsWeights),
