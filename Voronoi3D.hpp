@@ -81,7 +81,7 @@
 #endif 
 
 #ifdef TIMING
-#define VORONOI_TIMING(name) (auto name = std::chrono::high_resolution_clock::now();)
+#define VORONOI_TIMING(name) auto name = std::chrono::high_resolution_clock::now()
 #define VORONOI_REPORT_TIMING(caption,start,end) ({auto duration = std::chrono::duration<double>(end - start).count(); if(rank == 0) std::cout << "Time for " << caption << ": " << duration << " seconds" << std::endl;})
 #else
 #define VORONOI_TIMING(name) (void)0;
