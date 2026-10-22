@@ -151,7 +151,17 @@ private:
 #define VORONOI_STAGE_REPORT(timer, comm) (void)0
 #endif // TIMING && MADVORO_WITH_MPI
 
+//! What the last BuildPlaneFaces call did on this rank
+struct PlaneFaceStats
+{
+    size_t cells = 0;
+    size_t faces = 0;
+    size_t droppedEdges = 0; // in-plane edges shorter than PLANE_FACE_EDGE_TOLERANCE times their generators' distance
+    size_t droppedFaces = 0; // faces towards in-plane neighbors that the cleanup removed
+};
+
 #define LARGE_POINTS_SHRINK_RADIUS_RATIO 0.95
+#define PLANE_FACE_EDGE_TOLERANCE 1e-12 // BuildPlaneFaces drops in-plane edges shorter than this times their generators' distance
 #define RANGE_MAX_POINTS_TO_GET 15 // 15
 #define RADIUSES_GROWING_FACTOR 1.1
 #define RADIUS_UNINITIALIZED -1
@@ -344,6 +354,10 @@ private:
 					vector<vector<size_t> > &past_duplicate);
   void BuildVoronoi(std::vector<size_t> const& order);
 
+  void BuildPlaneFaces(void);
+
+  void FinishFaces(size_t faceCount);
+
   size_t SetPointTetras(void);
 
   void InitialBoxBuild(std::vector<Face3D<PointT>> &box, std::vector<PointT> &normals);
@@ -446,6 +460,8 @@ private:
   double generatorPlaneOffset_ = 0;
   std::vector<size_t> alwaysMirroredFaces_;
   bool alwaysMirroredInDelaunay_ = false; // the current build inserted those mirrors with the local points
+  bool planeFaces_ = false; // SetPlaneFaces
+  PlaneFaceStats planeFaceStats_;
 
   std::shared_ptr<OctTree<IVec>> myPointsTree;
   std::shared_ptr<OctTree<IVec>> allMyPointsTree;
@@ -544,6 +560,15 @@ public:
     sphere (e.g. the two walls of a wedge, whose mirror images bound every cell). Indices refer to the box faces.
    */
   void SetAlwaysMirroredFaces(const std::vector<size_t> &faces);
+
+  /*! \brief Builds the faces of a wedge from the in-plane Voronoi polygons instead of the tetrahedra around each edge
+    (BuildPlaneFaces): every generator on z = 0 (SetGeneratorPlane((0, 0, 1), 0)) and two always-mirrored faces, the
+    walls, through the x-axis. Each cell is then its in-plane polygon, cut at y = 0, extended between the walls.
+   */
+  void SetPlaneFaces(bool planeFaces);
+
+  //! What the last build of the plane faces did on this rank
+  const PlaneFaceStats &GetPlaneFaceStats(void) const { return this->planeFaceStats_; }
 
   std::array<bool, 3> GetPeriodicBoundaries() const;
 
@@ -3130,6 +3155,12 @@ void Voronoi3D<PointT>::SetAlwaysMirroredFaces(const std::vector<size_t> &faces)
     this->alwaysMirroredFaces_ = faces;
 }
 
+template <typename PointT>
+void Voronoi3D<PointT>::SetPlaneFaces(bool planeFaces)
+{
+    this->planeFaces_ = planeFaces;
+}
+
 /**
  * Builds del_ from the local points. With always-mirrored faces the mirrors of every local point across those faces go
  * into the same pass, each point followed by its mirrors along the points' Hilbert order. Inserting the mirrors afterwards
@@ -4572,6 +4603,11 @@ void Voronoi3D<PointT>::BuildPartially(const std::vector<PointT> &allPoints, con
 template <typename PointT>
 void Voronoi3D<PointT>::BuildVoronoi(std::vector<size_t> const &order)
 {
+    if(this->planeFaces_)
+    {
+        this->BuildPlaneFaces();
+        return;
+    }
     FacesInCell_.resize(Norg_);
     area_.resize(Norg_ * 10);
     Face_CM_.resize(Norg_ * 10);
@@ -4709,10 +4745,18 @@ void Voronoi3D<PointT>::BuildVoronoi(std::vector<size_t> const &order)
         }
     }
 
-    // Fix Face CM (this prevents large face velocities for close by points)
-    size_t Nfaces = FaceCounter;
+    this->FinishFaces(FaceCounter);
+}
+
+/**
+ * Projects each face centroid onto the bisector plane of its two generators (this prevents large face velocities for
+ * close by points) and trims the face arrays to the faces built.
+*/
+template <typename PointT>
+void Voronoi3D<PointT>::FinishFaces(size_t faceCount)
+{
     PointT mid, norm;
-    for (size_t i = 0; i < Nfaces; ++i)
+    for (size_t i = 0; i < faceCount; ++i)
     {
         mid = del_.points_[FaceNeighbors_[i].first];
         mid += del_.points_[FaceNeighbors_[i].second];
@@ -4722,18 +4766,301 @@ void Voronoi3D<PointT>::BuildVoronoi(std::vector<size_t> const &order)
         Face_CM_[i] -= ScalarProd(Face_CM_[i] - mid, norm) * norm / ScalarProd(norm, norm);
     }
 
-    area_.resize(FaceCounter);
+    area_.resize(faceCount);
     ContainerOps::conditional_shrink(area_);
-    Face_CM_.resize(FaceCounter);
+    Face_CM_.resize(faceCount);
     ContainerOps::conditional_shrink(Face_CM_);
-    FaceNeighbors_.resize(FaceCounter);
+    FaceNeighbors_.resize(faceCount);
     ContainerOps::conditional_shrink(FaceNeighbors_);
-    PointsInFace_.resize(FaceCounter);
+    PointsInFace_.resize(faceCount);
     ContainerOps::conditional_shrink(PointsInFace_);
     for(size_t i = 0; i < Norg_; ++i)
     {
         ContainerOps::conditional_shrink(FacesInCell_[i]);
     }
+}
+
+/**
+ * Faces of a wedge (SetPlaneFaces). Every generator lies on z = 0 and the walls, two always-mirrored faces, pass through
+ * the x-axis, so a cell is its in-plane Voronoi polygon, cut at the axis y = 0, extended between the walls: its vertices
+ * lifted onto each wall give the faces towards in-plane neighbors (planar quadrilaterals, triangles where a vertex is on
+ * the axis) and its two wall faces. The polygon is cut out by the bisectors of the in-plane points of the cell's
+ * tetrahedra: a 3D Delaunay edge between two points of the plane is a 2D Delaunay edge (the trace of its empty sphere is
+ * an empty circle). The ring of tetrahedra around each edge, which BuildVoronoi walks, passes in the wedge through six
+ * cospherical points per in-plane triangle and leaves faces that are zero in exact geometry.
+ * A face between two local cells is built once, from the lower index, and an in-plane edge shorter than
+ * PLANE_FACE_EDGE_TOLERANCE times the distance between its generators is dropped (cocircular generators give edges of
+ * round-off length; the test is in the plane, so it does not depend on the height of the face).
+*/
+template <typename PointT>
+void Voronoi3D<PointT>::BuildPlaneFaces(void)
+{
+    constexpr size_t axisEdge = std::numeric_limits<size_t>::max(), openEdge = axisEdge - 1;
+    if(not this->hasGeneratorPlane_ or this->generatorPlaneNormal_.x != 0 or this->generatorPlaneNormal_.y != 0
+        or this->generatorPlaneOffset_ != 0 or this->alwaysMirroredFaces_.size() != 2 or this->HasPeriodicBoundaries())
+    {
+        MadVoro::Exception::MadVoroException eo("BuildPlaneFaces: needs the generator plane z = 0, two always-mirrored faces and no periodicity");
+        eo.addEntry("Generator plane", this->hasGeneratorPlane_);
+        eo.addEntry("Always-mirrored faces", this->alwaysMirroredFaces_.size());
+        throw eo;
+    }
+    // Wall planes: the same face vertices and normal as MirrorPoint, so the lifted vertices lie on the planes the mirrors
+    // were reflected across
+    std::array<const Face3D<PointT>*, 2> walls;
+    std::array<PointT, 2> wallNormals;
+    for(size_t f = 0; f < 2; ++f)
+    {
+        if(this->alwaysMirroredFaces_[f] >= this->box_faces_.size())
+        {
+            MadVoro::Exception::MadVoroException eo("BuildPlaneFaces: always-mirrored face index out of range");
+            eo.addEntry("Face index", this->alwaysMirroredFaces_[f]);
+            eo.addEntry("Number of box faces", this->box_faces_.size());
+            throw eo;
+        }
+        walls[f] = &this->box_faces_[this->alwaysMirroredFaces_[f]];
+        const PointT &origin = walls[f]->vertices[0];
+        PointT normal = CrossProduct(walls[f]->vertices[1] - origin, walls[f]->vertices[2] - origin);
+        wallNormals[f] = normal / abs(normal);
+        if(wallNormals[f].x != 0 or wallNormals[f].z == 0 or origin.y != 0 or origin.z != 0)
+        {
+            MadVoro::Exception::MadVoroException eo("BuildPlaneFaces: a wall does not pass through the x-axis");
+            eo.addEntry("Face index", this->alwaysMirroredFaces_[f]);
+            eo.addEntry("Normal", wallNormals[f]);
+            eo.addEntry("First vertex", origin);
+            throw eo;
+        }
+    }
+    // Where the vertical line through (x, y) meets wall f; exactly z = 0 on the axis
+    auto lift = [&walls, &wallNormals](size_t f, double x, double y)
+    {
+        const PointT &origin = walls[f]->vertices[0];
+        const PointT &normal = wallNormals[f];
+        const double z = y == 0 ? 0.0 : origin.z - (normal.x * (x - origin.x) + normal.y * (y - origin.y)) / normal.z;
+        return PointT(x, y, z);
+    };
+
+    FacesInCell_.resize(Norg_);
+    area_.resize(Norg_ * 10);
+    Face_CM_.resize(Norg_ * 10);
+    FaceNeighbors_.resize(Norg_ * 10);
+    PointsInFace_.resize(Norg_ * 10);
+    this->planeFaceStats_ = PlaneFaceStats();
+    this->planeFaceStats_.cells = Norg_;
+
+    face_scratch<size_t> ring, temp3;
+    face_scratch<double> diffs, Atempvec, area_vec_temp;
+    face_scratch<PointT> clean_vec;
+    std::vector<size_t> inPlane;
+    std::vector<std::array<double, 2>> polygon, clipped;
+    std::vector<size_t> labels, clippedLabels;
+    size_t faceCounter = 0;
+
+    // Adds the face between local cell `first` and `second` through the face points ring[0..n), after the same cleanup as
+    // BuildVoronoi; returns false if the cleanup leaves no face
+    auto addFace = [&](size_t first, size_t second)
+    {
+        point_vec &pointsInFace = PointsInFace_[faceCounter];
+        const PointT d = del_.points_[first] - del_.points_[second];
+        CleanDuplicates(ring, tetra_centers_, pointsInFace, ScalarProd(d, d), diffs, clean_vec, ring.size());
+        if(pointsInFace.size() < 3)
+        {
+            return false;
+        }
+        CalcFaceAreaCM(pointsInFace, tetra_centers_, clean_vec, area_[faceCounter], Face_CM_[faceCounter], Atempvec);
+        if(not (area_[faceCounter] > 0))
+        {
+            return false;
+        }
+        MakeRightHandFace(pointsInFace, del_.points_[first], tetra_centers_, temp3, area_[faceCounter]);
+        try
+        {
+            CleanSameLine(pointsInFace, tetra_centers_, area_vec_temp);
+        }
+        catch(MadVoro::Exception::MadVoroException &)
+        {
+            return false;
+        }
+        FaceNeighbors_[faceCounter] = std::make_pair(first, second);
+        FacesInCell_[first].push_back(faceCounter);
+        if(second < Norg_)
+        {
+            FacesInCell_[second].push_back(faceCounter);
+        }
+        ++faceCounter;
+        if(faceCounter == FaceNeighbors_.size())
+        {
+            area_.resize(static_cast<size_t>(static_cast<double>(area_.size()) * 1.25));
+            Face_CM_.resize(static_cast<size_t>(static_cast<double>(Face_CM_.size()) * 1.25));
+            FaceNeighbors_.resize(static_cast<size_t>(static_cast<double>(FaceNeighbors_.size()) * 1.25));
+            PointsInFace_.resize(static_cast<size_t>(static_cast<double>(PointsInFace_.size()) * 1.25));
+        }
+        return true;
+    };
+
+    for(size_t cell = 0; cell < Norg_; ++cell)
+    {
+        const PointT &point = del_.points_[cell];
+        if(point.z != 0)
+        {
+            MadVoro::Exception::MadVoroException eo("BuildPlaneFaces: a generator is off the plane z = 0");
+            eo.addEntry("Cell", cell);
+            eo.addEntry("Point", point);
+            throw eo;
+        }
+        // In-plane points and the cell's own wall mirrors among the vertices of its tetrahedra; the other points off the
+        // plane are other cells' wall mirrors
+        const std::array<PointT, 2> ownMirrors = {MirrorPoint(*walls[0], point), MirrorPoint(*walls[1], point)};
+        std::array<size_t, 2> mirrorIndices = {axisEdge, axisEdge};
+        inPlane.clear();
+        for(const size_t &tetraIdx : PointTetras_[cell])
+        {
+            for(const size_t &other : del_.tetras_[tetraIdx].points)
+            {
+                if(other == cell or (other >= Norg_ and other < Norg_ + 4))
+                {
+                    continue;
+                }
+                const PointT &otherPoint = del_.points_[other];
+                if(otherPoint.z == 0)
+                {
+                    inPlane.push_back(other);
+                }
+                for(size_t f = 0; f < 2; ++f)
+                {
+                    if(otherPoint == ownMirrors[f])
+                    {
+                        mirrorIndices[f] = other;
+                    }
+                }
+            }
+        }
+        std::sort(inPlane.begin(), inPlane.end());
+        inPlane.erase(std::unique(inPlane.begin(), inPlane.end()), inPlane.end());
+        if(mirrorIndices[0] == axisEdge or mirrorIndices[1] == axisEdge or inPlane.empty())
+        {
+            MadVoro::Exception::MadVoroException eo("BuildPlaneFaces: a cell lacks its wall mirrors or in-plane neighbors");
+            eo.addEntry("Cell", cell);
+            eo.addEntry("Point", point);
+            eo.addEntry("Upper mirror found", mirrorIndices[0] != axisEdge);
+            eo.addEntry("Lower mirror found", mirrorIndices[1] != axisEdge);
+            eo.addEntry("In-plane neighbors", inPlane.size());
+            throw eo;
+        }
+
+        // Cut the polygon out of a rectangle on the axis that contains it (a Voronoi vertex can be farther than the
+        // farthest neighbor, hence the factor; a side of the rectangle that survives means the cell is not closed)
+        double reach = 0;
+        for(const size_t &other : inPlane)
+        {
+            reach = std::max(reach, std::hypot(del_.points_[other].x - point.x, del_.points_[other].y - point.y));
+        }
+        const double half = 10 * reach;
+        polygon = {{point.x - half, 0}, {point.x + half, 0}, {point.x + half, point.y + half}, {point.x - half, point.y + half}};
+        labels = {axisEdge, openEdge, openEdge, openEdge}; // labels[k]: what made the edge from polygon[k] to polygon[k + 1]
+        for(const size_t &other : inPlane)
+        {
+            const PointT &otherPoint = del_.points_[other];
+            const double nx = otherPoint.x - point.x, ny = otherPoint.y - point.y;
+            const double mx = 0.5 * (otherPoint.x + point.x), my = 0.5 * (otherPoint.y + point.y);
+            if(nx == 0 and ny == 0)
+            {
+                continue;
+            }
+            // Keep the side of the bisector closer to the cell's generator: (X - M) . (Q - P) <= 0
+            clipped.clear();
+            clippedLabels.clear();
+            const size_t n = polygon.size();
+            for(size_t k = 0; k < n; ++k)
+            {
+                const std::array<double, 2> &a = polygon[k], &b = polygon[(k + 1) % n];
+                const double da = (a[0] - mx) * nx + (a[1] - my) * ny, db = (b[0] - mx) * nx + (b[1] - my) * ny;
+                if(da <= 0)
+                {
+                    if(db > 0 and da < 0)
+                    {
+                        // Leaves through the bisector: the part up to the crossing keeps its label, then the bisector
+                        const double s = da / (da - db);
+                        clipped.push_back(a);
+                        clippedLabels.push_back(labels[k]);
+                        clipped.push_back({a[0] + s * (b[0] - a[0]), a[1] + s * (b[1] - a[1])});
+                        clippedLabels.push_back(other);
+                    }
+                    else
+                    {
+                        clipped.push_back(a);
+                        clippedLabels.push_back(db > 0 ? other : labels[k]);
+                    }
+                }
+                else if(db < 0)
+                {
+                    // Enters through the bisector: from the crossing on, the edge keeps its label
+                    const double s = da / (da - db);
+                    clipped.push_back({a[0] + s * (b[0] - a[0]), a[1] + s * (b[1] - a[1])});
+                    clippedLabels.push_back(labels[k]);
+                }
+            }
+            polygon.swap(clipped);
+            labels.swap(clippedLabels);
+        }
+        const size_t n = polygon.size();
+        if(n < 3 or std::find(labels.begin(), labels.end(), openEdge) != labels.end())
+        {
+            MadVoro::Exception::MadVoroException eo("BuildPlaneFaces: the in-plane polygon of a cell is not closed");
+            eo.addEntry("Cell", cell);
+            eo.addEntry("Point", point);
+            eo.addEntry("Polygon vertices", n);
+            eo.addEntry("In-plane neighbors", inPlane.size());
+            throw eo;
+        }
+
+        // Lifted vertices: polygon[k] onto wall f is face point first + 2 k + f
+        const size_t first = tetra_centers_.size();
+        for(size_t k = 0; k < n; ++k)
+        {
+            tetra_centers_.push_back(lift(0, polygon[k][0], polygon[k][1]));
+            tetra_centers_.push_back(lift(1, polygon[k][0], polygon[k][1]));
+        }
+        for(size_t k = 0; k < n; ++k)
+        {
+            const size_t other = labels[k];
+            if(other == axisEdge or (other < Norg_ and other < cell))
+            {
+                continue; // no face on the axis; a face with a lower local cell was built from that cell's polygon
+            }
+            const size_t next = (k + 1) % n;
+            const PointT &otherPoint = del_.points_[other];
+            if(std::hypot(polygon[next][0] - polygon[k][0], polygon[next][1] - polygon[k][1])
+                < PLANE_FACE_EDGE_TOLERANCE * std::hypot(otherPoint.x - point.x, otherPoint.y - point.y))
+            {
+                ++this->planeFaceStats_.droppedEdges;
+                continue;
+            }
+            ring.assign({first + 2 * k, first + 2 * next, first + 2 * next + 1, first + 2 * k + 1});
+            if(not addFace(cell, other))
+            {
+                ++this->planeFaceStats_.droppedFaces;
+            }
+        }
+        for(size_t f = 0; f < 2; ++f)
+        {
+            ring.clear();
+            for(size_t k = 0; k < n; ++k)
+            {
+                ring.push_back(first + 2 * k + f);
+            }
+            if(not addFace(cell, mirrorIndices[f]))
+            {
+                MadVoro::Exception::MadVoroException eo("BuildPlaneFaces: a wall face vanished in the cleanup");
+                eo.addEntry("Cell", cell);
+                eo.addEntry("Point", point);
+                eo.addEntry("Wall", f);
+                eo.addEntry("Polygon vertices", n);
+                throw eo;
+            }
+        }
+    }
+    this->planeFaceStats_.faces = faceCounter;
+    this->FinishFaces(faceCounter);
 }
 
 template <typename PointT>
@@ -5314,7 +5641,8 @@ Voronoi3D<PointT>::Voronoi3D(Voronoi3D<PointT> const &other) : ll_(other.ll_), u
                                                 periodic_(other.periodic_), periodicImageTranslation_(other.periodicImageTranslation_),
                                                 hasGeneratorPlane_(other.hasGeneratorPlane_), generatorPlaneNormal_(other.generatorPlaneNormal_),
                                                 generatorPlaneOffset_(other.generatorPlaneOffset_), alwaysMirroredFaces_(other.alwaysMirroredFaces_),
-                                                alwaysMirroredInDelaunay_(other.alwaysMirroredInDelaunay_),
+                                                alwaysMirroredInDelaunay_(other.alwaysMirroredInDelaunay_), planeFaces_(other.planeFaces_),
+                                                planeFaceStats_(other.planeFaceStats_),
                                                 #ifdef MADVORO_WITH_MPI
                                                     pointsManager(other.pointsManager->clone()), indexingToSave(other.indexingToSave),
                                                     rangeFinder(other.rangeFinder), radiuses(other.radiuses), allMyPoints(other.allMyPoints), allPointsWeights(other.allPointsWeights),
