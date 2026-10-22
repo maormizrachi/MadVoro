@@ -4821,7 +4821,8 @@ void Voronoi3D<PointT>::BuildPlaneFaces(void)
         const PointT &origin = walls[f]->vertices[0];
         PointT normal = CrossProduct(walls[f]->vertices[1] - origin, walls[f]->vertices[2] - origin);
         wallNormals[f] = normal / abs(normal);
-        if(wallNormals[f].x != 0 or wallNormals[f].z == 0 or origin.y != 0 or origin.z != 0)
+        // The cross product leaves ~1e-20 in the x component of the normal of a wall built from the x-axis
+        if(std::abs(wallNormals[f].x) > 1e-12 or std::abs(wallNormals[f].z) < 1e-12 or origin.y != 0 or origin.z != 0)
         {
             MadVoro::Exception::MadVoroException eo("BuildPlaneFaces: a wall does not pass through the x-axis");
             eo.addEntry("Face index", this->alwaysMirroredFaces_[f]);
