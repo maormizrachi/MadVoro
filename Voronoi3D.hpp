@@ -96,6 +96,61 @@ namespace MadVoro {
 
 using namespace MadVoro::fallback;
 
+#if defined(TIMING) && defined(MADVORO_WITH_MPI)
+/**
+ * Wall time of the stages of one parallel build. Rank 0 prints the max and the mean over ranks, since rank 0 alone hides
+ * the load imbalance. Only with -DTIMING.
+*/
+class BuildStageTimer
+{
+public:
+    enum Stage { Prepare, LocalDelaunay, Setup, GhostSearch, Faces, CMs, Volumes, StageCount };
+
+    BuildStageTimer() : last_(std::chrono::high_resolution_clock::now()) {}
+
+    void Lap(Stage stage)
+    {
+        const auto now = std::chrono::high_resolution_clock::now();
+        seconds_[stage] += std::chrono::duration<double>(now - last_).count();
+        last_ = now;
+    }
+
+    void Report(const MPI_Comm &comm) const
+    {
+        int rank, size;
+        MPI_Comm_rank(comm, &rank);
+        MPI_Comm_size(comm, &size);
+        std::array<double, StageCount + 1> local{}, maximum{}, sum{};
+        std::copy(seconds_.begin(), seconds_.end(), local.begin());
+        local[StageCount] = std::accumulate(seconds_.begin(), seconds_.end(), 0.0);
+        MPI_Reduce(local.data(), maximum.data(), StageCount + 1, MPI_DOUBLE, MPI_MAX, 0, comm);
+        MPI_Reduce(local.data(), sum.data(), StageCount + 1, MPI_DOUBLE, MPI_SUM, 0, comm);
+        if(rank != 0)
+        {
+            return;
+        }
+        static const char *names[StageCount + 1] = {"prepare", "local_delaunay", "setup", "ghost_search", "faces", "cms", "volumes", "total"};
+        std::cout << "VoronoiStages [s, max/mean over " << size << " ranks]:";
+        for(size_t i = 0; i <= StageCount; ++i)
+        {
+            std::cout << " " << names[i] << " " << maximum[i] << "/" << sum[i] / size;
+        }
+        std::cout << std::endl;
+    }
+
+private:
+    std::array<double, StageCount> seconds_{};
+    std::chrono::high_resolution_clock::time_point last_;
+};
+#define VORONOI_STAGE_TIMER(timer) BuildStageTimer timer
+#define VORONOI_STAGE_LAP(timer, stage) timer.Lap(BuildStageTimer::stage)
+#define VORONOI_STAGE_REPORT(timer, comm) timer.Report(comm)
+#else
+#define VORONOI_STAGE_TIMER(timer) (void)0
+#define VORONOI_STAGE_LAP(timer, stage) (void)0
+#define VORONOI_STAGE_REPORT(timer, comm) (void)0
+#endif // TIMING && MADVORO_WITH_MPI
+
 #define LARGE_POINTS_SHRINK_RADIUS_RATIO 0.95
 #define RANGE_MAX_POINTS_TO_GET 15 // 15
 #define RADIUSES_GROWING_FACTOR 1.1
@@ -2274,6 +2329,7 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
 
     std::chrono::high_resolution_clock::time_point start, end;
     START_TIMER_PREEMPTIVE("Prepare to build");
+    VORONOI_STAGE_TIMER(stageTimer);
 
     start = std::chrono::high_resolution_clock::now();
 
@@ -2292,6 +2348,7 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
         if (rank == 0)
             std::cout << "Post-LB point distribution: max=" << maxPts << ", min=" << minPts << std::endl;
     }
+    VORONOI_STAGE_LAP(stageTimer, Prepare);
 
     start = std::chrono::high_resolution_clock::now();
 
@@ -2330,6 +2387,7 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
     {
         std::cout << "Time for initial build: " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
     }
+    VORONOI_STAGE_LAP(stageTimer, LocalDelaunay);
 
     if(this->radiuses.size() < this->Norg_)
     {
@@ -2364,10 +2422,12 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
     {
         std::cout << "Time for range agent: " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
     }
+    VORONOI_STAGE_LAP(stageTimer, Setup);
 
     START_TIMER_PREEMPTIVE("Bringing ghosts");
 
     this->BringGhostPointsToBuild(MPI_COMM_WORLD);
+    VORONOI_STAGE_LAP(stageTimer, GhostSearch);
 
     START_TIMER_PREEMPTIVE("Building voronoi");
 
@@ -2383,6 +2443,7 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
         // Create Voronoi
         BuildVoronoi(order);
     }
+    VORONOI_STAGE_LAP(stageTimer, Faces);
 
 
     // todo: why?
@@ -2390,6 +2451,7 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
     // std::vector<tetra_vec>().swap(this->PointTetras_);
 
     this->UpdateCMs();
+    VORONOI_STAGE_LAP(stageTimer, CMs);
 
     {
         const std::vector<rank_t> &correspondents = this->GetDuplicatedProcs();
@@ -2404,6 +2466,7 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
                 this->volume_.at(ghost_indices.at(i).at(j)) = data[j];
         }
     }
+    VORONOI_STAGE_LAP(stageTimer, Volumes);
 
     end = std::chrono::high_resolution_clock::now();
 
@@ -2411,6 +2474,7 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
     {
         std::cout << "Time for build Voronoi from Delaunay: " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
     }
+    VORONOI_STAGE_REPORT(stageTimer, MPI_COMM_WORLD);
 
     // save the list of the real ghost points
     // this->FilterRealGhostPoints();
