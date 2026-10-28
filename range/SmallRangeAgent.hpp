@@ -18,6 +18,7 @@
 #endif // MADVORO_WITH_MPI
 
 #include "RangeQueryData.h"
+#include "ParallelAnswers.hpp"
 
 template <typename PointT>
 struct SmallRangeQueryData : public RangeQueryData<PointT>
@@ -97,12 +98,40 @@ private:
         {
             int code = ImageCode(query.imageTranslation);
             std::unordered_set<size_t> &ignore = ignoreSets[code];
-            std::vector<size_t> indicesResult = this->rangeFinder->range(PointT(query.center.x, query.center.y, query.center.z), query.radius, query.maxPointsToGet, ignore);
+            std::vector<size_t> indicesResult = this->Find(query, ignore);
             ignore.insert(indicesResult.begin(), indicesResult.end());
             return indicesResult;
         }
 
+        // the query's points that `ignore` does not have (at most maxPointsToGet)
+        std::vector<size_t> Find(const SmallRangeQueryData<PointT> &query, const std::unordered_set<size_t> &ignore) const
+        {
+            return this->rangeFinder->range(PointT(query.center.x, query.center.y, query.center.z), query.radius, query.maxPointsToGet, ignore);
+        }
+
+        // the answers to the rank's own queries, as one after the other would
+        std::vector<std::vector<size_t>> selfBatchAnswer(const std::vector<SmallRangeQueryData<PointT>> &queries, std::array<std::unordered_set<size_t>, NUM_IMAGE_CODES> &ignoreSets)
+        {
+            return range_detail::ParallelAnswers(queries.size(), [&](std::size_t i, const std::unordered_set<size_t> &ignore) { return this->Find(queries[i], ignore); }, [&](std::size_t i) -> std::unordered_set<size_t> & { return ignoreSets[ImageCode(queries[i].imageTranslation)]; }, [&](std::size_t i) { return queries[i].maxPointsToGet; }, [](std::size_t, std::vector<size_t> &found, std::unordered_set<size_t> &ignore)
+            {
+                ignore.insert(found.begin(), found.end());
+            });
+        }
+
         #ifdef MADVORO_WITH_MPI
+            // the answers to other ranks' queries, as one after the other would
+            void answerBatch(const std::vector<const SmallRangeQueryData<PointT> *> &queries, const std::vector<int> &ranks, std::vector<std::vector<PointT>> &results) override
+            {
+                results.assign(queries.size(), std::vector<PointT>());
+                range_detail::ParallelAnswers(queries.size(), [&](std::size_t i, const SentPointsContainer::PointsSet &ignore) { return this->Find(*queries[i], ignore); }, [&](std::size_t i) -> const SentPointsContainer::PointsSet & { return this->pointsContainer.getSentDataSetRank(ranks[i], ImageCode(queries[i]->imageTranslation)); }, [&](std::size_t i) { return queries[i]->maxPointsToGet; }, [&](std::size_t i, std::vector<size_t> &found, const SentPointsContainer::PointsSet &)
+                {
+                    for(const size_t &pointIdx : this->pointsContainer.addPointsAsSent(ranks[i], found, ImageCode(queries[i]->imageTranslation)))
+                    {
+                        results[i].push_back(this->rangeFinder->getPoint(pointIdx) + queries[i]->imageTranslation);
+                    }
+                });
+            }
+
             std::vector<PointT> answer(const SmallRangeQueryData<PointT> &query, int _rank) override
             {
                 std::vector<PointT> result;
@@ -199,12 +228,7 @@ public:
 
     std::vector<std::vector<size_t>> selfBatchAnswer(const std::vector<SmallRangeQueryData<PointT>> &smallQueriesBatch, std::array<std::unordered_set<size_t>, NUM_IMAGE_CODES> &ignoreSets)
     {
-        std::vector<std::vector<size_t>> result;
-        for(const SmallRangeQueryData<PointT> &query : smallQueriesBatch)
-        {
-            result.emplace_back(this->ansAgent->selfAnswer(query, ignoreSets));
-        }
-        return result;
+        return this->ansAgent->selfBatchAnswer(smallQueriesBatch, ignoreSets);
     }
 
     #ifdef MADVORO_WITH_MPI

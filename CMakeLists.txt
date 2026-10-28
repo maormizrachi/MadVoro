@@ -206,7 +206,7 @@ elseif(MADVORO_WITH_GPU)
   # The Kokkos geometry executor is a static library of its own, so that its objects
   # join the final executable (which links Kokkos) even when madvoro is a shared
   # library, and so that its compile options stay within its kernels.
-  add_library(madvoro_geometry STATIC geometry/KokkosGeometryExecutor.cpp)
+  add_library(madvoro_geometry STATIC geometry/KokkosGeometryExecutor.cpp geometry/KokkosClipExecutor.cpp geometry/KokkosFaceStage.cpp)
   set_target_properties(madvoro_geometry PROPERTIES POSITION_INDEPENDENT_CODE ON)
   target_include_directories(madvoro_geometry PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_compile_definitions(madvoro_geometry PUBLIC MADVORO_WITH_GPU)

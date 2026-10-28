@@ -1,8 +1,4 @@
-// The geometry executor MadVoro was built with (Kokkos, on a device or host threads,
-// or plain host threads) must give exactly what the host executor gives: the same
-// circumcenters, faces, cell face lists, volumes and centroids, bit for bit.
-// Each case builds a mesh, then recomputes its geometry from the same flat mesh with
-// HostGeometryExecutor and compares. Without Kokkos the two executors are the same.
+// The geometry executor and shared face stage MadVoro was built with must match the host's bit for bit.
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
@@ -11,6 +7,7 @@
 #include <vector>
 
 #include "regression_tests/lib/voronoi_test_common.hpp"
+#include "geometry/FaceStage.hpp"
 #include "geometry/HostGeometryExecutor.hpp"
 
 #ifdef MADVORO_WITH_MPI
@@ -27,17 +24,21 @@ using MadVoro::regression_tests::VoronoiGrid;
 
 bool Same(const FlatPoint &a, const FlatPoint &b)
 {
-    return a.x == b.x && a.y == b.y && a.z == b.z;
+    return a.x == b.x and a.y == b.y and a.z == b.z;
 }
 
 template<typename T, typename Equal>
 std::size_t CountDifferences(const std::vector<T> &a, const std::vector<T> &b, Equal equal)
 {
     if(a.size() != b.size())
+    {
         return 1 + (a.size() > b.size() ? a.size() - b.size() : b.size() - a.size());
+    }
     std::size_t differences = 0;
     for(std::size_t i = 0; i < a.size(); ++i)
-        differences += !equal(a[i], b[i]);
+    {
+        differences += not equal(a[i], b[i]);
+    }
     return differences;
 }
 
@@ -62,7 +63,9 @@ std::size_t CompareWithHost(const VoronoiGrid &grid)
     {
         bool owned = false;
         for(int k = 0; k < 4; ++k)
-            owned = owned || meshView.IsOwned(mesh.tetras[t].points[k]);
+        {
+            owned = owned or meshView.IsOwned(mesh.tetras[t].points[k]);
+        }
         compute[t] = owned ? 1 : 0;
     }
 
@@ -73,21 +76,34 @@ std::size_t CompareWithHost(const VoronoiGrid &grid)
     for(flat_index_t t = 0; t < tetraCount; ++t)
     {
         if(compute[t] == 0)
+        {
             continue;
+        }
         // Extended-precision circumcenters are the host's in both builds; take them as built.
         if(host.tetraStatus[t] != MadVoro::Geometry::GeometryStatus::Ok)
+        {
             host.vertices[t] = built.vertices[t];
-        differences += !Same(host.vertices[t], built.vertices[t]);
+        }
+        differences += not Same(host.vertices[t], built.vertices[t]);
     }
     host.vertices = built.vertices;
     executor.SetVertices(host);
 
-    std::vector<std::uint8_t> looseAreaCut(meshView.pointCount);
-    for(flat_index_t p = 0; p < meshView.pointCount; ++p)
-        looseAreaCut[p] = (grid.IsPointOutsideBox(p) && !grid.IsPeriodicImage(p)) ? 1 : 0;
-    const MadVoro::Geometry::FaceBuildReport report = executor.BuildFaces(built.cellOrder, looseAreaCut, host);
+    // the raw faces on the host, finished by the host stage (the built tessellation numbers the ghosts right after the cells: the mesh has the bounding points between them)
+    MadVoro::Geometry::RawFacesView raw;
+    const MadVoro::Geometry::FaceBuildReport report = executor.BuildRawFaces(built.cellOrder, raw);
     differences += (report.result.error != MadVoro::Geometry::FaceBuildError::None);
-    executor.CellMoments(host);
+    raw.gapBegin = meshView.ownedCount;
+    raw.gapSize = 4;
+    std::vector<std::uint8_t> looseAreaCut(meshView.pointCount - 4);
+    for(flat_index_t q = 0; q < looseAreaCut.size(); ++q)
+    {
+        const flat_index_t p = (q < meshView.ownedCount) ? q : q + 4;
+        looseAreaCut[q] = (grid.IsPointOutsideBox(p) and not grid.IsPeriodicImage(p)) ? 1 : 0;
+    }
+    FlatVoronoi finished;
+    differences += MadVoro::Geometry::FinishRawFacesHost(raw, looseAreaCut, finished).Failed() ? 1 : 0;
+    host = std::move(finished);
 
     differences += CountDifferences(host.faceNeighbor0, built.faceNeighbor0);
     differences += CountDifferences(host.faceNeighbor1, built.faceNeighbor1);
@@ -124,9 +140,15 @@ std::vector<Vector3D> MakePoints(const std::string &kind, std::size_t count, int
             const std::size_t side = 24;
             const double h = 1.0 / 32.0;
             for(std::size_t i = 0; i < side; ++i)
+            {
                 for(std::size_t j = 0; j < side; ++j)
+                {
                     for(std::size_t k = 0; k < side; ++k)
+                    {
                         points.emplace_back(h * (i + 4), h * (j + 4), h * (k + 4));
+                    }
+                }
+            }
         }
         else
         {
@@ -168,10 +190,12 @@ int main()
     {
         VoronoiGrid grid(Vector3D(0, 0, 0), Vector3D(1, 1, 1));
         if(kind == "periodic")
+        {
             grid.SetPeriodicBoundaries(true, true, true);
+        }
         MadVoro::regression_tests::BuildVoronoiMesh(grid, MakePoints(kind, numPoints, rank));
         const std::size_t differences = GlobalSum(CompareWithHost(grid));
-        pass = pass && (differences == 0);
+        pass = pass and (differences == 0);
         if(rank == 0)
         {
             std::cout << kind << ": backend=" << backend << " differences=" << differences << std::endl;

@@ -11,6 +11,7 @@
 #include "FlatMesh.hpp"
 #include "FlatVoronoi.hpp"
 #include "HostGeometryExecutor.hpp"
+#include "RawFaces.hpp"
 
 namespace MadVoro
 {
@@ -19,15 +20,12 @@ namespace Geometry
 
 namespace device_detail
 {
-    /*! \brief The memory a kernel uses for one host array. Where the execution space
-        can access host memory (e.g. the OpenMP backend) that is the host array itself;
-        otherwise it is a device copy, kept between builds and grown when needed. */
+    //! \brief The host array itself where the execution space can access it, otherwise a reused device copy.
     template<typename T>
     class DeviceArray
     {
     public:
-        static constexpr bool hostAccessible =
-            Kokkos::SpaceAccessibility<Kokkos::DefaultExecutionSpace, Kokkos::HostSpace>::accessible;
+        static constexpr bool hostAccessible = Kokkos::SpaceAccessibility<Kokkos::DefaultExecutionSpace, Kokkos::HostSpace>::accessible;
 
         //! \brief Kernels read `host`'s current contents.
         void Upload(const std::vector<T> &host)
@@ -41,7 +39,9 @@ namespace device_detail
             {
                 this->Reserve(this->size_);
                 if(this->size_ > 0)
+                {
                     Kokkos::deep_copy(this->DeviceRange(), ConstHostView(host.data(), this->size_));
+                }
                 this->data_ = this->device_.data();
             }
         }
@@ -64,10 +64,12 @@ namespace device_detail
         //! \brief Copies what kernels wrote into `host` (nothing to do when they wrote `host` itself).
         void Download(std::vector<T> &host) const
         {
-            if constexpr(!hostAccessible)
+            if constexpr(not hostAccessible)
             {
                 if(this->size_ > 0)
+                {
                     Kokkos::deep_copy(HostView(host.data(), this->size_), this->DeviceRange());
+                }
             }
         }
 
@@ -83,7 +85,9 @@ namespace device_detail
         void Reserve(std::size_t size)
         {
             if(this->device_.extent(0) < size)
+            {
                 this->device_ = Kokkos::View<T *>(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string("MadVoro::DeviceArray")), size);
+            }
         }
 
         auto DeviceRange() const
@@ -95,40 +99,31 @@ namespace device_detail
         T *data_ = nullptr;
         std::size_t size_ = 0;
     };
+
+    //! \brief Each cell's faces (of the `faces` on the device, between cells [0, cells) and others), in increasing face order, into `hostOut`
+    void BuildCellFaceLists(flat_index_t cells, flat_index_t faces, const flat_index_t *neighbor0, const flat_index_t *neighbor1, DeviceArray<flat_index_t> &cellFaceOffsets, DeviceArray<flat_index_t> &cellFaces, FlatVoronoi &hostOut);
 } // namespace device_detail
 
-/*! \brief Runs the geometry kernels with Kokkos (on a device, or on host threads).
-    Same calls and results as HostGeometryExecutor: SetMesh, Circumcenters,
-    SetVertices, BuildFaces, CellMoments, with inputs and results in the host
-    FlatMesh and FlatVoronoi. Work the kernels cannot finish (extended-precision
-    circumcenters, exact volumes, faces that do not fit the fixed scratch) is done
-    on the host. In a SerialGeometryScope every call is run by a HostGeometryExecutor,
-    serially on the calling thread.
-    The kernel launches are public member functions because CUDA's extended
-    lambdas cannot be defined in private ones. */
+//! \brief Same calls and results as HostGeometryExecutor; work the kernels cannot finish is done on the host.
 class KokkosGeometryExecutor
 {
 public:
-    //! \brief Makes `mesh` the input of the following calls; it must outlive them.
+    //! \brief `mesh` must outlive the following calls.
     void SetMesh(const FlatMesh &mesh);
 
-    //! \brief See HostGeometryExecutor::Circumcenters.
     void Circumcenters(const std::vector<std::uint8_t> &compute, FlatVoronoi &out);
 
-    //! \brief Makes out.vertices the face vertices for BuildFaces.
+    //! \brief `out` (its vertices) must outlive the raw faces.
     void SetVertices(const FlatVoronoi &out);
 
-    //! \brief See BuildFacesHost.
-    FaceBuildReport BuildFaces(const std::vector<flat_index_t> &order, const std::vector<std::uint8_t> &looseAreaCut,
-                               FlatVoronoi &out);
+    //! \brief The raw faces of the mesh's points in `order` (which must outlive them), in the default memory space (on the host if a point's ring does not fit the kernels' scratch)
+    FaceBuildReport BuildRawFaces(const std::vector<flat_index_t> &order, RawFacesView &raw);
 
-    //! \brief Volumes and centroids of the cells of the last BuildFaces, into `out`.
-    void CellMoments(FlatVoronoi &out);
+    void Release(void);
 
     // Kernel launches (public for CUDA extended lambdas)
     void LaunchFaceCount(std::size_t pointCount);
-    void LaunchFaceFill(std::size_t pointCount, const FlatVoronoiView &view);
-    void LaunchCellFaceLists(std::size_t pointCount, std::size_t faceCount, FlatVoronoi &hostOut);
+    void LaunchFaceFill(std::size_t pointCount);
 
 private:
     FlatVoronoiView DeviceView(const FlatVoronoi &out) const;
@@ -142,24 +137,19 @@ private:
     device_detail::DeviceArray<FlatTetra> tetras_;
     device_detail::DeviceArray<flat_index_t> pointTetraOffsets_, pointTetras_;
 
-    device_detail::DeviceArray<std::uint8_t> compute_, looseAreaCut_;
+    device_detail::DeviceArray<std::uint8_t> compute_;
     device_detail::DeviceArray<flat_index_t> order_;
     device_detail::DeviceArray<FlatPoint> vertices_;
     device_detail::DeviceArray<double> tetraRadius_;
     device_detail::DeviceArray<GeometryStatus> tetraStatus_;
 
-    device_detail::DeviceArray<flat_index_t> cellFaceOffsets_, cellFaces_, faceVertexOffsets_, faceVertices_;
-    device_detail::DeviceArray<flat_index_t> faceNeighbor0_, faceNeighbor1_;
-    device_detail::DeviceArray<double> faceArea_;
-    device_detail::DeviceArray<FlatPoint> faceCM_;
-    device_detail::DeviceArray<double> cellVolume_;
-    device_detail::DeviceArray<FlatPoint> cellCM_;
-    device_detail::DeviceArray<GeometryStatus> cellStatus_;
-    device_detail::DeviceArray<flat_index_t> cellOrder_;
+    const std::vector<FlatPoint> *hostVertices_ = nullptr;
 
-    // Per point counts and offsets of the two-pass face build
+    // Per point counts and offsets of the two-pass raw face build, and the raw faces
     Kokkos::View<FaceBuildResult *> results_;
     Kokkos::View<flat_index_t *> faceOffsets_, vertexOffsets_;
+    Kokkos::View<flat_index_t *> rawCell_, rawOther_, rawVertexOffsets_, rawVertices_;
+    HostRawFaces hostRaw_;
 };
 
 } // namespace Geometry

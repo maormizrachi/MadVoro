@@ -52,10 +52,13 @@
 #include "geometry/kernels/MirrorCM.hpp"
 #include "utils/Predicates3D.hpp"
 #include <MeshDecomposer3D/hilbert/HilbertOrder3D.hpp>
-#include "range/SmallRangeAgent.hpp"
-#include "range/BigRangeAgent.hpp"
 #include "subdomains/MergeSubdomains.hpp"
 #include "subdomains/SubdomainSearch.hpp"
+#include "ghosts/GhostBringer.hpp"
+#include "builder/BuildDomain.hpp"
+#include "builder/ClippingLocalBuilder.hpp"
+#include "builder/DelaunayLocalBuilder.hpp"
+#include "builder/DistributedBuilder.hpp"
 #include "utils/container_utils.hpp"
 #include <spatial_ds/utils/BoundingBox.hpp>
 #include "exception/MadVoroException.hpp"
@@ -102,14 +105,6 @@ namespace MadVoro {
 
 using namespace MadVoro::fallback;
 
-#define LARGE_POINTS_SHRINK_RADIUS_RATIO 0.95
-#define RANGE_MAX_POINTS_TO_GET 15 // 15
-#define RADIUSES_GROWING_FACTOR 1.1
-#define RADIUS_UNINITIALIZED -1
-
-template <typename PointT>
-using PeriodicIgnoreSets = std::array<std::unordered_set<size_t>, NUM_IMAGE_CODES>;
-
 template <typename PointT>
 inline typename PointT::coord_type WrapPeriodicScalar(typename PointT::coord_type x, typename PointT::coord_type lo, typename PointT::coord_type hi)
 {
@@ -120,108 +115,11 @@ inline typename PointT::coord_type WrapPeriodicScalar(typename PointT::coord_typ
         r += L;
     }
     typename PointT::coord_type y = lo + r;
-    if(!(y < hi))
+    if(not (y < hi))
     {
         y = lo;
     }
     return y;
-}
-
-template <typename PointT>
-inline bool SphereIntersectsAABB(const PointT &center, typename PointT::coord_type radius, const PointT &tileLL, const PointT &tileUR)
-{
-    using coord_type = typename PointT::coord_type;
-    coord_type d2 = coord_type(0);
-    if(center.x < tileLL.x)
-    {
-        d2 += (tileLL.x - center.x) * (tileLL.x - center.x);
-    }
-    else if(center.x > tileUR.x)
-    {
-        d2 += (center.x - tileUR.x) * (center.x - tileUR.x);
-    }
-    if(center.y < tileLL.y)
-    {
-        d2 += (tileLL.y - center.y) * (tileLL.y - center.y);
-    }
-    else if(center.y > tileUR.y)
-    {
-        d2 += (center.y - tileUR.y) * (center.y - tileUR.y);
-    }
-    if(center.z < tileLL.z)
-    {
-        d2 += (tileLL.z - center.z) * (tileLL.z - center.z);
-    }
-    else if(center.z > tileUR.z)
-    {
-        d2 += (center.z - tileUR.z) * (center.z - tileUR.z);
-    }
-    constexpr coord_type eps = std::numeric_limits<coord_type>::epsilon();
-    return d2 <= radius * radius * (coord_type(1) + coord_type(64) * eps);
-}
-
-inline int GetBoxFaceAxis(size_t faceIdx)
-{
-    static const int axisMap[] = {2, 1, 0, 1, 0, 2};
-    return axisMap[faceIdx % 6];
-}
-
-template <typename QueryDataType, typename PointT>
-inline void ExpandPeriodicQueries(const std::vector<QueryDataType> &baseQueries,
-                                  const std::array<bool, 3> &periodic,
-                                  const PointT &ll,
-                                  const PointT &ur,
-                                  std::vector<QueryDataType> &expanded)
-{
-    PointT L = ur - ll;
-    expanded.clear();
-    expanded.reserve(baseQueries.size() * 8);
-    for(const QueryDataType &baseQuery : baseQueries)
-    {
-        expanded.push_back(baseQuery);
-        std::array<int, 3> shiftRanges[3] = {{0}, {0}, {0}};
-        if(periodic[0])
-        {
-            shiftRanges[0] = {-1, 0, 1};
-        }
-        if(periodic[1])
-        {
-            shiftRanges[1] = {-1, 0, 1};
-        }
-        if(periodic[2])
-        {
-            shiftRanges[2] = {-1, 0, 1};
-        }
-        for(int sx : shiftRanges[0])
-        {
-            for(int sy : shiftRanges[1])
-            {
-                for(int sz : shiftRanges[2])
-                {
-                    if(sx == 0 && sy == 0 && sz == 0)
-                    {
-                        continue;
-                    }
-                    PointT translation(L.x * sx, L.y * sy, L.z * sz);
-                    PointT tileLL = ll + translation;
-                    PointT tileUR = ur + translation;
-                    if(!SphereIntersectsAABB(baseQuery.center, baseQuery.radius, tileLL, tileUR))
-                    {
-                        continue;
-                    }
-                    QueryDataType periodicQuery = baseQuery;
-                    periodicQuery.imageTranslation = translation;
-                    periodicQuery.center = baseQuery.center - translation;
-                    if constexpr(std::is_same_v<QueryDataType, BigRangeQueryData<PointT>>)
-                    {
-                        periodicQuery.originalPoint = baseQuery.originalPoint - translation;
-                        periodicQuery.askOnlyClose = false;
-                    }
-                    expanded.push_back(periodicQuery);
-                }
-            }
-        }
-    }
 }
 
 typedef std::array<std::size_t, 4> b_array_4;
@@ -238,114 +136,43 @@ public:
 
 private:
   PointT ll_, ur_;
-  std::size_t Norg_, bigtet_;
+  std::size_t Norg_;
 
   std::set<int> set_temp_;
   std::stack<int> stack_temp_;
 
-  /*! \brief Finds intersections for a single cell
-    \param box Bounding faces
-    \param point Point index
-    \param sphere Bounding sphere
-    \param intersecting_faces Result
-    \param Rtemp TBA
-    \param vtemp TBA
-   */
-  void FindIntersectionsSingle(vector<Face3D<PointT>> const& box, std::size_t point, Sphere<PointT> &sphere,
-			       vector<size_t> &intersecting_faces, std::vector<double> &Rtemp, std::vector<PointT> &vtemp);
-
-  std::size_t GetFirstPointToCheck(void)const;
-
-  /*! \brief Get point to check
-    \param point Point index
-    \param checked Mast of checked points
-    \param res Result
-   */
-  void GetPointToCheck(std::size_t point, vector<unsigned char> const& checked, vector<std::size_t> &res);
-  
   //  void CalcCellCMVolume(std::size_t index);
 
-  double GetRadius(const size_t &index) const;
-
-  vector<std::pair<std::size_t, std::size_t> > SerialFindIntersections(bool first_run);
-
-  vector<std::pair<std::size_t, std::size_t> > SerialFirstIntersections(void);
-
-  double CalcTetraRadiusCenterHiPrecision(const size_t &index) const;
-
-  vector<PointT> CreateBoundaryPoints(vector<std::pair<std::size_t, std::size_t> > const& to_duplicate,
-					vector<vector<size_t> > &past_duplicate);
-  void BuildVoronoi(std::vector<size_t> const& order);
-
-  size_t SetPointTetras(void);
+  vector<PointT> CreateBoundaryPoints(const std::vector<PointT> &points, vector<std::pair<std::size_t, std::size_t> > const& to_duplicate, vector<vector<size_t> > &past_duplicate);
 
   void InitialBoxBuild(std::vector<Face3D<PointT>> &box, std::vector<PointT> &normals);
 
-  void BringSelfGhostPoints(const std::vector<BigRangeQueryData<PointT>> &bigQueries, const std::vector<SmallRangeQueryData<PointT>> &smallQueries,
-                              BigRangeAgent<PointT> &bigRangeAgent, SmallRangeAgent<PointT> &smallRangeAgent,
-                              boost::container::flat_map<size_t, size_t> &numOfResultsForBigPoints,
-                              boost::container::flat_map<size_t, size_t> &numOfResultsForSmallPoints,
-                              PeriodicIgnoreSets<PointT> &selfIgnorePoints);
+  BuildDomain<PointT> Domain(void);
 
-  void RecordEmptySelfAnswers(const std::vector<BigRangeQueryData<PointT>> &bigQueries, const std::vector<SmallRangeQueryData<PointT>> &smallQueries,
-                              BigRangeAgent<PointT> &bigRangeAgent, SmallRangeAgent<PointT> &smallRangeAgent,
-                              boost::container::flat_map<size_t, size_t> &numOfResultsForBigPoints,
-                              boost::container::flat_map<size_t, size_t> &numOfResultsForSmallPoints,
-                              const PeriodicIgnoreSets<PointT> &selfIgnorePoints);
+  // where a build writes: the mesh's own arrays
+  DistributedBuild<PointT> Output(void);
 
-  void BuildExtraTracked(const std::vector<PointT> &pts);
+  // what the mesh keeps of a build besides its arrays: which ghosts copy the rank's points, the periodic images' translations, the trees
+  void AfterBuild(const DistributedBuild<PointT> &built);
+
+  // the ghosts' centroids and volumes (from the ghost records), after a build
+  void SyncGhostValues(void);
 
   PointT InferPeriodicTranslation(const PointT &p) const;
 
-  bool IsPeriodicFace(size_t faceIdx) const;
-    
-  #ifdef MADVORO_WITH_MPI
-    void BringGhostPointsToBuild(const MPI_Comm &comm);
-  #else
-    void BringGhostPointsToBuild();
-  #endif // MADVORO_WITH_MPI
-
-  std::pair<std::vector<SmallRangeQueryData<PointT>>, std::vector<BigRangeQueryData<PointT>>> CreateBatches(boost::container::flat_set<size_t> &smallPoints, boost::container::flat_set<size_t> &largePoints, const boost::container::flat_map<size_t, size_t> &firstLargeIteration, std::vector<double> &currentRadiuses, size_t iterations);
-
-  std::pair<boost::container::flat_set<size_t>, boost::container::flat_set<size_t>>
-    DetermineNextIterationPoints(size_t iterations,
-                                  boost::container::flat_map<size_t, size_t> &firstLargeIteration,
-                                  std::vector<double> &currentRadiuses,
-                                  const boost::container::flat_map<size_t, size_t> &resultOfSmallPoints,
-                                  const boost::container::flat_map<size_t, size_t> &resultOfBigPoints
-                                );
-
-  void UpdateRadiuses(const std::vector<PointT> &points);
-
-  void UpdateCMs(void);
-
   void ShiftPeriodicImageCMs(void);
-  
-  void UpdateRangeFinder(void);
-
-  void UpdatePointsTree(const std::vector<PointT> &activePoints);
   
   #ifdef MADVORO_WITH_MPI
     std::vector<PointT> PrepareToBuildParallel(const std::vector<PointT> &allPoints, const std::vector<double> &allWeights, const std::vector<size_t> &indicesToBuild, bool suppressRebalancing, bool suppressExchange);
 
-    void ExchangeGhostVolumes(void);
     void FilterRealGhostPoints();
-    void UpdateDuplicatedPoints(const std::vector<int> &sentProc, const std::vector<std::vector<size_t>> &sentPoints);
-    void EnsureSymmetry(const std::vector<int> &sentProc, const std::vector<std::vector<int>> &recvProcLists);
-    std::tuple<std::vector<PointT>, std::vector<std::vector<size_t>>, std::vector<std::vector<size_t>>> InitialGhostPointsExchange(const MPI_Comm &comm = MPI_COMM_WORLD) const;
     void InitialExchange(const std::vector<PointT> &points, std::vector<int> &sentProc, std::vector<std::vector<size_t>> &sentPoints, const MPI_Comm &comm = MPI_COMM_WORLD);
-    void SetGhostArray(const std::vector<int> &recvProc, const std::vector<std::vector<size_t>> &recvPoints);  
-    void BringRemoteGhostPoints(const std::vector<BigRangeQueryData<PointT>> &bigQueries, const std::vector<SmallRangeQueryData<PointT>> &smallQueries,
-                                      BigRangeAgent<PointT> &bigRangeAgent, SmallRangeAgent<PointT> &smallRangeAgent,
-                                      boost::container::flat_map<size_t, size_t> &numOfResultsForBigPoints,
-                                      boost::container::flat_map<size_t, size_t> &numOfResultsForSmallPoints);
+
   #endif // MADVORO_WITH_MPI
 
-  Delaunay3D<PointT> del_;
-  //vector<vector<std::size_t> > PointTetras_; // The tetras containing each point
-  vector<tetra_vec > PointTetras_; // The tetras containing each point
-  mutable vector<double> R_; // The radius of the sphere of each tetra
-  mutable vector<PointT> tetra_centers_;
+  // the built points, 4 unused points, then the ghosts
+  std::vector<PointT> meshPoints_;
+  vector<PointT> tetra_centers_; // the vertices
   // Voronoi Data
   //vector<vector<std::size_t> > FacesInCell_;
   vector<face_vec > FacesInCell_;
@@ -356,30 +183,7 @@ private:
   vector<PointT> CM_, Face_CM_; // center of masses
   vector<double> volume_; // volumes of each one of the tetrahedra
   vector<double> area_; // surface area of each one of the tetrahedra
-  // Flat copies of the Delaunay and of the tessellation, from BuildVoronoi to UpdateCMs
-  Geometry::FlatMesh flatMesh_;
-  Geometry::FlatVoronoi flatVoronoi_;
-  // Runs the geometry kernels (with Kokkos when MadVoro is built with it, on host threads otherwise)
-  Geometry::GeometryExecutor geometryExecutor_;
-  #if defined(MADVORO_WITH_GPU) && !defined(MADVORO_GEOMETRY_ON_HOST)
-    // A thread subdomain runs its geometry on its own host thread (see WithGeometryExecutor)
-    Geometry::HostGeometryExecutor hostGeometryExecutor_;
-  #endif // MADVORO_WITH_GPU && !MADVORO_GEOMETRY_ON_HOST
-
-  /*! \brief Calls f with the executor of this mesh's geometry. A thread subdomain is built
-      inside one host thread of BuildFromThreadSubdomains, so it always uses the host
-      executor there, whichever executor the build has; every other mesh uses
-      geometryExecutor_. So thread subdomains are built the same way with or without a
-      device. */
-  template <typename F>
-  decltype(auto) WithGeometryExecutor(F &&f)
-  {
-    #if defined(MADVORO_WITH_GPU) && !defined(MADVORO_GEOMETRY_ON_HOST)
-      if(this->IsThreadSubdomain())
-        return f(this->hostGeometryExecutor_);
-    #endif // MADVORO_WITH_GPU && !MADVORO_GEOMETRY_ON_HOST
-    return f(this->geometryExecutor_);
-  }
+  DistributedBuilder<PointT> builder_{[](bool onHost) -> std::unique_ptr<LocalBuilder<PointT>> { return std::make_unique<DelaunayLocalBuilder<PointT>>(onHost); }};
   
   #ifdef MADVORO_WITH_MPI
   vector<int> sentprocs_;
@@ -407,54 +211,26 @@ private:
 
   std::shared_ptr<OctTree<IVec>> myPointsTree;
   std::shared_ptr<OctTree<IVec>> allMyPointsTree;
-  // Thread subdomains (see BuildFromThreadSubdomains): their number (0 builds as one
-  // domain), and their tessellations. A subdomain uses its rank's tree of all points
-  // (sharedPointsTree_) instead of building one, and searches for the points of the
-  // other subdomains with sharedRangeFinder_.
+  // Thread subdomains (0 or 1 builds as one domain)
   size_t threadSubdomainCount_ = 0;
-  SubdomainMeshes<PointT> threadSubdomains_;
-  std::shared_ptr<OctTree<IVec>> sharedPointsTree_;
-  std::shared_ptr<RangeFinder<PointT>> sharedRangeFinder_;
-  // A thread subdomain's ghost search between its rounds
-  struct SubdomainGhostSearch;
-  std::shared_ptr<SubdomainGhostSearch> subdomainSearch_;
   bool reportedUnusedSubdomains_ = false;
-
-  bool UsesThreadSubdomains(void) const;
 
   void ReportUnusedThreadSubdomains(void);
 
-  void BuildFromThreadSubdomains(bool otherRanks, const std::vector<PointT> *knownGhosts = nullptr);
+  // builds the prepared cells; knownGhosts and knownMirrors: every ghost is known (other ranks' points, then mirrors)
+  void BuildCells(bool otherRanks, const std::vector<PointT> *knownGhosts = nullptr, const std::vector<PointT> *knownMirrors = nullptr);
 
-  bool IsThreadSubdomain(void) const { return this->sharedRangeFinder_ != nullptr; }
-
-  // The parts of a thread subdomain's build (see BuildFromThreadSubdomains)
-  void BeginSubdomain(const std::vector<PointT> &points, const std::vector<size_t> &indicesToBuild);
-
-  bool PrepareSubdomainRound(void);
-
-  void FinishSubdomainRound(const RankGhostPoints<PointT> &otherRankPoints);
-
-  void EndSubdomain(void);
-
-  // The parts of BuildPartially
   std::vector<PointT> PreparePartialBuild(const std::vector<PointT> &allPoints, const std::vector<size_t> &indicesToBuild);
-
-  std::vector<size_t> BuildPartialDelaunay(const std::vector<PointT> &activePoints);
-
-  void FinishPartialBuild(const std::vector<size_t> &order);
   #ifdef MADVORO_WITH_MPI
     std::shared_ptr<PointsManager<PointT, VoronoiPayload<PointT>>> pointsManager;
     std::shared_ptr<const Kernelization3D::IndexingKernel3D<PointT>> indexingToSave = std::shared_ptr<const Kernelization3D::IndexingKernel3D<PointT>>();
   #endif // MADVORO_WITH_MPI
 
-  std::shared_ptr<RangeFinder<PointT>> rangeFinder;
   std::vector<PointT> allMyPoints;
   std::vector<double> allPointsWeights;
   std::vector<double> radiuses;
 
-  AllPointsMap indicesInAllMyPoints; // the indices of the points in `del_.points_`, in the list of all points
-
+  AllPointsMap indicesInAllMyPoints; // the indices of the points in `meshPoints_`, in the list of all points
 
   template<typename T>
   void SyncPartialBuildData(std::vector<T> &partialBuildData, std::vector<T> &allBuildData) const;
@@ -470,7 +246,6 @@ public:
     
     void SetKernel(const std::shared_ptr<const Kernelization3D::IndexingKernel3D<PointT>> &indexing = std::shared_ptr<const Kernelization3D::IndexingKernel3D<PointT>>());
     
-
     std::shared_ptr<const Kernelization3D::IndexingKernel3D<PointT>> GetKernel() const;
     
     void SetBox(PointT const &ll, PointT const &ur, const std::shared_ptr<const Kernelization3D::IndexingKernel3D<PointT>> &newIndexing);
@@ -509,22 +284,32 @@ public:
     this->BuildPartially(points, indicesToBuild);
   }
 
-
   size_t GetBuildGeneration(void) const { return buildGeneration_; }
 
-  /*! \brief Builds from `count` thread subdomains (see BuildFromThreadSubdomains); 0, the default, builds as one domain.
-      So far only full builds without periodic boundaries use the subdomains (with BuildParallel, only on one rank). */
+  /** \brief Builds from `count` thread subdomains (0 or 1 builds as one domain). */
   void SetThreadSubdomains(size_t count) { threadSubdomainCount_ = count; }
 
   size_t GetThreadSubdomains(void) const { return threadSubdomainCount_; }
 
+  //! \brief How cells are built: from a Delaunay tetrahedralization, or each on its own by clipping (in Kokkos' default execution space, e.g. a GPU)
+  enum class CellBuilder
+  {
+      Delaunay,
+      Clipping
+  };
+
+  void SetCellBuilder(CellBuilder cellBuilder);
+
+  CellBuilder GetCellBuilder(void) const { return cellBuilder_; }
+
+private:
+  CellBuilder cellBuilder_ = CellBuilder::Delaunay;
+
+public:
+
   void ReleaseMemory(void);
 
-  /*! \brief Returns spare container capacity to the allocator.
-      A rebuild on fewer points (after a load-balance repartition) leaves every
-      container with the capacity of the largest mesh it ever held; the default
-      conditional_shrink is compiled out, so call this after a rebuild. The mesh
-      stays fully usable. */
+  /** \brief Returns spare container capacity to the allocator (call after a rebuild). */
   void ShrinkToFit(void);
 
   void BuildPartially(const std::vector<PointT> &allPoints, const std::vector<size_t> &indicesToBuild);
@@ -555,7 +340,6 @@ public:
   std::pair<bool, size_t> FindViolatedFaceNeighbor(const PointT &point, size_t cellIndex) const;
 
 #ifdef MADVORO_WITH_MPI
-
   void PreparePoints(const std::vector<PointT> &points, const std::vector<size_t> &mask);
 
   inline void SetPointsManager(std::shared_ptr<PointsManager<PointT, VoronoiPayload<PointT>>> pointsManager){this->pointsManager = pointsManager;};
@@ -606,7 +390,6 @@ public:
   int GetOwner(const PointT &point) const;
 
   void SetImbalanceTolerance(double tolerance);
-
 #endif // MADVORO_WITH_MPI
 
   double GetMaxRadius(const size_t &index) const;
@@ -749,11 +532,11 @@ public:
 
   vector<PointT>const& GetFacePoints(void) const;
 
-  //! \brief The flat Delaunay mesh of the last build (see geometry/FlatMesh.hpp)
-  const Geometry::FlatMesh &GetFlatMesh(void) const { return flatMesh_; }
+  //! \brief The flat Delaunay mesh of the last build as one domain
+  const Geometry::FlatMesh &GetFlatMesh(void) const;
 
-  //! \brief The flat tessellation of the last build (see geometry/FlatVoronoi.hpp)
-  const Geometry::FlatVoronoi &GetFlatVoronoi(void) const { return flatVoronoi_; }
+  //! \brief The flat tessellation of the last build as one domain (the ghosts follow the cells, with no unused points between them)
+  const Geometry::FlatVoronoi &GetFlatVoronoi(void) const;
 
   vector<face_vec >& GetAllCellFaces(void);
 
@@ -858,24 +641,6 @@ point_vec_v_t<PointT> VectorValues(std::vector<PointT> const& v, point_vec const
 }
 
 
-template <typename PointT>
-bool PointInPoly(std::vector<Face3D<PointT>> const& faces, PointT const &point)
-{
-    std::size_t const N = faces.size();
-    std::array<PointT, 4> vec;
-    vec[3] = point;
-    for (std::size_t i = 0; i < N; ++i)
-    {
-        vec[0] = faces[i].vertices[0];
-        vec[1] = faces[i].vertices[1];
-        vec[2] = faces[i].vertices[2];
-        double const s = orient3d(vec);
-        if (s > 0)
-            return false;
-    }
-    return true;
-}
-
 namespace
 {
 #ifdef MADVORO_WITH_MPI
@@ -890,69 +655,10 @@ namespace
         }
     }
 #endif
-    boost::multiprecision::cpp_dec_float_50 Calc33Det(std::array<boost::multiprecision::cpp_dec_float_50, 9> const &points)
-    {
-        return points[0] * (points[4] * points[8] - points[5] * points[7]) + points[1] * (points[5] * points[6] - points[3] * points[8]) + points[2] * (points[3] * points[7] - points[4] * points[6]);
-    }
 }
 
 namespace
 {
-    bool ShouldCalcTetraRadius(Tetrahedron const &T, size_t Norg)
-    {
-        for (size_t i = 0; i < 4; ++i)
-            if (T.points[i] < Norg)
-                return true;
-        return false;
-    }
-
-    template <typename PointT>
-    void FirstCheckList(std::stack<std::size_t> &check_stack, vector<unsigned char> &future_check, size_t Norg,
-                                            Delaunay3D<PointT> const &del, vector<tetra_vec> const &PointsInTetra)
-    {
-        //        check_stack.empty();
-        future_check.resize(Norg, 0);
-        size_t Ntetra = del.tetras_.size();
-        vector<unsigned char> tetra_check(Ntetra, 0);
-
-        for (size_t i = 0; i < Ntetra; ++i)
-        {
-            Tetrahedron const &tetra = del.tetras_[i];
-            for (size_t j = 0; j < 4; ++j)
-            {
-                if (tetra.points[j] >= Norg)
-                {
-                    for (size_t k = 0; k < 4; ++k)
-                    {
-                        size_t tetcheck = tetra.points[k];
-                        if (tetra.points[k] < Norg)
-                        {
-                            size_t ntet = PointsInTetra[tetcheck].size();
-                            for (size_t z = 0; z < ntet; ++z)
-                                tetra_check[PointsInTetra[tetcheck][z]] = 1;
-                        }
-                    }
-                    break;
-                }
-            }
-        }
-        for (size_t i = 0; i < Ntetra; ++i)
-        {
-            if (tetra_check[i] == 1)
-            {
-                Tetrahedron const &tetra = del.tetras_[i];
-                for (size_t j = 0; j < 4; ++j)
-                {
-                    if (tetra.points[j] < Norg)
-                        future_check[tetra.points[j]] = 1;
-                }
-            }
-        }
-        for (size_t i = 0; i < Norg; ++i)
-            if (future_check[i] == 1)
-                check_stack.push(i);
-    }
-
     template <typename PointT>
     vector<Face3D<PointT>> BuildBox(PointT const &ll, PointT const &ur)
     {
@@ -1032,147 +738,6 @@ namespace
         return loc;
     }
 #endif
-
-    template <typename PointT>
-    bool PointInDomain(PointT const &ll, PointT const &ur, PointT const &point)
-    {
-        if (point.x > ll.x && point.x < ur.x && point.y > ll.y && point.y < ur.y && point.z > ll.z && point.z < ur.z)
-            return true;
-        else
-            return false;
-    }
-
-    template <typename PointT>
-    PointT MirrorPoint(Face3D<PointT> const &face, PointT const &point)
-    {
-        PointT normal = CrossProduct(face.vertices[1] - face.vertices[0], face.vertices[2] - face.vertices[0]);
-        normal = normal / abs(normal);
-        return point - (2 * ScalarProd(point - face.vertices[0], normal)) * normal;
-    }
-}
-
-template <typename PointT>
-size_t Voronoi3D<PointT>::SetPointTetras(void)
-{
-    std::vector<Tetrahedron> &tetras = this->del_.tetras_;
-    std::vector<std::pair<size_t, Tetrahedron>> &changed_tetras = this->del_.changed_tetras_;
-    boost::container::flat_set<size_t> const &empty_tetras = this->del_.empty_tetras_;
-    std::vector<size_t> &newTetras = this->del_.newTetras_;
-    PointTetras_.resize(this->Norg_);
-    ContainerOps::conditional_shrink(PointTetras_);
-    // static vector<tetra_vec> tmpPointTetras;
-
-    #ifdef USE_VCL_VECTORIZATION
-        Vec4uq _Norg(this->Norg_);
-    #endif // USE_VCL_VECTORIZATION
-
-    size_t bigtet(0);
-    bool has_good, has_big;
-    // change empty tetras to be not relevant
-    for (boost::container::flat_set<size_t>::const_iterator it = empty_tetras.begin(); it != empty_tetras.end(); ++it)
-    {
-        Tetrahedron &tetra = tetras[*it];
-        for (size_t i = 0; i < 4; ++i)
-        {
-            if(tetra.points[i] < this->Norg_)
-            {
-                tetra_vec &points_tetras = PointTetras_[tetra.points[i]];
-                auto it2 = std::find(points_tetras.begin(), points_tetras.end(), *it);
-                if(it2 != points_tetras.end()) {
-                    *it2 = points_tetras.back();
-                    points_tetras.pop_back();
-                }
-            }
-            tetras[*it].points[i] = std::numeric_limits<std::size_t>::max();
-            tetras[*it].neighbors[i] = std::numeric_limits<std::size_t>::max();
-        }
-    }
-
-    for (const std::pair<size_t, Tetrahedron> &tetraInfo : changed_tetras)
-    {
-        const size_t &tetraIndex = tetraInfo.first;
-        const Tetrahedron &tetra = tetraInfo.second;
-
-        for (size_t i = 0; i < 4; ++i)
-        {
-            if(tetra.points[i] < this->Norg_)
-            {
-                tetra_vec &points_tetras = PointTetras_[tetra.points[i]];
-                auto it2 = std::find(points_tetras.begin(), points_tetras.end(), tetraIndex);
-                if(it2 != points_tetras.end())
-                {
-                    *it2 = points_tetras.back();
-                    points_tetras.pop_back();
-                }
-            }
-        }
-    }
-
-    size_t counter = 0;
-
-    // std::sort(newTetras.begin(), newTetras.end());
-    // auto it = std::unique(newTetras.begin(), newTetras.end());
-    // newTetras.resize(std::distance(newTetras.begin(), it));
-    // size_t redundentNum = Ntetra - newTetras.size();
-    // #ifdef MADVORO_WITH_MPI
-    //     int rank;
-    //     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    //     MPI_Allreduce(MPI_IN_PLACE, &redundentNum, 1, MPI_UNSIGNED_LONG, MPI_MAX, MPI_COMM_WORLD);
-    //     if(rank == 0)
-    //     {
-    //         std::cout << "Redundent number max: " << redundentNum << std::endl;
-    //     }
-    // #endif // MADVORO_WITH_MPI
-    
-    // for (size_t i = 0; i < Ntetra; ++i)
-    for(size_t i : newTetras)
-    {
-        Tetrahedron &tet = tetras[i];
-        this->R_[i] = RADIUS_UNINITIALIZED;
-
-        if(not tet.newTetra)
-        {
-            continue;
-        }
-        assert(tet.newTetra);
-        tet.newTetra = false;
-
-        has_good = false;
-        has_big = false;
-        counter++;
-
-        #ifdef USE_VCL_VECTORIZATION
-            Vec4uq _points(tet.points[0], tet.points[1], tet.points[2], tet.points[3]);
-            Vec4qb cmp = (_points < _Norg);
-        #endif // USE_VCL_VECTORIZATION
-        
-        for(int j = 0; j < 4; ++j)
-        {
-        #ifdef USE_VCL_VECTORIZATION
-            if(cmp[j])
-        #else // USE_VCL_VECTORIZATION
-            if(tet.points[j] < Norg_)
-        #endif // USE_VCL_VECTORIZATION
-            {
-                has_good = true;
-                PointTetras_[tet.points[j]].push_back(i);
-            }
-            else
-            {
-                has_big = true;
-            }
-        }
-        if(has_big and has_good)
-        {
-            bigtet = i;
-        }
-    }
-
-    changed_tetras.clear();
-    newTetras.clear();
-
-    // std::cout << "Tetra counter: " << counter << " / " << Ntetra << std::endl;
-    return bigtet;
 }
 
 template <typename PointT>
@@ -1200,8 +765,8 @@ Voronoi3D<PointT>::Voronoi3D(std::vector<Face3D<PointT>> const& box_faces) : Vor
 }
 
 template <typename PointT>
-Voronoi3D<PointT>::Voronoi3D(PointT const &ll, PointT const &ur) : ll_(ll), ur_(ur), Norg_(0), bigtet_(0), set_temp_(std::set<int>()), stack_temp_(std::stack<int>()),
-                                                              del_(Delaunay3D<PointT>()), PointTetras_(vector<tetra_vec>()), R_(vector<double>()), tetra_centers_(vector<PointT>()),
+Voronoi3D<PointT>::Voronoi3D(PointT const &ll, PointT const &ur) : ll_(ll), ur_(ur), Norg_(0), set_temp_(std::set<int>()), stack_temp_(std::stack<int>()),
+                                                              tetra_centers_(vector<PointT>()),
                                                               FacesInCell_(vector<face_vec>()),
                                                               PointsInFace_(vector<point_vec>()),
                                                               FaceNeighbors_(vector<std::pair<std::size_t, std::size_t>>()),
@@ -1230,8 +795,43 @@ Voronoi3D<PointT>::Voronoi3D() : Voronoi3D<PointT>(PointT(), PointT())
 {}
 
 template <typename PointT>
-vector<PointT> Voronoi3D<PointT>::CreateBoundaryPoints(vector<std::pair<std::size_t, std::size_t>> const &to_duplicate,
-                                                 vector<vector<size_t>> &past_duplicate)
+void Voronoi3D<PointT>::SetCellBuilder(CellBuilder cellBuilder)
+{
+    this->cellBuilder_ = cellBuilder;
+    if(cellBuilder == CellBuilder::Clipping)
+    {
+        this->builder_ = DistributedBuilder<PointT>([](bool onHost) -> std::unique_ptr<LocalBuilder<PointT>> { return std::make_unique<ClippingLocalBuilder<PointT>>(onHost); });
+    }
+    else
+    {
+        this->builder_ = DistributedBuilder<PointT>([](bool onHost) -> std::unique_ptr<LocalBuilder<PointT>> { return std::make_unique<DelaunayLocalBuilder<PointT>>(onHost); });
+    }
+}
+
+template <typename PointT>
+const Geometry::FlatMesh &Voronoi3D<PointT>::GetFlatMesh(void) const
+{
+    const DelaunayLocalBuilder<PointT> *builder = dynamic_cast<const DelaunayLocalBuilder<PointT> *>(this->builder_.OneDomainBuilder());
+    if(builder == nullptr)
+    {
+        throw MadVoro::Exception::MadVoroException("Voronoi3D::GetFlatMesh: the last build was not a Delaunay build of one domain");
+    }
+    return builder->GetFlatMesh();
+}
+
+template <typename PointT>
+const Geometry::FlatVoronoi &Voronoi3D<PointT>::GetFlatVoronoi(void) const
+{
+    const Geometry::FlatVoronoi *voronoi = this->builder_.OneDomainVoronoi();
+    if(voronoi == nullptr)
+    {
+        throw MadVoro::Exception::MadVoroException("Voronoi3D::GetFlatVoronoi: the last build was not of one domain");
+    }
+    return *voronoi;
+}
+
+template <typename PointT>
+vector<PointT> Voronoi3D<PointT>::CreateBoundaryPoints(const std::vector<PointT> &points, vector<std::pair<std::size_t, std::size_t>> const &to_duplicate, vector<vector<size_t>> &past_duplicate)
 {
     size_t Ncheck = to_duplicate.size();
     vector<std::pair<std::size_t, std::size_t>> to_add;
@@ -1248,7 +848,7 @@ vector<PointT> Voronoi3D<PointT>::CreateBoundaryPoints(vector<std::pair<std::siz
         if (first_time || !std::binary_search(past_duplicate[to_duplicate[i].first].begin(),
                                                                                     past_duplicate[to_duplicate[i].first].end(), to_duplicate[i].second))
         {
-            res.push_back(MirrorPoint(faces[to_duplicate[i].first], del_.points_[to_duplicate[i].second]));
+            res.push_back(MirrorPoint(faces[to_duplicate[i].first], points[to_duplicate[i].second]));
             to_add.push_back(to_duplicate[i]);
         }
     }
@@ -1274,14 +874,13 @@ template <typename PointT>
 template <typename PointT>
 double Voronoi3D<PointT>::GetMaxRadius(const size_t &index) const
 {
-    std::size_t N = PointTetras_[index].size();
     double res = 0;
-    #if defined(__INTEL_COMPILER) || defined(__INTEL_LLVM_COMPILER)
-    #pragma ivdep
-    #endif
-    for(std::size_t i = 0; i < N; ++i)
+    for(const size_t &face : this->FacesInCell_[index])
     {
-        res = std::max(res, GetRadius(PointTetras_[index][i]));
+        for(const size_t &vertex : this->PointsInFace_[face])
+        {
+            res = std::max(res, fastabs(this->tetra_centers_[vertex] - this->meshPoints_[index]));
+        }
     }
     return res;
 }
@@ -1293,14 +892,13 @@ double Voronoi3D<PointT>::GetMaxRadius(const size_t &index) const
 template <typename PointT>
 double Voronoi3D<PointT>::GetMinRadius(const size_t &index) const
 {
-    std::size_t N = PointTetras_[index].size();
     double res = std::numeric_limits<double>::max();
-    #if defined(__INTEL_COMPILER) || defined(__INTEL_LLVM_COMPILER)
-    #pragma ivdep
-    #endif
-    for(std::size_t i = 0; i < N; ++i)
+    for(const size_t &face : this->FacesInCell_[index])
     {
-        res = std::min(res, GetRadius(PointTetras_[index][i]));
+        for(const size_t &vertex : this->PointsInFace_[face])
+        {
+            res = std::min(res, fastabs(this->tetra_centers_[vertex] - this->meshPoints_[index]));
+        }
     }
     return res;
 }
@@ -1325,24 +923,13 @@ void Voronoi3D<PointT>::InitialBoxBuild(std::vector<Face3D<PointT>> &box, std::v
     }
 }
 
-/**
- * \author Maor Mizrachi
- * \brief Initializes internal data structures, for the voronoi build
-*/
+/** \brief Initializes internal data structures, for the voronoi build. */
 template <typename PointT>
 void Voronoi3D<PointT>::BuildInitialize(size_t num_points)
 {
     ++buildGeneration_;
     this->periodicImagePhysical_.clear();
-    // assert(num_points > 0);
-    // Clear data
-    PointTetras_.clear();
-    R_.clear();
-    if(num_points > 0) R_.reserve(num_points * 11);
     tetra_centers_.clear();
-    if(num_points > 0) tetra_centers_.reserve(num_points * 11);
-    // Voronoi Data
-    del_.Clean();
     FacesInCell_.clear();
     PointsInFace_.clear();
     FaceNeighbors_.clear();
@@ -1350,8 +937,6 @@ void Voronoi3D<PointT>::BuildInitialize(size_t num_points)
     Face_CM_.clear();
     volume_.clear();
     area_.clear();
-    flatMesh_ = Geometry::FlatMesh();
-    flatVoronoi_ = Geometry::FlatVoronoi();
     Norg_ = num_points;
     #ifdef MADVORO_WITH_MPI
         duplicatedprocs_.clear();
@@ -1409,81 +994,12 @@ inline void Voronoi3D<PointT>::SetImbalanceTolerance(double tolerance)
 }
 
 template <typename PointT>
-std::tuple<std::vector<PointT>, std::vector<std::vector<size_t>>, std::vector<std::vector<size_t>>>
-    Voronoi3D<PointT>::InitialGhostPointsExchange(const MPI_Comm &comm) const
-{
-    int size;
-    MPI_Comm_size(comm, &size);
-
-    std::vector<std::vector<PointT>> sentPoints(size);
-    std::vector<std::vector<size_t>> sentPointsIndices(size);
-
-    
-    for(int _rank = 0; _rank < size; _rank++)
-    {
-        size_t rankIndex = std::distance(this->real_duplicated_proc.begin(), std::find(this->real_duplicated_proc.begin(), this->real_duplicated_proc.end(), _rank));
-        if(rankIndex != this->real_duplicated_proc.size())
-        {
-            // found
-            std::vector<size_t> &sentIndices = sentPointsIndices[_rank];
-            std::vector<PointT> &pointsToSend = sentPoints[_rank];
-
-            // rank _rank is duplicated
-            for(size_t pointIdx : this->real_duplicated_points[rankIndex])
-            {
-                if(pointIdx < this->Norg_)
-                {
-                    sentIndices.push_back(pointIdx);
-                    pointsToSend.push_back(this->allMyPoints[pointIdx]);
-                }
-            }
-        }
-    }
-
-    bool hasAnythingToSend = false;
-    for(int _rank = 0; _rank < size && !hasAnythingToSend; _rank++)
-        hasAnythingToSend = !sentPoints[_rank].empty();
-
-    int globalHasData = 0;
-    int localHasData = hasAnythingToSend ? 1 : 0;
-    MPI_Allreduce(&localHasData, &globalHasData, 1, MPI_INT, MPI_MAX, comm);
-
-    if(globalHasData == 0)
-    {
-        return std::tuple(std::vector<PointT>{},
-                          sentPointsIndices,
-                          std::vector<std::vector<size_t>>(size));
-    }
-
-    std::vector<std::vector<PointT>> recvPoints = MPI_Exchange_all_to_all_sparse(sentPoints, comm);
-
-    std::vector<PointT> ghostPoints;
-    std::vector<std::vector<size_t>> recvPointsIndices(size);
-    size_t totalSize = 0;
-
-    for(int _rank = 0; _rank < size; _rank++)
-    {
-        std::vector<PointT> &receivedFromRank = recvPoints[_rank];
-        std::vector<size_t> &receivedIndices = recvPointsIndices[_rank];
-        size_t receiving = receivedFromRank.size();
-        for(size_t i = 0; i < receiving; i++)
-        {
-            receivedIndices.push_back(totalSize);
-            totalSize++;
-        }
-        ghostPoints.insert(ghostPoints.end(), receivedFromRank.begin(), receivedFromRank.end());
-    }
-
-    return std::tuple(ghostPoints, sentPointsIndices, recvPointsIndices);
-}
-
-template <typename PointT>
 void Voronoi3D<PointT>::FilterRealGhostPoints()
 {
     this->real_duplicated_proc.clear();
     this->real_duplicated_points.clear();
 
-    // std::vector<bool> isNecessaryRecvPoint(this->del_.points_.size(), false);
+    // std::vector<bool> isNecessaryRecvPoint(this->meshPoints_.size(), false);
     // for(size_t pointIdx = 0; pointIdx < this->Norg_; pointIdx++)
     // {
     //     for(const size_t &neighborIdx : this->GetNeighbors(pointIdx))
@@ -1530,58 +1046,7 @@ void Voronoi3D<PointT>::FilterRealGhostPoints()
     }
 }
 
-/**
- * \author Maor Mizrachi
- * \brief Updates the duplicated points array
-*/
-template <typename PointT>
-void Voronoi3D<PointT>::UpdateDuplicatedPoints(const std::vector<int> &sentProc, const std::vector<std::vector<size_t>> &sentPoints)
-{
-    for(size_t i = 0; i < sentProc.size(); i++)
-    {
-      int _rank = sentProc[i];
-      size_t rankIdx = std::find(this->duplicatedprocs_.begin(), this->duplicatedprocs_.end(), _rank) - this->duplicatedprocs_.begin();
-      if(rankIdx == this->duplicatedprocs_.size())
-      {
-        // TODO: necessary? If `rankIdx` didn't appear in `this->duplicatedprocs_`, we will delete it in the next part
-        // new rank in this->duplicatedprocs_, initialize it
-        this->duplicatedprocs_.push_back(_rank);
-        this->duplicated_points_.emplace_back(std::vector<size_t>());
-        this->Nghost_.emplace_back(std::vector<size_t>());
-      }
-      for(const size_t &pointIdx : sentPoints[i])
-      {
-        this->duplicated_points_[rankIdx].push_back(pointIdx);
-      }
-    }
-}
 
-/**
- * \author Maor Mizrachi
- * \brief Ensures that the duplicated and ghost arrays contain only the points from/to ranks which are intersecting (sent iff received)
-*/
-template <typename PointT>
-void Voronoi3D<PointT>::EnsureSymmetry(const std::vector<int> &sentProc, const std::vector<std::vector<int>> &recvProcLists)
-{
-    for(size_t i = 0; i < this->duplicatedprocs_.size(); i++)
-    {
-        int _rank =  this->duplicatedprocs_[i];
-        bool notAppearingInSent = (std::find(sentProc.begin(), sentProc.end(), _rank) == sentProc.end());
-        bool notAppearingInAllRecv = std::all_of(recvProcLists.cbegin(), recvProcLists.cend(), [_rank](const std::vector<int> &recvProcList){return std::find(recvProcList.cbegin(), recvProcList.cend(), _rank) == recvProcList.cend();});
-        
-        if(notAppearingInSent or notAppearingInAllRecv)
-        {
-            // not in the intersection, remove the rank
-            this->duplicatedprocs_.erase(this->duplicatedprocs_.begin() + i);
-            this->duplicated_points_.erase(this->duplicated_points_.begin() + i);
-            this->Nghost_.erase(this->Nghost_.begin() + i);
-            i--;
-        }
-    }
-    ContainerOps::conditional_shrink(this->duplicatedprocs_);
-    ContainerOps::conditional_shrink(this->duplicated_points_);
-    ContainerOps::conditional_shrink(this->Nghost_);
-}
 
 // void Voronoi3D<PointT>::InitialExchange(const std::vector<PointT> &points, std::vector<int> &sentProc, std::vector<std::vector<size_t>> &sentPoints, const MPI_Comm &comm)
 // {
@@ -1715,8 +1180,8 @@ void Voronoi3D<PointT>::EnsureSymmetry(const std::vector<int> &sentProc, const s
 //             for(size_t i = 0; i < recvLengths[_rank]; i++)
 //             {
 //                 // batchInfo.pointsFromRanks[_rank][i] holds an index of point, but this point will be added to my delaunay, so
-//                 // its index there will be this->del_.points_.size() + batchInfo.pointsFromRanks[_rank][i]
-//                 this->Nghost_[dupRankIdx].push_back(this->del_.points_.size() + insertedSoFar + i);
+//                 // its index there will be this->meshPoints_.size() + batchInfo.pointsFromRanks[_rank][i]
+//                 this->Nghost_[dupRankIdx].push_back(this->meshPoints_.size() + insertedSoFar + i);
 //             }
 //         }
 //     }
@@ -1749,38 +1214,8 @@ void Voronoi3D<PointT>::EnsureSymmetry(const std::vector<int> &sentProc, const s
 // }
 
 
-/**
- * \author Maor Mizrachi
- * \brief Sets the ghost points arrays (duplicatedprocs_, duplicated_points_, Nghost_)
-*/
-template <typename PointT>
-void Voronoi3D<PointT>::SetGhostArray(const std::vector<int> &recvProc, const std::vector<std::vector<size_t>> &recvPoints)
-{
-    for(size_t i = 0; i < recvProc.size(); i++)
-    {
-        int _rank = recvProc[i];
-        const std::vector<size_t> &receivedFromRank = recvPoints[i];
-        size_t rankIdx = std::find(this->duplicatedprocs_.begin(), this->duplicatedprocs_.end(), _rank) - this->duplicatedprocs_.begin();
-        if(rankIdx == this->duplicatedprocs_.size())
-        {
-            // new rank in this->duplicatedprocs_, initialize it
-            this->duplicatedprocs_.push_back(_rank);
-            this->duplicated_points_.emplace_back(std::vector<size_t>());
-            this->Nghost_.emplace_back(std::vector<size_t>());
-        }
-        for(const size_t &RelativePointIdx : receivedFromRank)
-        {
-            // batchInfo.pointsFromRanks[_rank][i] holds an index of point, but this point will be added to my delaunay, so
-            // its index there will be this->del_.points_.size() + batchInfo.pointsFromRanks[_rank][i]
-            this->Nghost_[rankIdx].push_back(this->del_.points_.size() + RelativePointIdx);
-        }
-    }
-}
 
-/**
- * \author Maor Mizrachi
- * \brief Makes load rebalancing if needed, if needed, and initializing the environment agent (the object which is responsible for dividing the space to ranks)
-*/
+/** \brief Rebalances if needed and exchanges the points between the ranks. */
 template <typename PointT>
 std::vector<PointT> Voronoi3D<PointT>::PrepareToBuildParallel(const std::vector<PointT> &allPoints, const std::vector<double> &allWeights, const std::vector<size_t> &indicesToBuild, bool suppressRebalancing, bool suppressExchange)
 {
@@ -1792,9 +1227,7 @@ std::vector<PointT> Voronoi3D<PointT>::PrepareToBuildParallel(const std::vector<
     {
         this->all_CM.resize(allPoints.size());
     }
-    
-    std::chrono::high_resolution_clock::time_point start, end;
-    
+        
     assert(this->pointsManager != nullptr);
 
     rank_t rank;
@@ -1809,14 +1242,17 @@ std::vector<PointT> Voronoi3D<PointT>::PrepareToBuildParallel(const std::vector<
     bool allowExchange = (canDoExchange == 1);
 
     if(suppressExchange)
+    {
         this->allPointsWeights.resize(allPoints.size(), 1.0);
+    }
 
     std::vector<VoronoiPayload<PointT>> payloads(allPoints.size());
     for(size_t i = 0; i < allPoints.size(); i++)
+    {
         payloads[i] = VoronoiPayload<PointT>(this->radiuses[i], this->all_CM[i]);
+    }
 
-    // allPoints are this rank's own points; non-participating points must travel
-    // too, since they act as neighbours of the participating ones.
+    // non-participating points travel too (they are neighbours of participating ones)
     PointsExchangeResult<PointT, VoronoiPayload<PointT>> exchangeResult = this->pointsManager->update(allPoints, allowExchange? allWeights : this->allPointsWeights, payloads, indicesToBuild, allowRebalance, allowExchange, ExchangeScope::AllPointsFlagIndices);
 
     this->allMyPoints = std::move(exchangeResult.newPoints);
@@ -1838,7 +1274,6 @@ std::vector<PointT> Voronoi3D<PointT>::PrepareToBuildParallel(const std::vector<
     this->indicesInAllMyPoints = AllPointsMap();
     size_t numOfSelfPoints = this->self_index_.size();
 
-    // this loop determines the points list, and the matching indices of each point (in the points list) to the long points list
     size_t allPointsSize = this->allMyPoints.size();
     for(size_t pointIdx = 0; pointIdx < allPointsSize; pointIdx++)
     {
@@ -1917,46 +1352,6 @@ void Voronoi3D<PointT>::PreparePoints(const std::vector<PointT> &points, const s
 }
 
 template <typename PointT>
-void Voronoi3D<PointT>::UpdatePointsTree(const std::vector<PointT> &activePoints)
-{    
-    auto start = std::chrono::high_resolution_clock::now();
-    
-    PointT width = this->ur_ - this->ll_;
-    this->allMyPointsTree = std::make_shared<OctTree<IVec>>(IVec(this->ll_ - width * 0.00001, std::numeric_limits<size_t>::max()),
-                                                                    IVec(this->ur_ + width * 0.00001, std::numeric_limits<size_t>::max()));
-    size_t allPointsNum = this->allMyPoints.size();
-    for(size_t pointIdx = 0; pointIdx < allPointsNum; pointIdx++)
-    {
-        const PointT &point = this->allMyPoints[pointIdx];
-        this->allMyPointsTree->insert(IVec(point.x, point.y, point.z, pointIdx));
-    }
-
-    if(this->allMyPoints.size() == activePoints.size())
-    {
-        // not a real parital build
-        this->myPointsTree = this->allMyPointsTree;
-    }
-    else
-    {
-        this->myPointsTree = std::make_shared<OctTree<IVec>>(IVec(this->ll_ - width * 0.00001, std::numeric_limits<size_t>::max()),
-                                                                        IVec(this->ur_ + width * 0.00001, std::numeric_limits<size_t>::max()));
-        for(size_t pointIdx = 0; pointIdx < this->Norg_; pointIdx++)
-        {
-            const PointT &point = this->allMyPoints[this->indicesInAllMyPoints[pointIdx]];
-            this->myPointsTree->insert(IVec(point.x, point.y, point.z, pointIdx));
-        }
-    }
-    auto end = std::chrono::high_resolution_clock::now();
-
-    rank_t rank;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    if(rank == 0)
-    {
-        std::cout << "Time for tree: " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
-    }
-}
- 
-template <typename PointT>
 bool Voronoi3D<PointT>::DidRebalance(void) const
 {
     return this->pointsManager->didRebalance();
@@ -1992,161 +1387,21 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
         std::cout << "Time for preparing (hilbert tree + load balancing): " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
     }
 
-    // every rank builds the same way (the subdomains exchange ghosts collectively)
-    int useSubdomains = this->UsesThreadSubdomains() ? 1 : 0;
-    MPI_Allreduce(MPI_IN_PLACE, &useSubdomains, 1, MPI_INT, MPI_LAND, MPI_COMM_WORLD);
-    if(useSubdomains == 1)
-    {
-        this->BuildFromThreadSubdomains(size > 1);
-        this->ExchangeGhostVolumes();
-        return activePoints;
-    }
     {
         int myPts = static_cast<int>(activePoints.size());
         int maxPts = myPts, minPts = myPts;
         MPI_Allreduce(MPI_IN_PLACE, &maxPts, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
         MPI_Allreduce(MPI_IN_PLACE, &minPts, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
         if (rank == 0)
+        {
             std::cout << "Post-LB point distribution: max=" << maxPts << ", min=" << minPts << std::endl;
+        }
     }
 
-    start = std::chrono::high_resolution_clock::now();
-
-    std::vector<size_t> order;
-
-    // Initialize the Delaunay structure on every rank.  Empty ranks still need
-    // the four bounding-tetrahedron points before the collective ghost build;
-    // otherwise BuildExtra() sees an uninitialized point array.
-    std::pair<PointT, PointT> bounding_box =
-        std::make_pair(this->ll_, this->ur_);
-    for(const PointT &point : activePoints)
-    {
-        bounding_box.first.x = std::min(bounding_box.first.x, point.x);
-        bounding_box.second.x = std::max(bounding_box.second.x, point.x);
-        bounding_box.first.y = std::min(bounding_box.first.y, point.y);
-        bounding_box.second.y = std::max(bounding_box.second.y, point.y);
-        bounding_box.first.z = std::min(bounding_box.first.z, point.z);
-        bounding_box.second.z = std::max(bounding_box.second.z, point.z);
-    }
-
-    order = HilbertOrder3D(activePoints);
-    this->del_.Build(activePoints, bounding_box.second, bounding_box.first, order);
-
-    // updates the radiuses array of the tetrahedra, as well as the lists for each point what tetras it belongs to
-    this->R_.resize(this->del_.tetras_.size());
-    ContainerOps::conditional_shrink(this->R_);
-    // std::fill(this->R_.begin(), this->R_.end(), RADIUS_UNINITIALIZED);
-    this->tetra_centers_.resize(this->R_.size());
-    ContainerOps::conditional_shrink(this->tetra_centers_);
-    this->bigtet_ = SetPointTetras();
-
-    // MPI_Barrier(MPI_COMM_WORLD);
-
-    end = std::chrono::high_resolution_clock::now();
-    if(rank == 0)
-    {
-        std::cout << "Time for initial build: " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
-    }
-
-    if(this->radiuses.size() < this->Norg_)
-    {
-        MadVoro::Exception::MadVoroException eo("Voronoi3D:BuildPartiallyParallel: wrong size of radiuses array");
-        eo.addEntry("Rank", rank);
-        eo.addEntry("radiuses.size()", this->radiuses.size());
-        eo.addEntry("Norg_", this->Norg_);
-        throw eo;
-    }
-
-    START_TIMER_PREEMPTIVE("Tree construction");
-
-    this->UpdatePointsTree(activePoints);
-    
-    START_TIMER_PREEMPTIVE("Radiuses calculation");
-    start = std::chrono::high_resolution_clock::now();
-    this->UpdateRadiuses(activePoints);    
-    end = std::chrono::high_resolution_clock::now();
-
-    if(rank == 0)
-    {
-        std::cout << "Time for radiuses: " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
-    }
-
-    START_TIMER_PREEMPTIVE("Range agent update");
-
-    start = std::chrono::high_resolution_clock::now();
-    this->UpdateRangeFinder();
-    end = std::chrono::high_resolution_clock::now();
-
-    if(rank == 0)
-    {
-        std::cout << "Time for range agent: " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
-    }
-
-    START_TIMER_PREEMPTIVE("Bringing ghosts");
-
-    this->BringGhostPointsToBuild(MPI_COMM_WORLD);
-
-    START_TIMER_PREEMPTIVE("Building voronoi");
-
-    start = std::chrono::high_resolution_clock::now();
-    
-    CM_.resize(del_.points_.size());
-    ContainerOps::conditional_shrink(CM_);
-    volume_.resize(Norg_);
-    ContainerOps::conditional_shrink(volume_);
-
-    if(not activePoints.empty())
-    {
-        // Create Voronoi
-        BuildVoronoi(order);
-    }
-
-
-    // todo: why?
-    // std::vector<double>().swap(this->R_);
-    // std::vector<tetra_vec>().swap(this->PointTetras_);
-
-    this->UpdateCMs();
-
-    this->ExchangeGhostVolumes();
-
-    end = std::chrono::high_resolution_clock::now();
-
-    if(rank == 0)
-    {
-        std::cout << "Time for build Voronoi from Delaunay: " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
-    }
-
-    // save the list of the real ghost points
-    // this->FilterRealGhostPoints();
+    this->BuildCells(size > 1);
     return activePoints;
 }
 
-/**
- * \brief Gives the ghost points the volumes of their cells in the ranks that own them.
-*/
-template <typename PointT>
-void Voronoi3D<PointT>::ExchangeGhostVolumes(void)
-{
-    const std::vector<rank_t> &correspondents = this->GetDuplicatedProcs();
-    const std::vector<std::vector<size_t>> &indices = this->GetDuplicatedPoints();
-    // The records list the points sent by their indices among all the rank's points, which
-    // in a partial build are not the cells' indices (and a point not built has no volume)
-    std::vector<double> allVolumes(this->GetAllPointsNo(), 0.0);
-    for(size_t k = 0; k < this->Norg_; ++k)
-    {
-        allVolumes[this->indicesInAllMyPoints.at(k)] = this->volume_[k];
-    }
-    std::vector<std::vector<double>> exchange = MPI_exchange_data_indexed(correspondents, allVolumes, indices);
-    const std::vector<std::vector<size_t>> &ghost_indices = this->GetGhostIndeces();
-    this->volume_.resize(this->GetTotalPointNumber(), 0.0);
-    for(size_t i = 0; i < correspondents.size(); ++i)
-    {
-        const std::vector<double> &data = exchange[i];
-        for(size_t j = 0; j < data.size(); ++j)
-            this->volume_.at(ghost_indices.at(i).at(j)) = data[j];
-    }
-}
 
 inline boost::container::flat_map<size_t, std::pair<rank_t, size_t>> GetGhostInfo(const std::vector<rank_t> &duplicatedProcs, const std::vector<std::vector<size_t>> &duplicatedPoints, const std::vector<std::vector<size_t>> &Nghost, const boost::container::flat_map<size_t, std::pair<rank_t, size_t>> &whereNow)
 {
@@ -2247,11 +1502,7 @@ struct MockMeshGhostAsk
 
     bool operator==(MockMeshGhostAsk const &other) const
     {
-        return receiver == other.receiver
-            && pointIndex == other.pointIndex
-            && imageTx == other.imageTx
-            && imageTy == other.imageTy
-            && imageTz == other.imageTz;
+        return receiver == other.receiver and pointIndex == other.pointIndex and imageTx == other.imageTx and imageTy == other.imageTy and imageTz == other.imageTz;
     }
 
     bool operator<(MockMeshGhostAsk const &other) const
@@ -2283,14 +1534,14 @@ void Voronoi3D<PointT>::MockMesh(void)
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     const bool periodic = this->HasPeriodicBoundaries();
-    // Every rank rebuilds the same way (the serial rebuild's exchanges are collective)
+    // all ranks must agree (the exchanges are collective)
     int useSubdomains = (this->threadSubdomainCount_ > 0 and not periodic) ? 1 : 0;
     MPI_Allreduce(MPI_IN_PLACE, &useSubdomains, 1, MPI_INT, MPI_LAND, MPI_COMM_WORLD);
     if(periodic)
     {
         this->ReportUnusedThreadSubdomains();
     }
-    // MADVORO_LB_TIMING=1 prints each phase's max and average over the ranks (collective)
+    // MADVORO_LB_TIMING=1 prints the phase timings (collective)
     static const bool lbTiming = std::getenv("MADVORO_LB_TIMING") != nullptr;
     auto _prof = [&](const char *label, double localTime)
     {
@@ -2303,8 +1554,9 @@ void Voronoi3D<PointT>::MockMesh(void)
         double globalSum = 0;
         MPI_Allreduce(&localTime, &globalSum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
         if(rank == 0)
-            std::cout << label << ": max=" << globalMax.val << "s (rank " << globalMax.rank
-                      << "), avg=" << globalSum / size << "s" << std::endl;
+        {
+            std::cout << label << ": max=" << globalMax.val << "s (rank " << globalMax.rank << "), avg=" << globalSum / size << "s" << std::endl;
+        }
     };
     auto _t0 = std::chrono::high_resolution_clock::now();
     auto _t1 = _t0;
@@ -2320,12 +1572,11 @@ void Voronoi3D<PointT>::MockMesh(void)
     boost::container::flat_map<size_t, std::pair<rank_t, size_t>> ghostsInfo = GetGhostInfo(this->duplicatedprocs_, this->duplicated_points_, this->Nghost_, whereNow); // previous ghost -> holder (rank + index)
     _phase("MockMesh: RemoteIndices+GhostInfo");
 
-    std::vector<PointT> delaunayPoints = this->del_.points_;
+    std::vector<PointT> delaunayPoints = this->meshPoints_;
 
     std::vector<PointT> new_points;
     this->indicesInAllMyPoints = AllPointsMap();
 
-    // this loop determines the points list, and the matching indices of each point (in the points list) to the long points list
     size_t allPointsSize = this->allMyPoints.size();
     for(size_t pointIdx = 0; pointIdx < allPointsSize; pointIdx++)
     {
@@ -2340,7 +1591,7 @@ void Voronoi3D<PointT>::MockMesh(void)
 
     auto periodicTranslationAt = [&](size_t delaunayIndex) -> PointT
     {
-        if(!periodic || delaunayIndex >= this->periodicImageTranslation_.size())
+        if(not periodic or delaunayIndex >= this->periodicImageTranslation_.size())
         {
             return PointT();
         }
@@ -2361,9 +1612,7 @@ void Voronoi3D<PointT>::MockMesh(void)
         PointT imageTranslation = periodicTranslationAt(oldNeighborIndex);
         if(periodic)
         {
-            if(imageTranslation.x != typename PointT::coord_type(0)
-                || imageTranslation.y != typename PointT::coord_type(0)
-                || imageTranslation.z != typename PointT::coord_type(0))
+            if(imageTranslation.x != typename PointT::coord_type(0) or imageTranslation.y != typename PointT::coord_type(0) or imageTranslation.z != typename PointT::coord_type(0))
             {
                 if(sender == receiver)
                 {
@@ -2381,10 +1630,7 @@ void Voronoi3D<PointT>::MockMesh(void)
 
     size_t previousN = this->Norg_;
 
-    // Resolves the pre-image of a periodic image in the previous mesh. This runs before
-    // BuildInitialize, so the points tree and the resolution cache still describe that mesh. The
-    // match is verified against the untranslated position, because an unverified nearest point is
-    // an arbitrary cell whenever the pre-image is not local.
+    // pre-image in the previous mesh, verified (the nearest point is arbitrary when the pre-image is not local)
     auto resolveOldPreImage = [&](size_t oldImageIndex) -> size_t
     {
         const size_t preImage = this->ResolvePeriodicImageIndex(oldImageIndex);
@@ -2429,10 +1675,7 @@ void Voronoi3D<PointT>::MockMesh(void)
                 }
                 else if(this->IsPeriodicImage(neighbor))
                 {
-                    // A periodic image has to follow its pre-image, not the cell it borders.
-                    // Repartitioning can hand the two to different ranks, and rebuilding the image on
-                    // the cell's rank alone leaves it with no owner to exchange its state and centroid
-                    // with. Route it the same way as any other ghost of the pre-image.
+                    // a periodic image follows its pre-image, not the cell it borders
                     const size_t preImage = resolveOldPreImage(neighbor);
                     if(preImage < previousN)
                     {
@@ -2468,8 +1711,7 @@ void Voronoi3D<PointT>::MockMesh(void)
     _t1 = std::chrono::high_resolution_clock::now();
     _prof("BuildAskToSend", std::chrono::duration<double>(_t1 - _t0).count());
     _t0 = std::chrono::high_resolution_clock::now();
-    std::vector<std::pair<rank_t, std::vector<MockMeshGhostAsk>>> whatIshouldSend =
-        MPI_Exchange_sparse_by_rank(askToSend, MPI_COMM_WORLD, MPI_EXCHANGE_SPARSE_TAG + 2);
+    std::vector<std::pair<rank_t, std::vector<MockMeshGhostAsk>>> whatIshouldSend = MPI_Exchange_sparse_by_rank(askToSend, MPI_COMM_WORLD, MPI_EXCHANGE_SPARSE_TAG + 2);
     _t1 = std::chrono::high_resolution_clock::now();
     _prof("AskToSendExchange", std::chrono::duration<double>(_t1 - _t0).count());
     _t0 = std::chrono::high_resolution_clock::now();
@@ -2514,13 +1756,11 @@ void Voronoi3D<PointT>::MockMesh(void)
     _prof("BuildSendToRanks", std::chrono::duration<double>(_t1 - _t0).count());
 
     _t0 = std::chrono::high_resolution_clock::now();
-    std::vector<std::pair<rank_t, std::vector<PointT>>> receivedByRanks =
-        MPI_Exchange_sparse_by_rank(whatIShouldSendToRanks, MPI_COMM_WORLD, MPI_EXCHANGE_SPARSE_TAG + 3);
+    std::vector<std::pair<rank_t, std::vector<PointT>>> receivedByRanks = MPI_Exchange_sparse_by_rank(whatIShouldSendToRanks, MPI_COMM_WORLD, MPI_EXCHANGE_SPARSE_TAG + 3);
     _t1 = std::chrono::high_resolution_clock::now();
     _prof("FinalPointsExchange", std::chrono::duration<double>(_t1 - _t0).count());
 
-    // The ghosts other ranks sent, in the order they arrived: their positions, and in `Nghost`
-    // (by rank, as newDuplicatedProcs) their indices in the mesh, from `firstIndex` on
+    // the received ghosts, and their mesh indices (from `firstIndex` on) in Nghost
     const auto receivedGhosts = [&](size_t firstIndex, std::vector<PointT> &ghosts, std::vector<std::vector<size_t>> &Nghost)
     {
         size_t currentIndex = firstIndex;
@@ -2553,10 +1793,7 @@ void Voronoi3D<PointT>::MockMesh(void)
 
     if(useSubdomains == 1)
     {
-        // A build from thread subdomains in which the rank already has every ghost it needs:
-        // the subdomains search only each other and these ghosts (no other rank), which
-        // follow the rank's points and the four bounding points. The ghosts are recorded
-        // first: the build gives them the centroids of their cells through the records.
+        // the rank already has every ghost it needs
         this->BuildInitialize(new_points.size());
         std::vector<PointT> ghosts;
         std::vector<std::vector<size_t>> newNghost(newDuplicatedProcs.size());
@@ -2564,81 +1801,49 @@ void Voronoi3D<PointT>::MockMesh(void)
         this->duplicatedprocs_ = std::move(newDuplicatedProcs);
         this->duplicated_points_ = std::move(newDuplicatedPoints);
         this->Nghost_ = std::move(newNghost);
-        this->BuildFromThreadSubdomains(false, &ghosts);
-        this->ExchangeGhostVolumes();
+        // the old mesh's mirrors (one subdomain needs no search with them)
+        std::vector<PointT> mirrors;
+        std::set<std::array<typename PointT::coord_type, 3>> addedMirrors;
+        for(const auto &[_senderRank, incomingMirrors] : MPI_Exchange_sparse_by_rank(mirrorsToSend, MPI_COMM_WORLD, MPI_EXCHANGE_SPARSE_TAG + 1))
+        {
+            for(const PointT &mirror : incomingMirrors)
+            {
+                if(addedMirrors.insert({mirror.x, mirror.y, mirror.z}).second)
+                {
+                    mirrors.push_back(mirror);
+                }
+            }
+        }
+        this->BuildCells(false, &ghosts, &mirrors);
         _phase("MockMesh: thread subdomains");
         return;
     }
 
     _mark = std::chrono::high_resolution_clock::now();
     this->BuildInitialize(new_points.size());
-    std::vector<size_t> order;
-    // A rebalanced rank may own no cells.  It must still initialize the
-    // bounding tetrahedron before participating in ghost reconstruction.
-    std::pair<PointT, PointT> bounding_box =
-        std::make_pair(this->ll_, this->ur_);
-    for(const PointT &point : new_points)
-    {
-        bounding_box.first.x = std::min(bounding_box.first.x, point.x);
-        bounding_box.second.x = std::max(bounding_box.second.x, point.x);
-        bounding_box.first.y = std::min(bounding_box.first.y, point.y);
-        bounding_box.second.y = std::max(bounding_box.second.y, point.y);
-        bounding_box.first.z = std::min(bounding_box.first.z, point.z);
-        bounding_box.second.z = std::max(bounding_box.second.z, point.z);
-    }
-    order = HilbertOrder3D(new_points);
-    this->del_.Build(new_points, bounding_box.second, bounding_box.first, order);
-    _phase("MockMesh: HilbertOrder+DelaunayBuild");
+    // the old mesh's periodic images, then its mirrors, from each rank (each once: a point can border several cells), then the ghosts other ranks send
+    std::vector<std::vector<PointT>> extras;
     if(periodic)
     {
-        this->periodicImageTranslation_.assign(this->del_.points_.size(), PointT());
-    }
-    // updates the radiuses array of the tetrahedra, as well as the lists for each point what tetras it belongs to
-    this->R_.resize(this->del_.tetras_.size());
-    ContainerOps::conditional_shrink(this->R_);
-    // std::fill(this->R_.begin(), this->R_.end(), RADIUS_UNINITIALIZED);
-    this->tetra_centers_.resize(this->R_.size());
-    ContainerOps::conditional_shrink(this->tetra_centers_);
-    this->bigtet_ = SetPointTetras();
-    _phase("MockMesh: SetPointTetras");
-
-    this->UpdatePointsTree(new_points);
-    _phase("MockMesh: UpdatePointsTree");
-
-    _t0 = std::chrono::high_resolution_clock::now();
-    this->UpdateRadiuses(new_points);
-    _t1 = std::chrono::high_resolution_clock::now();
-    _prof("UpdateRadiuses", std::chrono::duration<double>(_t1 - _t0).count());
-    _t0 = std::chrono::high_resolution_clock::now();
-    this->UpdateRangeFinder();
-    _t1 = std::chrono::high_resolution_clock::now();
-    _prof("UpdateRangeFinder", std::chrono::duration<double>(_t1 - _t0).count());
-    _t0 = std::chrono::high_resolution_clock::now();
-    if(periodic)
-    {
-        auto periodicExtrasResult = MPI_Exchange_sparse_by_rank(periodicExtrasToBuild, MPI_COMM_WORLD, MPI_EXCHANGE_SPARSE_TAG + 1);
-        _t1 = std::chrono::high_resolution_clock::now();
-        _prof("PeriodicExtrasExchange", std::chrono::duration<double>(_t1 - _t0).count());
-        _t0 = std::chrono::high_resolution_clock::now();
-        for(const auto &[_senderRank, incomingExtras] : periodicExtrasResult)
+        std::set<std::array<typename PointT::coord_type, 3>> addedImages;
+        for(const auto &[_senderRank, incomingExtras] : MPI_Exchange_sparse_by_rank(periodicExtrasToBuild, MPI_COMM_WORLD, MPI_EXCHANGE_SPARSE_TAG + 1))
         {
-            if(this->Norg_ > 0 && !incomingExtras.empty())
+            std::vector<PointT> newImages;
+            for(const PointT &image : incomingExtras)
             {
-                this->BuildExtraTracked(incomingExtras);
+                if(addedImages.insert({image.x, image.y, image.z}).second)
+                {
+                    newImages.push_back(image);
+                }
+            }
+            if(this->Norg_ > 0 and not newImages.empty())
+            {
+                extras.push_back(std::move(newImages));
             }
         }
-        _t1 = std::chrono::high_resolution_clock::now();
-        _prof("BuildExtraTracked(periodic images)", std::chrono::duration<double>(_t1 - _t0).count());
-        _t0 = std::chrono::high_resolution_clock::now();
     }
-    auto _mirrorsResult = MPI_Exchange_sparse_by_rank(mirrorsToSend, MPI_COMM_WORLD, MPI_EXCHANGE_SPARSE_TAG + 1);
-    _t1 = std::chrono::high_resolution_clock::now();
-    _prof("MirrorsExchange", std::chrono::duration<double>(_t1 - _t0).count());
-    _t0 = std::chrono::high_resolution_clock::now();
-    // A mirror comes once for each old cell it bordered that moved here (possibly from several
-    // ranks): add each once (the Delaunay cannot take a point twice)
     std::set<std::array<typename PointT::coord_type, 3>> addedMirrors;
-    for(const auto &[_senderRank, incomingMirrors] : _mirrorsResult)
+    for(const auto &[_senderRank, incomingMirrors] : MPI_Exchange_sparse_by_rank(mirrorsToSend, MPI_COMM_WORLD, MPI_EXCHANGE_SPARSE_TAG + 1))
     {
         std::vector<PointT> newMirrors;
         for(const PointT &mirror : incomingMirrors)
@@ -2648,70 +1853,36 @@ void Voronoi3D<PointT>::MockMesh(void)
                 newMirrors.push_back(mirror);
             }
         }
-        if(this->Norg_ > 0 && !newMirrors.empty())
+        if(this->Norg_ > 0 and not newMirrors.empty())
         {
-            this->del_.BuildExtra(newMirrors);
+            extras.push_back(std::move(newMirrors));
         }
     }
-    _t1 = std::chrono::high_resolution_clock::now();
-    _prof("BuildExtra(mirrors)", std::chrono::duration<double>(_t1 - _t0).count());
-    _mark = std::chrono::high_resolution_clock::now();
-
+    size_t ghostsIndex = this->Norg_ + 4;
+    for(const std::vector<PointT> &extra : extras)
+    {
+        ghostsIndex += extra.size();
+    }
     std::vector<PointT> buildExtra;
     std::vector<std::vector<size_t>> newNghost(newDuplicatedProcs.size());
-    receivedGhosts(this->del_.points_.size(), buildExtra, newNghost);
-
-    if(periodic && !buildExtra.empty())
+    receivedGhosts(ghostsIndex, buildExtra, newNghost);
+    extras.push_back(std::move(buildExtra));
+    _phase("MockMesh: extras and ghosts");
+    std::vector<const std::vector<PointT> *> ghosts;
+    for(const std::vector<PointT> &extra : extras)
     {
-        this->BuildExtraTracked(buildExtra);
+        ghosts.push_back(&extra);
     }
-    else if(!buildExtra.empty())
-    {
-        this->del_.BuildExtra(buildExtra);
-    }
-    _phase("MockMesh: BuildExtra(final ghosts)");
-    this->R_.resize(this->del_.tetras_.size());
-    ContainerOps::conditional_shrink(this->R_);
-    std::fill(this->R_.begin(), this->R_.end(), RADIUS_UNINITIALIZED);
-    this->tetra_centers_.resize(this->R_.size());
-    ContainerOps::conditional_shrink(this->tetra_centers_);
-    this->bigtet_ = this->SetPointTetras();
-    _phase("MockMesh: SetPointTetras(final)");
-
+    std::vector<size_t> cells(new_points.size());
+    std::iota(cells.begin(), cells.end(), 0);
+    DistributedBuild<PointT> built = this->Output();
+    this->builder_.BuildKnown(this->Domain(), this->allMyPoints, cells, this->radiuses, new_points, ghosts, built);
+    this->AfterBuild(built);
     this->duplicatedprocs_ = std::move(newDuplicatedProcs);
     this->duplicated_points_ = std::move(newDuplicatedPoints);
     this->Nghost_ = std::move(newNghost);
-
-    CM_.resize(del_.points_.size());
-    ContainerOps::conditional_shrink(CM_);
-    volume_.resize(Norg_);
-    ContainerOps::conditional_shrink(volume_);
-
-    if(not new_points.empty())
-    {
-        // Create Voronoi
-        this->BuildVoronoi(order);
-    }
-    _phase("MockMesh: BuildVoronoi");
-
-    this->UpdateCMs();
-    _phase("MockMesh: UpdateCMs");
-#ifdef MADVORO_WITH_MPI
-    {
-        const std::vector<rank_t> &correspondents = this->GetDuplicatedProcs();
-        const std::vector<std::vector<size_t>> &indices = this->GetDuplicatedPoints();
-        std::vector<std::vector<double>> exchange = MPI_exchange_data_indexed(correspondents, this->volume_, indices);
-        const std::vector<std::vector<size_t>> &ghost_indices = this->GetGhostIndeces();
-        this->volume_.resize(this->GetTotalPointNumber(), 0.0);
-        for(size_t i = 0; i < correspondents.size(); ++i)
-        {
-            const std::vector<double> &data = exchange[i];
-            for(size_t j = 0; j < data.size(); ++j)
-                this->volume_.at(ghost_indices.at(i).at(j)) = data[j];
-        }
-    }
-#endif // MADVORO_WITH_MPI
-    _phase("MockMesh: VolumeExchange");
+    this->SyncGhostValues();
+    _phase("MockMesh: build");
 }
 
 template <typename PointT>
@@ -2726,7 +1897,9 @@ void Voronoi3D<PointT>::SetLoadBalancer(std::shared_ptr<LoadBalancer<PointT>> lo
 
     std::vector<VoronoiPayload<PointT>> payloads(previousPoints.size());
     for(size_t i = 0; i < previousPoints.size(); i++)
+    {
         payloads[i] = VoronoiPayload<PointT>(this->radiuses[i], this->all_CM[i]);
+    }
 
     const auto _lbStart = std::chrono::high_resolution_clock::now();
     PointsExchangeResult<PointT, VoronoiPayload<PointT>> exchangeResult = this->pointsManager->update(previousPoints, this->allPointsWeights, payloads, allIndices, false);
@@ -2737,7 +1910,9 @@ void Voronoi3D<PointT>::SetLoadBalancer(std::shared_ptr<LoadBalancer<PointT>> lo
         double _local = std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - _lbStart).count(), _max = 0;
         MPI_Allreduce(&_local, &_max, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
         if(_rank == 0)
+        {
             std::cout << "SetLoadBalancer: points exchange max=" << _max << "s (" << previousPoints.size() << " points on rank 0 before)" << std::endl;
+        }
     }
 
     this->allMyPoints = std::move(exchangeResult.newPoints);
@@ -2811,15 +1986,15 @@ template <typename PointT>
 void Voronoi3D<PointT>::SetPeriodicBoundaries(bool x, bool y, bool z)
 {
     PointT L = this->ur_ - this->ll_;
-    if(x && !(L.x > typename PointT::coord_type(0)))
+    if(x and not (L.x > typename PointT::coord_type(0)))
     {
         throw MadVoro::Exception::InvalidArgumentException("SetPeriodicBoundaries: invalid x periodic axis length");
     }
-    if(y && !(L.y > typename PointT::coord_type(0)))
+    if(y and not (L.y > typename PointT::coord_type(0)))
     {
         throw MadVoro::Exception::InvalidArgumentException("SetPeriodicBoundaries: invalid y periodic axis length");
     }
-    if(z && !(L.z > typename PointT::coord_type(0)))
+    if(z and not (L.z > typename PointT::coord_type(0)))
     {
         throw MadVoro::Exception::InvalidArgumentException("SetPeriodicBoundaries: invalid z periodic axis length");
     }
@@ -2837,7 +2012,7 @@ std::array<bool, 3> Voronoi3D<PointT>::GetPeriodicBoundaries() const
 template <typename PointT>
 bool Voronoi3D<PointT>::HasPeriodicBoundaries() const
 {
-    return this->periodic_[0] || this->periodic_[1] || this->periodic_[2];
+    return this->periodic_[0] or this->periodic_[1] or this->periodic_[2];
 }
 
 template <typename PointT>
@@ -2873,7 +2048,7 @@ bool Voronoi3D<PointT>::IsPeriodicImage(size_t delaunayIndex) const
         return false;
     }
     const PointT &translation = this->periodicImageTranslation_[delaunayIndex];
-    return translation.x != typename PointT::coord_type(0) || translation.y != typename PointT::coord_type(0) || translation.z != typename PointT::coord_type(0);
+    return translation.x != typename PointT::coord_type(0) or translation.y != typename PointT::coord_type(0) or translation.z != typename PointT::coord_type(0);
 }
 
 template <typename PointT>
@@ -2894,20 +2069,20 @@ size_t Voronoi3D<PointT>::ResolvePeriodicImageIndex(size_t meshIndex) const
     {
         return meshIndex;
     }
-    if(meshIndex >= this->del_.points_.size() || !this->IsPeriodicImage(meshIndex) || this->myPointsTree == nullptr)
+    if(meshIndex >= this->meshPoints_.size() or not this->IsPeriodicImage(meshIndex) or this->myPointsTree == nullptr)
     {
         return meshIndex;
     }
-    if(this->periodicImagePhysical_.size() != this->del_.points_.size())
+    if(this->periodicImagePhysical_.size() != this->meshPoints_.size())
     {
-        this->periodicImagePhysical_.assign(this->del_.points_.size(), std::numeric_limits<std::size_t>::max());
+        this->periodicImagePhysical_.assign(this->meshPoints_.size(), std::numeric_limits<std::size_t>::max());
     }
     if(meshIndex < this->periodicImagePhysical_.size())
     {
         std::size_t &cached = this->periodicImagePhysical_[meshIndex];
         if(cached == std::numeric_limits<std::size_t>::max())
         {
-            PointT unwrapped = this->del_.points_[meshIndex];
+            PointT unwrapped = this->meshPoints_[meshIndex];
             const PointT &translation = this->periodicImageTranslation_[meshIndex];
             unwrapped.x -= translation.x;
             unwrapped.y -= translation.y;
@@ -2925,148 +2100,94 @@ size_t Voronoi3D<PointT>::ResolvePeriodicImageIndex(size_t meshIndex) const
 }
 
 template <typename PointT>
-bool Voronoi3D<PointT>::IsPeriodicFace(size_t faceIdx) const
-{
-    if(!this->HasPeriodicBoundaries() || faceIdx >= 6)
-    {
-        return false;
-    }
-    int axis = GetBoxFaceAxis(faceIdx);
-    return this->periodic_[axis];
-}
-
-template <typename PointT>
 PointT Voronoi3D<PointT>::InferPeriodicTranslation(const PointT &p) const
 {
-    PointT translation;
-    PointT L = this->ur_ - this->ll_;
-    if(this->periodic_[0])
-    {
-        if(p.x < this->ll_.x)
-        {
-            translation.x = -L.x;
-        }
-        else if(p.x >= this->ur_.x)
-        {
-            translation.x = L.x;
-        }
-    }
-    if(this->periodic_[1])
-    {
-        if(p.y < this->ll_.y)
-        {
-            translation.y = -L.y;
-        }
-        else if(p.y >= this->ur_.y)
-        {
-            translation.y = L.y;
-        }
-    }
-    if(this->periodic_[2])
-    {
-        if(p.z < this->ll_.z)
-        {
-            translation.z = -L.z;
-        }
-        else if(p.z >= this->ur_.z)
-        {
-            translation.z = L.z;
-        }
-    }
-    return translation;
+    return PeriodicTranslationOf(p, this->ll_, this->ur_, this->periodic_);
 }
 
 template <typename PointT>
-void Voronoi3D<PointT>::BuildExtraTracked(const std::vector<PointT> &pts)
+BuildDomain<PointT> Voronoi3D<PointT>::Domain(void)
 {
-    const size_t first = this->del_.points_.size();
-    this->del_.BuildExtra(pts);
-    this->periodicImageTranslation_.resize(this->del_.points_.size(), PointT());
-    for(size_t j = 0; j < pts.size(); ++j)
-    {
-        this->periodicImageTranslation_[first + j] = this->InferPeriodicTranslation(pts[j]);
-    }
-}
-
-/**
- * \author Maor Mizrachi
- * \brief Gets a point, its radius, a box and the normals to the box's faces, and returns the faces indices that the sphere (around `point`, in the given `radius`) intersects
-*/
-template <typename PointT>
-void CheckToMirror(const Sphere<PointT> &sphere, const std::vector<Face3D<PointT>> &box, const std::vector<PointT> &normals, std::vector<size_t> &facesItCuts)
-{
-    facesItCuts.clear();
-    for(size_t i = 0; i < box.size(); i++)
-    {
-        if(FaceSphereIntersections(box[i], sphere, normals[i]))
-        {
-            facesItCuts.push_back(i);
-        }
-    }
+    BuildDomain<PointT> domain;
+    domain.ll = this->ll_;
+    domain.ur = this->ur_;
+    domain.boxFaces = this->box_faces_;
+    this->InitialBoxBuild(domain.box, domain.normals);
+    domain.periodic = this->periodic_;
+    return domain;
 }
 
 template <typename PointT>
-void Voronoi3D<PointT>::UpdateCMs(void)
+DistributedBuild<PointT> Voronoi3D<PointT>::Output(void)
 {
-    // first, calculate CM for active local points
-    #ifdef MADVORO_GEOMETRY_TIMING
-        const auto momentsStart = std::chrono::high_resolution_clock::now();
-    #endif // MADVORO_GEOMETRY_TIMING
-    if(flatVoronoi_.CellCount() != Norg_)
+    #ifdef MADVORO_WITH_MPI
+        return DistributedBuild<PointT>{this->meshPoints_, this->FacesInCell_, this->FaceNeighbors_, this->PointsInFace_, this->area_, this->Face_CM_, this->tetra_centers_, this->volume_, this->CM_, this->duplicatedprocs_, this->duplicated_points_, this->Nghost_};
+    #else // MADVORO_WITH_MPI
+        return DistributedBuild<PointT>{this->meshPoints_, this->FacesInCell_, this->FaceNeighbors_, this->PointsInFace_, this->area_, this->Face_CM_, this->tetra_centers_, this->volume_, this->CM_};
+    #endif // MADVORO_WITH_MPI
+}
+
+template <typename PointT>
+void Voronoi3D<PointT>::AfterBuild(const DistributedBuild<PointT> &built)
+{
+    for(const auto &[meshIndex, pointIdx] : built.ghostRankIndex)
     {
-        MadVoro::Exception::MadVoroException eo("Voronoi3D: cell moments need the tessellation of this build");
-        eo.addEntry("cells in tessellation", flatVoronoi_.CellCount());
-        eo.addEntry("Norg", Norg_);
-        throw eo;
+        this->indicesInAllMyPoints[meshIndex] = pointIdx;
     }
-    if(Norg_ > 0)
-        this->WithGeometryExecutor([this](auto &executor) { executor.CellMoments(this->flatVoronoi_); });
-    Geometry::HostParallelFor(Norg_, [this](std::size_t c)
+    // a periodic image lies outside the box, by the translation from its point
+    this->periodicImageTranslation_.assign(this->meshPoints_.size(), PointT());
+    if(this->HasPeriodicBoundaries())
     {
-        volume_[c] = flatVoronoi_.cellVolume[c];
-        CM_[c] = PointT(flatVoronoi_.cellCM[c].x, flatVoronoi_.cellCM[c].y, flatVoronoi_.cellCM[c].z);
-    });
-    #ifdef MADVORO_GEOMETRY_TIMING
-    {
-        int timingRank = 0;
-        #ifdef MADVORO_WITH_MPI
-            MPI_Comm_rank(MPI_COMM_WORLD, &timingRank);
-        #endif // MADVORO_WITH_MPI
-        if(timingRank == 0)
-            std::cout << "Time for cell moments: " << std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - momentsStart).count() << " seconds" << std::endl;
-    }
-    #endif // MADVORO_GEOMETRY_TIMING
-    // the cells behind rigid boundary faces mirror their real neighbor
-    size_t FaceNeighborsSize = FaceNeighbors_.size();
-    for(std::size_t i = 0; i < FaceNeighborsSize; ++i)
-    {
-        if(this->BoundaryFace(i))
+        for(size_t i = this->Norg_ + 4; i < this->meshPoints_.size(); ++i)
         {
-            const std::pair<std::size_t, std::size_t> &neighbors = FaceNeighbors_[i];
-            const std::size_t real = (neighbors.first >= Norg_) ? neighbors.second : neighbors.first;
-            const std::size_t other = (neighbors.first >= Norg_) ? neighbors.first : neighbors.second;
-            CM_[other] = Geometry::MirroredCM(del_.points_[neighbors.first], del_.points_[neighbors.second], CM_[real],
-                                              tetra_centers_[PointsInFace_[i][0]]);
+            this->periodicImageTranslation_[i] = this->InferPeriodicTranslation(this->meshPoints_[i]);
         }
     }
+    this->allMyPointsTree = this->builder_.RankTree();
+    this->myPointsTree = this->builder_.BuiltTree();
+}
 
+template <typename PointT>
+void Voronoi3D<PointT>::SyncGhostValues(void)
+{
     this->SyncPartialBuildData(this->CM_, this->all_CM);
     this->ShiftPeriodicImageCMs();
+    #ifdef MADVORO_WITH_MPI
+        // without a points manager (e.g. a thread subdomain) the build talked to no other rank
+        if(this->pointsManager == nullptr)
+        {
+            return;
+        }
+        // the ghosts' volumes, those of their cells in the ranks that own them
+        const std::vector<rank_t> &correspondents = this->GetDuplicatedProcs();
+        const std::vector<std::vector<size_t>> &indices = this->GetDuplicatedPoints();
+        // indexed by all the rank's points, not by cells (differs in a partial build)
+        std::vector<double> allVolumes(this->GetAllPointsNo(), 0.0);
+        for(size_t k = 0; k < this->Norg_; ++k)
+        {
+            allVolumes[this->indicesInAllMyPoints.at(k)] = this->volume_[k];
+        }
+        std::vector<std::vector<double>> exchange = MPI_exchange_data_indexed(correspondents, allVolumes, indices);
+        const std::vector<std::vector<size_t>> &ghost_indices = this->GetGhostIndeces();
+        this->volume_.resize(this->GetTotalPointNumber(), 0.0);
+        for(size_t i = 0; i < correspondents.size(); ++i)
+        {
+            const std::vector<double> &data = exchange[i];
+            for(size_t j = 0; j < data.size(); ++j)
+            {
+                this->volume_.at(ghost_indices.at(i).at(j)) = data[j];
+            }
+        }
+    #endif // MADVORO_WITH_MPI
 }
 
-/**
- * \brief The centroids of the periodic images: their cells' centroids (SyncPartialBuildData
- * gives the images it knows them), moved by the images' translations.
-*/
+/** \brief Shifts the centroids of the periodic images by their translations. */
 template <typename PointT>
 void Voronoi3D<PointT>::ShiftPeriodicImageCMs(void)
 {
     if(this->HasPeriodicBoundaries())
     {
-        // SyncPartialBuildData only fills extended points that are registered as active points or that
-        // arrive as MPI ghosts. Repartitioning rebuilds periodic images of local cells outside both of
-        // those sets, so their centroids are still at their default value here and have to be taken
-        // from the pre-image before the periodic shift is applied.
+        // images that SyncPartialBuildData did not fill take the centroid of their pre-image
         std::vector<bool> filledBySync(this->CM_.size(), false);
         const AllPointsMap &indicesInAllPoints = this->GetIndicesInAllPoints();
         for(size_t i = this->Norg_; i < this->CM_.size(); ++i)
@@ -3087,11 +2208,11 @@ void Voronoi3D<PointT>::ShiftPeriodicImageCMs(void)
 #endif // MADVORO_WITH_MPI
         for(size_t i = this->Norg_; i < this->CM_.size(); ++i)
         {
-            if(!this->IsPeriodicImage(i))
+            if(not this->IsPeriodicImage(i))
             {
                 continue;
             }
-            if(!filledBySync[i])
+            if(not filledBySync[i])
             {
                 const size_t physical = this->ResolvePeriodicImageIndex(i);
                 if(physical < this->Norg_)
@@ -3102,740 +2223,6 @@ void Voronoi3D<PointT>::ShiftPeriodicImageCMs(void)
             this->CM_[i] = this->CM_[i] + this->periodicImageTranslation_[i];
         }
     }
-}
-
-template <typename PointT>
-void Voronoi3D<PointT>::UpdateRadiuses(const std::vector<PointT> &points)
-{
-    size_t const N = this->indicesInAllMyPoints.size();
-    for(const std::pair<size_t, size_t> &indices : this->indicesInAllMyPoints)
-    {
-        const size_t &pointIndexOnBuild = indices.first;
-        const PointT &point = points[pointIndexOnBuild];
-        size_t pointIndexAmongAll = indices.second; 
-        if(this->radiuses[pointIndexAmongAll] <= 0)
-        {
-            // point does not have a radius from a previous timestep. Initialize a radius
-            if(N > 1)
-                this->radiuses[pointIndexAmongAll] = this->allMyPointsTree->closestPointDistance(point, false); // todo second closest
-            else
-                this->radiuses[pointIndexAmongAll] = abs(this->ll_ - this->ur_);
-        }
-    }
-}
-
-template <typename PointT>
-void Voronoi3D<PointT>::UpdateRangeFinder()
-{
-    if(this->sharedRangeFinder_ != nullptr)
-    {
-        // a thread subdomain
-        this->rangeFinder = this->sharedRangeFinder_;
-        return;
-    }
-    this->rangeFinder = std::make_shared<OctTreeFinder<PointT>>(this->allMyPointsTree.get(), this->allMyPoints);
-    // if(this->rangeFinder.get() == nullptr)
-    // {
-    //     //BruteForceFinder rangeFinder(this->del_.points_.begin(), this->del_.points_.begin() + this->Norg_);
-    //     //RangeTreeFinder rangeFinder(this->del_.points_.begin(), this->del_.points_.begin() + this->Norg_);
-    //     this->rangeFinder = std::make_shared<RangeFinder>(this->allMyPoints.begin(), this->allMyPoints.end(), this->ll_, this->ur_);
-    //     //KDTreeFinder rangeFinder(this->del_.points_.begin(), this->del_.points_.begin() + this->Norg_, this->ll_, this->ur_);
-    //     //GroupRangeTreeFinder<256> rangeFinder(this->del_.points_.begin(), this->del_.points_.begin() + this->Norg_);
-    // }
-    // else
-    // {
-    //     // there are three steps:
-    //     /*
-    //     1. test which points from the  last timestep that might have changed.
-    //     These are the active points from last time step (the points in `indicesInAllMyPoints`),
-    //     and the REAL ghost points.
-    //     */
-    //      // todo: this part should not happen here (since this function is running after the exchange)
-    //     std::vector<size_t> pointsToRemove = this->indicesInAllMyPoints;
-    //     for(const std::vector<size_t> &ghostPoints : this->real_duplicated_points)
-    //     {
-    //         pointsToRemove.insert(pointsToRemove.end(), ghostPoints.cbegin(), ghostPoints.cend());
-    //     }
-    //     /*
-    //     2. There are points that I owned in the last timestep, but I don't own anymore in this one. Remove them. 
-    //     */
-        
-    //     /*
-    //     3. There are points that I did not own in the last timestep, but I do own now. Add them.
-    //     */
-
-    //     std::vector<PointT> pointsToAdd;
-    //     // todo
-    //     this->rangeFinder->replacePoints();
-    // }
-}
-
-/**
- * \author Maor Mizrachi
- * \brief Creates a batch for a cycle (iteration) in the ghost points bringing loop
-*/
-template <typename PointT>
-std::pair<std::vector<SmallRangeQueryData<PointT>>, std::vector<BigRangeQueryData<PointT>>> Voronoi3D<PointT>::CreateBatches(boost::container::flat_set<size_t> &smallPoints, boost::container::flat_set<size_t> &largePoints, const boost::container::flat_map<size_t, size_t> &firstLargeIteration, std::vector<double> &currentRadiuses, size_t iterations)
-{
-    std::vector<SmallRangeQueryData<PointT>> smallQueries;
-    std::vector<BigRangeQueryData<PointT>> bigQueries;
-    boost::container::flat_set<size_t> tetraToCancel;
-
-    if(iterations == 1)
-    {        
-        // at first iteration, run an initial query, all the points are small
-        for(const size_t &pointIdx : smallPoints)
-        {
-            const PointT &point = this->del_.points_[pointIdx];
-            smallQueries.emplace_back();
-            SmallRangeQueryData<PointT> &query = smallQueries.back();
-            query.pointIdx = pointIdx;
-            query.center = {point.x, point.y, point.z};
-            query.radius = currentRadiuses[pointIdx];
-            query.maxPointsToGet = RANGE_MAX_POINTS_TO_GET + 1;
-
-            if(currentRadiuses[pointIdx] <= 0)
-            {
-                MadVoro::Exception::MadVoroException eo("Radius for a certain point is <= 0 (in 'Voronoi3D<PointT>::CreateBatches')");
-                eo.addEntry("Point Index", pointIdx);
-                eo.addEntry("Its radius", currentRadiuses[pointIdx]);
-                throw eo;
-            }
-        }
-    }
-    else
-    {
-        // treat large points
-        for(const size_t &pointIdx : largePoints)
-        {
-            const PointT &point = this->del_.points_[pointIdx];
-
-            // std::cout << "firstLargeIteration.at(pointIdx) is " << firstLargeIteration.at(pointIdx) << std::endl;
-            bool askOnlyClose = (iterations == firstLargeIteration.at(pointIdx)); // on the first iteration as large, ask only the close ranks
-
-            for(const size_t &tetraIdx : this->PointTetras_[pointIdx])
-            {
-                if(not this->del_.tetras_[tetraIdx].checkBig)
-                {
-                    continue; // tetra does not need to be checked
-                }
-                const PointT &center = this->tetra_centers_[tetraIdx];
-                double radius = this->GetRadius(tetraIdx);
-                // from each big tetrahedron, ask each one of the intersecting ranks to give us the closest point it has to our point
-                // for a large point queries, if the iteration number is 2, we ask only the near ranks to give their closest point.
-                // From the 3rd iteration, we ask all the intersecting ranks to give their closest point.
-                if(not askOnlyClose)
-                {
-                    // do not cancel the tetra if we ask only close
-                    tetraToCancel.insert(tetraIdx);
-                }
-                bigQueries.emplace_back();
-                BigRangeQueryData<PointT> &query = bigQueries.back();
-                query.pointIdx = pointIdx;
-                query.center = {center.x, center.y, center.z};
-                query.radius = radius;
-                query.originalPoint = {point.x, point.y, point.z};
-                query.askOnlyClose = askOnlyClose;
-                // add the tetra to the list of tetrahedra to clear (mark as 'not new')
-            }
-        }
-
-        // treat small points
-        for(const size_t &pointIdx : smallPoints)
-        {
-            // submit one query whichf is a union of the others
-            const PointT &point = this->del_.points_[pointIdx];
-            double radius = currentRadiuses[pointIdx];
-           
-            if(currentRadiuses[pointIdx] <= 0)
-            {
-                MadVoro::Exception::MadVoroException eo("Radius for a certain point is <= 0 (in 'Voronoi3D<PointT>::CreateBatches')");
-                eo.addEntry("Point Index", pointIdx);
-                eo.addEntry("Point", point);
-                eo.addEntry("Current Radius", currentRadiuses[pointIdx]);
-                throw eo;
-            }
-
-            smallQueries.emplace_back();
-            SmallRangeQueryData<PointT> &query = smallQueries.back();
-            query.pointIdx = pointIdx;
-            query.center = {point.x, point.y, point.z};
-            query.radius = radius;
-            query.maxPointsToGet = RANGE_MAX_POINTS_TO_GET + 1;
-        }
-    }
-
-    for(const size_t &tetraIdx : tetraToCancel)
-    {
-        this->del_.tetras_[tetraIdx].checkBig = false;
-    }
-    return {smallQueries, bigQueries};
-}
-
-/**
- * \author Maor Mizrachi
- * \brief Gets a list of query, and tests for creating mirror points. In the end of this procedure, `mirroredPoints` contains pairs of <faceIdx, pointIdx>, of points that should be mirrored, in relative to which faces
-*/
-template<typename QueryDataType, typename PointT>
-std::vector<std::pair<size_t, size_t>> MirrorPoints(const std::vector<QueryDataType> &queries, const std::vector<Face3D<PointT>> &box, const std::vector<PointT> &normals)
-{   
-    static_assert(std::is_convertible<QueryDataType*, RangeQueryData<PointT>*>::value, "MirrorPoints: QueryDataType must inherit 'RangeQueryData'");
-
-    std::vector<std::pair<size_t, size_t>> mirroredPoints;
-    std::vector<size_t> facesItCuts;
-    for(const QueryDataType &query : queries)
-    {
-        Sphere<PointT> sphere(PointT(query.center), query.radius);
-        size_t pointIdx = query.pointIdx;
-
-        CheckToMirror(sphere, box, normals, facesItCuts);
-
-        for(const size_t &faceIdx : facesItCuts)
-        {
-            mirroredPoints.push_back(std::make_pair(faceIdx, pointIdx));
-        }
-    }
-    return mirroredPoints;
-}
-
-template <typename PointT>
-void Voronoi3D<PointT>::BringSelfGhostPoints(const std::vector<BigRangeQueryData<PointT>> &bigQueries, const std::vector<SmallRangeQueryData<PointT>> &smallQueries,
-                                        BigRangeAgent<PointT> &bigRangeAgent, SmallRangeAgent<PointT> &smallRangeAgent,
-                                        boost::container::flat_map<size_t, size_t> &numOfResultsForBigPoints,
-                                        boost::container::flat_map<size_t, size_t> &numOfResultsForSmallPoints,
-                                        PeriodicIgnoreSets<PointT> &selfIgnorePoints)
-{
-    std::chrono::high_resolution_clock::time_point start1, end1, start2, end2, start3, end3;
-
-    std::vector<PointT> newPoints;
-    {
-        start1 = std::chrono::high_resolution_clock::now();
-        std::vector<std::vector<size_t>> selfSmallQueriesAnswers = smallRangeAgent.selfBatchAnswer(smallQueries, selfIgnorePoints);
-        size_t i = 0;
-        for(const std::vector<size_t> &newSmallQueriesPoints : selfSmallQueriesAnswers)
-        {
-            const SmallRangeQueryData<PointT> &query = smallQueries[i];
-            for(const size_t &pointIdxInAll : newSmallQueriesPoints)
-            {
-                this->indicesInAllMyPoints[this->del_.points_.size() + newPoints.size()] = pointIdxInAll;
-                newPoints.push_back(this->allMyPoints[pointIdxInAll] + query.imageTranslation);
-            }
-            numOfResultsForSmallPoints[query.pointIdx] += newSmallQueriesPoints.size();
-            i++;
-        }
-        end1 = std::chrono::high_resolution_clock::now();
-    }
-    {
-        start2 = std::chrono::high_resolution_clock::now();
-        std::vector<std::vector<size_t>> selfBigQueriesAnswers = bigRangeAgent.selfBatchAnswer(bigQueries, selfIgnorePoints);
-        size_t i = 0;
-        for(const std::vector<size_t> &newBigQueriesPoints : selfBigQueriesAnswers)
-        {
-            const BigRangeQueryData<PointT> &query = bigQueries[i];
-            for(const size_t &pointIdxInAll : newBigQueriesPoints)
-            {
-                this->indicesInAllMyPoints[this->del_.points_.size() + newPoints.size()] = pointIdxInAll;
-                newPoints.push_back(this->allMyPoints[pointIdxInAll] + query.imageTranslation);
-            }
-            numOfResultsForBigPoints[query.pointIdx] += newBigQueriesPoints.size();
-            i++;
-        }
-        end2 = std::chrono::high_resolution_clock::now();
-    }
-
-    start3 = std::chrono::high_resolution_clock::now();
-    this->BuildExtraTracked(newPoints);
-    end3 = std::chrono::high_resolution_clock::now();
-    #ifdef TIMING
-        #ifdef MADVORO_WITH_MPI
-            rank_t rank;
-            MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-            if(rank == 0)
-        #endif // MADVORO_WITH_MPI
-            {
-                std::cout << "Time for small: " << std::chrono::duration<double>(end1 - start1).count() << " seconds" <<
-                    ", for large: " << std::chrono::duration<double>(end2 - start2).count() << " seconds" <<
-                    ", and Delaunay construction time: " << std::chrono::duration<double>(end3 - start3).count() << " seconds" << std::endl;
-            }
-    #endif // TIMING
-}
-
-/**
- * \brief Records what BringSelfGhostPoints records when every query is certain to
- * come back empty: a zero result count for each queried point, and no new points.
- * Debug builds run the real queries and check that they are indeed empty.
-*/
-template <typename PointT>
-void Voronoi3D<PointT>::RecordEmptySelfAnswers(const std::vector<BigRangeQueryData<PointT>> &bigQueries, const std::vector<SmallRangeQueryData<PointT>> &smallQueries,
-                                               [[maybe_unused]] BigRangeAgent<PointT> &bigRangeAgent, [[maybe_unused]] SmallRangeAgent<PointT> &smallRangeAgent,
-                                               boost::container::flat_map<size_t, size_t> &numOfResultsForBigPoints,
-                                               boost::container::flat_map<size_t, size_t> &numOfResultsForSmallPoints,
-                                               [[maybe_unused]] const PeriodicIgnoreSets<PointT> &selfIgnorePoints)
-{
-    #ifndef NDEBUG
-    {
-        PeriodicIgnoreSets<PointT> ignoreCopy = selfIgnorePoints;
-        for(const std::vector<size_t> &answer : smallRangeAgent.selfBatchAnswer(smallQueries, ignoreCopy))
-            assert(answer.empty());
-        for(const std::vector<size_t> &answer : bigRangeAgent.selfBatchAnswer(bigQueries, ignoreCopy))
-            assert(answer.empty());
-    }
-    #endif // NDEBUG
-    for(const SmallRangeQueryData<PointT> &query : smallQueries)
-    {
-        numOfResultsForSmallPoints[query.pointIdx] += 0;
-    }
-    for(const BigRangeQueryData<PointT> &query : bigQueries)
-    {
-        numOfResultsForBigPoints[query.pointIdx] += 0;
-    }
-}
-
-#ifdef MADVORO_WITH_MPI
-template <typename PointT>
-    void Voronoi3D<PointT>::BringRemoteGhostPoints(const std::vector<BigRangeQueryData<PointT>> &bigQueries, const std::vector<SmallRangeQueryData<PointT>> &smallQueries,
-                                        BigRangeAgent<PointT> &bigRangeAgent, SmallRangeAgent<PointT> &smallRangeAgent,
-                                        boost::container::flat_map<size_t, size_t> &numOfResultsForBigPoints,
-                                        boost::container::flat_map<size_t, size_t> &numOfResultsForSmallPoints)
-    {
-        std::chrono::high_resolution_clock::time_point start1, end1, start2, end2;
-
-        std::vector<PointT> newPoints;
-        // large points queries
-        {
-            start1 = std::chrono::high_resolution_clock::now();
-            QueryBatchInfo<BigRangeQueryData<PointT>, PointT> bigBatchInfo = bigRangeAgent.runBatch(bigQueries);
-            newPoints.reserve(bigBatchInfo.result.size());
-            for(const QueryInfo<BigRangeQueryData<PointT>, PointT> &ans : bigBatchInfo.queriesAnswers)
-            {
-                numOfResultsForBigPoints[ans.data.pointIdx] += ans.finalResults.size();
-            }
-            newPoints.insert(newPoints.end(), bigBatchInfo.result.begin(), bigBatchInfo.result.end());
-            this->SetGhostArray(bigRangeAgent.getRecvProc(), bigRangeAgent.getRecvPoints());
-            this->BuildExtraTracked(newPoints);
-            end1 = std::chrono::high_resolution_clock::now();
-        }
-        // small points queries
-        {        
-            start2 = std::chrono::high_resolution_clock::now();
-            QueryBatchInfo<SmallRangeQueryData<PointT>, PointT> smallBatchInfo = smallRangeAgent.runBatch(smallQueries);
-            for(const QueryInfo<SmallRangeQueryData<PointT>, PointT> &ans : smallBatchInfo.queriesAnswers)
-            {
-                numOfResultsForSmallPoints[ans.data.pointIdx] += ans.finalResults.size();
-            }
-            newPoints.clear();
-            newPoints.reserve(smallBatchInfo.result.size());
-            newPoints.insert(newPoints.end(), smallBatchInfo.result.begin(), smallBatchInfo.result.end());
-            this->SetGhostArray(smallRangeAgent.getRecvProc(), smallRangeAgent.getRecvPoints());
-            this->BuildExtraTracked(newPoints);
-            end2 = std::chrono::high_resolution_clock::now();
-        }    
-
-        #ifdef TIMING
-        rank_t rank;
-        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-        if(rank == 0)
-        {
-            std::cout << "Time for small: " << std::chrono::duration<double>(end2 - start2).count() << " seconds" <<
-                ", for large: " << std::chrono::duration<double>(end1 - start1).count() << " seconds" << std::endl;
-        }
-        #endif // TIMING
-    }
-#endif // MADVORO_WITH_MPI
-
-/**
- * \author Maor Mizrachi
- * \brief Calculates the points for next iteration, and determines each one's type (small or big)
-*/
-template <typename PointT>
-std::pair<boost::container::flat_set<size_t>, boost::container::flat_set<size_t>>
-Voronoi3D<PointT>::DetermineNextIterationPoints(size_t iterations,
-                                            boost::container::flat_map<size_t, size_t> &firstLargeIteration,
-                                            std::vector<double> &currentRadiuses,
-                                            const boost::container::flat_map<size_t, size_t> &resultOfSmallPoints,
-                                            const boost::container::flat_map<size_t, size_t> &resultOfBigPoints)
-{
-    boost::container::flat_set<size_t> newSmallPoints, newLargePoints;
-    
-    // small
-    for(const std::pair<size_t, size_t> &pointIdxResult : resultOfSmallPoints)
-    {
-        const size_t &pointIdxInBuild = pointIdxResult.first;
-        size_t pointIdxInAllPoints = this->indicesInAllMyPoints[pointIdxInBuild];
-        const size_t &resultSize = pointIdxResult.second;
-
-        // small query                
-        if(resultSize > RANGE_MAX_POINTS_TO_GET)
-        {
-            // the result is too big, we should consider this point as large
-            newLargePoints.insert(pointIdxInBuild);
-            firstLargeIteration[pointIdxInBuild] = iterations + 1; // the first large iteration for `pointIdx` is the next one
-            this->radiuses[pointIdxInAllPoints] = LARGE_POINTS_SHRINK_RADIUS_RATIO * currentRadiuses[pointIdxInBuild];
-        }
-        else
-        {
-            double maxRadius = this->GetMaxRadius(pointIdxInBuild);
-
-            if(currentRadiuses[pointIdxInBuild] < 2 * maxRadius)
-            {
-                // point is not yet done!
-                currentRadiuses[pointIdxInBuild] *= RADIUSES_GROWING_FACTOR; // increase radius by 'RADIUSES_GROWING_FACTOR'
-                newSmallPoints.insert(pointIdxInBuild);
-            }
-            else
-            {
-                // point is finished, set a radius for next iteration
-                this->radiuses[pointIdxInAllPoints] = RADIUSES_GROWING_FACTOR * (2 * maxRadius);
-            }
-        }
-    }
-
-    // big
-    for(const std::pair<size_t, size_t> &pointIdxResult : resultOfBigPoints)
-    {
-        const size_t &pointIdx = pointIdxResult.first;
-        const size_t &resultSize = pointIdxResult.second;
-
-        // query is large, check if it returned non empty. If yes, we are not yet done
-        if((iterations == firstLargeIteration.at(pointIdx)) or (resultSize > 0))
-        {
-            newLargePoints.insert(pointIdx);
-        }
-    }
-
-    return std::pair(newSmallPoints, newLargePoints);
-}
-
-/**
- * \author Maor Mizrachi
- * \brief The algorithm follows arepro paper (https://www.mpa-garching.mpg.de/~volker/arepo/arepo_paper.pdf), section 2.4.
-*/
-#ifdef MADVORO_WITH_MPI
-template <typename PointT>
-    void Voronoi3D<PointT>::BringGhostPointsToBuild(const MPI_Comm &comm)
-#else // MADVORO_WITH_MPI
-template <typename PointT>
-    void Voronoi3D<PointT>::BringGhostPointsToBuild()
-#endif // MADVORO_WITH_MPI
-{
-    int rank = 0, size = 1;
-    #ifdef MADVORO_WITH_MPI
-    const bool serialMode = (this->pointsManager == nullptr); // TODO: fix - wrong!
-    if(!serialMode)
-    {
-        MPI_Comm_rank(comm, &rank);
-        MPI_Comm_size(comm, &size);
-    }
-    else
-    {
-        std::cout << "In serial mode" << std::endl;
-    }
-    #endif // MADVORO_WITH_MPI
-
-    std::vector<Face3D<PointT>> box;
-    std::vector<PointT> normals;
-    this->InitialBoxBuild(box, normals);
-
-    this->periodicImageTranslation_.clear();
-    this->periodicImageTranslation_.resize(this->del_.points_.size(), PointT());
-    
-    boost::container::flat_set<size_t> smallPoints; // indices of 'small' points
-    boost::container::flat_set<size_t> largePoints; // indices of 'large' points
-    boost::container::flat_map<size_t, size_t> firstLargeIteration;
-
-    size_t totalBigQueries = 0;
-    size_t totalSmallQueries = 0;
-
-    std::vector<double> currentRadiuses(this->Norg_, RADIUS_UNINITIALIZED);
-    for(const std::pair<size_t, size_t> &indices : this->indicesInAllMyPoints)
-    {
-        size_t pointIndexInBuild = indices.first;
-        size_t pointIndexInAll = indices.second;
-        smallPoints.insert(pointIndexInBuild);
-        // largePoints.insert(pointIndexInBuild);
-        // firstLargeIteration.insert({pointIndexInBuild, 0});
-
-        if(pointIndexInBuild >= this->Norg_)
-        {
-            std::cout << "Error: given point index " << pointIndexInBuild << ", while built only with " << this->Norg_ << " points" << std::endl;
-        }
-        currentRadiuses[pointIndexInBuild] = this->radiuses[pointIndexInAll];
-    }
-
-    #ifdef MADVORO_WITH_MPI
-    std::vector<int> alreadyRecvProcs;
-    std::optional<SentPointsContainer> optPointsContainer;
-    if(not serialMode and not this->HasPeriodicBoundaries())
-    {
-        auto [ghostPointsFromLastBuild, alreadySentPoints1, alreadyRecvPoints1] = this->InitialGhostPointsExchange(comm);
-        std::vector<int> alreadySentProcs;
-        std::vector<std::vector<size_t>> alreadySentPoints2, alreadyRecvPoints2;
-        for(rank_t _rank = 0; _rank < size; _rank++)
-        {
-            if(alreadySentPoints1[_rank].size() > 0)
-            {
-                alreadySentProcs.push_back(_rank);
-                alreadySentPoints2.emplace_back(std::move(alreadySentPoints1[_rank]));
-            }
-            if(alreadyRecvPoints1[_rank].size() > 0)
-            {
-                alreadyRecvProcs.push_back(_rank);
-                alreadyRecvPoints2.emplace_back(std::move(alreadyRecvPoints1[_rank]));
-            }
-        }
-        this->SetGhostArray(alreadyRecvProcs, alreadyRecvPoints2);
-        this->BuildExtraTracked(ghostPointsFromLastBuild);
-        this->R_.resize(this->del_.tetras_.size(), RADIUS_UNINITIALIZED);
-        ContainerOps::conditional_shrink(this->R_);
-        this->tetra_centers_.resize(this->R_.size());
-        ContainerOps::conditional_shrink(this->tetra_centers_);
-        this->bigtet_ = SetPointTetras();
-        optPointsContainer.emplace(alreadySentProcs, alreadySentPoints2);
-    }
-    else
-    {
-        optPointsContainer.emplace();
-    }
-    SentPointsContainer &pointsContainer = *optPointsContainer;
-
-    // In serial mode: envAgent is null (safe -- only used by talk agent for remote queries,
-    // which never fire since sendToSelf=false and size=1).
-    const std::shared_ptr<EnvironmentAgent<PointT>> envAgent = serialMode ? nullptr : this->pointsManager->getEnvironmentAgent();
-    if(!serialMode && !envAgent)
-    {
-        throw MadVoro::Exception::MadVoroException("BringGhostPointsToBuild: environment agent is null");
-    }
-    const MPI_Comm &agentComm = serialMode ? MPI_COMM_SELF : comm;
-    BigRangeAgent<PointT> bigRangeAgent(this->rangeFinder.get(), envAgent, pointsContainer, agentComm);
-    SmallRangeAgent<PointT> smallRangeAgent(this->rangeFinder.get(), envAgent, pointsContainer, agentComm);
-#else // MADVORO_WITH_MPI
-    BigRangeAgent<PointT> bigRangeAgent(this->rangeFinder.get());
-    SmallRangeAgent<PointT> smallRangeAgent(this->rangeFinder.get());
-#endif // MADVORO_WITH_MPI
-
-
-    #ifdef MADVORO_WITH_MPI
-        MPI_Request finishedReq;
-        int I_finished = 0;
-    #endif // MADVORO_WITH_MPI
-    int finished;
-
-    // Use a set for O(1) lookup instead of O(n) linear search in the loop
-    std::set<std::pair<size_t, size_t>> allMirroredSet;
-
-    size_t iterations = 0;
-
-    bool considerOwnPoints = (size == 1) or (this->Norg_ != this->allMyPoints.size()) or this->HasPeriodicBoundaries();
-    PeriodicIgnoreSets<PointT> selfIgnorePoints;
-    for(const std::pair<size_t, size_t> &indices : this->indicesInAllMyPoints)
-    {
-        selfIgnorePoints[ZERO_IMAGE_CODE].insert(indices.second);
-    }
-    // Without periodic images a self query only returns local points that are not
-    // ignored yet. If every local point is already ignored (a full build), the
-    // queries cannot return anything, so only their zero result counts are
-    // recorded; those counts still decide which points continue to the next round.
-    const bool selfQueriesCanFindPoints = this->HasPeriodicBoundaries() or
-                                          (selfIgnorePoints[ZERO_IMAGE_CODE].size() < this->allMyPoints.size());
-
-    auto start = std::chrono::high_resolution_clock::now();
-    
-    START_TIMER_PREEMPTIVE("Main Loop");
-    size_t total_new_points = 0;
-    while(true) // loop is not really infinite (has 'break')
-    {
-        auto start_iter = std::chrono::high_resolution_clock::now();
-        
-        boost::container::flat_map<size_t, size_t> numOfResultsForSmallPoints;
-        boost::container::flat_map<size_t, size_t> numOfResultsForBigPoints;
-                
-        size_t smallPointsNum = smallPoints.size();
-        size_t largePointsNum = largePoints.size();
-        #ifdef MADVORO_WITH_MPI
-        if (!serialMode)
-        {
-            MPI_Reduce((rank == 0)? MPI_IN_PLACE : &smallPointsNum, &smallPointsNum, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, 0, comm);
-            MPI_Reduce((rank == 0)? MPI_IN_PLACE : &largePointsNum, &largePointsNum, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, 0, comm);
-        }
-        #endif // MADVORO_WITH_MPI
-        iterations++;
-        size_t averageGP = this->del_.points_.size();
-        #ifdef MADVORO_WITH_MPI
-        if (!serialMode)
-            MPI_Reduce((rank == 0)? MPI_IN_PLACE : &averageGP, &averageGP, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, 0, comm);
-        #endif // MADVORO_WITH_MPI
-
-        averageGP /= size;
-        totalBigQueries += largePointsNum;
-        totalSmallQueries += smallPointsNum;
-
-        if(rank == 0) std::cout << "iteration " << iterations << " (" << smallPointsNum << " small points, " << largePointsNum << " large points, average ghost points: " << averageGP << ")" << std::endl;
-
-        VORONOI_TIMING(start1);
-        auto [smallQueries, bigQueries] = this->CreateBatches(smallPoints, largePoints, firstLargeIteration, currentRadiuses, iterations);
-        std::vector<std::pair<size_t, size_t>> mirroredPoints = MirrorPoints(smallQueries, box, normals);
-        std::vector<std::pair<size_t, size_t>> moreMirroredPoints = MirrorPoints(bigQueries, box, normals);
-        mirroredPoints.insert(mirroredPoints.end(), moreMirroredPoints.begin(), moreMirroredPoints.end());
-        if(this->HasPeriodicBoundaries())
-        {
-            std::vector<std::pair<size_t, size_t>> filteredMirrors;
-            filteredMirrors.reserve(mirroredPoints.size());
-            for(const std::pair<size_t, size_t> &mirrorPair : mirroredPoints)
-            {
-                if(!this->IsPeriodicFace(mirrorPair.first))
-                {
-                    filteredMirrors.push_back(mirrorPair);
-                }
-            }
-            mirroredPoints = std::move(filteredMirrors);
-            std::vector<SmallRangeQueryData<PointT>> expandedSmallQueries;
-            std::vector<BigRangeQueryData<PointT>> expandedBigQueries;
-            ExpandPeriodicQueries(smallQueries, this->periodic_, this->ll_, this->ur_, expandedSmallQueries);
-            ExpandPeriodicQueries(bigQueries, this->periodic_, this->ll_, this->ur_, expandedBigQueries);
-            smallQueries = std::move(expandedSmallQueries);
-            bigQueries = std::move(expandedBigQueries);
-        }
-        for(const SmallRangeQueryData<PointT> &query : smallQueries)
-        {
-            numOfResultsForSmallPoints[query.pointIdx] = 0;
-        }
-        for(const BigRangeQueryData<PointT> &query : bigQueries)
-        {
-            numOfResultsForBigPoints[query.pointIdx] = 0;
-        }
-        VORONOI_TIMING(end1);
-
-        VORONOI_REPORT_TIMING("Creating batches and mirrors", start1, end1);
-
-        #ifdef MADVORO_WITH_MPI
-        if (!serialMode)
-        {
-
-            I_finished = (smallQueries.empty() and bigQueries.empty())? 1 : 0;
-            MPI_Iallreduce(&I_finished, &finished, 1, MPI_INT, MPI_SUM, comm, &finishedReq);
-        }
-        else
-        {
-            finished = (smallQueries.empty() and bigQueries.empty())? 1 : 0;
-        }
-        #else // MADVORO_WITH_MPI
-            finished = (smallQueries.empty() and bigQueries.empty())? 1 : 0;
-        #endif // MADVORO_WITH_MPI
-
-        if(considerOwnPoints and selfQueriesCanFindPoints)
-        {
-            this->BringSelfGhostPoints(bigQueries, smallQueries, bigRangeAgent, smallRangeAgent, numOfResultsForBigPoints, numOfResultsForSmallPoints, selfIgnorePoints);
-        }
-        else if(considerOwnPoints)
-        {
-            this->RecordEmptySelfAnswers(bigQueries, smallQueries, bigRangeAgent, smallRangeAgent, numOfResultsForBigPoints, numOfResultsForSmallPoints, selfIgnorePoints);
-        }
-
-        #ifdef MADVORO_WITH_MPI
-        if (!serialMode)
-            this->BringRemoteGhostPoints(bigQueries, smallQueries, bigRangeAgent, smallRangeAgent, numOfResultsForBigPoints, numOfResultsForSmallPoints);
-        #endif // MADVORO_WITH_MPI
-
-        auto start2 = std::chrono::high_resolution_clock::now();
-        std::vector<PointT> newPoints;
-        newPoints.reserve(mirroredPoints.size());
-        for(const std::pair<size_t, size_t> &pairFacePoint : mirroredPoints)
-        {
-            // check if we have already mirrored this point with this face - O(log n) lookup
-            if(allMirroredSet.find(pairFacePoint) == allMirroredSet.end())
-            {
-                allMirroredSet.insert(pairFacePoint); // remember we mirrored this point with this face
-                newPoints.push_back(MirrorPoint(box[pairFacePoint.first], this->del_.points_[pairFacePoint.second]));
-            }
-        }
-        this->BuildExtraTracked(newPoints);
-        auto end2 = std::chrono::high_resolution_clock::now();
-
-        #ifdef TIMING
-        if(rank == 0)
-        {
-            std::cout << "Time for building mirrors: " << std::chrono::duration<double>(end2 - start2).count() << " seconds" << std::endl;
-        }
-        #endif // TIMING
-
-        auto start3 = std::chrono::high_resolution_clock::now();
-
-        this->R_.resize(this->del_.tetras_.size(), RADIUS_UNINITIALIZED);
-        ContainerOps::conditional_shrink(this->R_);
-        // std::fill(this->R_.begin(), this->R_.end(), RADIUS_UNINITIALIZED);
-        this->tetra_centers_.resize(this->R_.size());
-        ContainerOps::conditional_shrink(this->tetra_centers_);
-        this->bigtet_ = SetPointTetras();
-
-        auto end3 = std::chrono::high_resolution_clock::now();
-        
-        #ifdef TIMING
-        if(rank == 0)
-        {
-            std::cout << "Time for calculating tetras: " << std::chrono::duration<double>(end3 - start3).count() << " seconds" << std::endl;
-        }
-        #endif // TIMING
-
-        size_t new_points = 0;
-        #ifdef MADVORO_WITH_MPI        
-        if (!serialMode)
-        {
-            size_t new_points_until_now = std::accumulate(this->Nghost_.cbegin(), this->Nghost_.cend(), 0, [](const size_t &a, const std::vector<size_t> &b){return a + b.size();});
-            new_points = new_points_until_now - total_new_points;
-            total_new_points = new_points_until_now;
-            MPI_Allreduce(MPI_IN_PLACE, &new_points, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, comm);
-        }
-        #else // MADVORO_WITH_MPI
-            new_points = newPoints.size();
-        #endif // MADVORO_WITH_MPI
-
-        auto end_iter = std::chrono::high_resolution_clock::now();
-
-        if(rank == 0) std::cout << "added new points: " << new_points << ", total time: " << std::chrono::duration<double>(end_iter - start_iter).count() << std::endl;
-
-        std::tie(smallPoints, largePoints) = this->DetermineNextIterationPoints(iterations, firstLargeIteration, currentRadiuses, numOfResultsForSmallPoints, numOfResultsForBigPoints);
-
-        // #ifdef MADVORO_WITH_MPI
-        //     std::tie(smallPoints, largePoints) = this->DetermineNextIterationPoints(iterations, firstLargeIteration, currentRadiuses, selfSmallQueriesAnswers, selfBigQueriesAnswers, smallBatchInfo.queriesAnswers, bigBatchInfo.queriesAnswers);
-        // #else // MADVORO_WITH_MPI
-        // #endif // MADVORO_WITH_MPI
-
-        #ifdef MADVORO_WITH_MPI
-        if (!serialMode)
-            MPI_Wait(&finishedReq, MPI_STATUS_IGNORE);
-        #endif // MADVORO_WITH_MPI
-
-        if(finished == size)
-        {
-            break;
-        }
-    }
-
-    auto end = std::chrono::high_resolution_clock::now();
-    if(rank == 0)
-    {
-        std::cout << "Time for bringing ghosts: " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
-    }
-
-    if(rank == 0)
-    {
-        std::cout << "Total small queries: " << totalSmallQueries << ", total big queries: " << totalBigQueries << std::endl;
-    }
-    
-    START_TIMER_PREEMPTIVE("Organizing sent/recv and ghosts arrays");
-    #ifdef MADVORO_WITH_MPI   
-    if (!serialMode)
-    {     
-        const std::vector<std::vector<size_t>> &sentPoints = pointsContainer.getSentData();
-        const std::vector<int> &sentProc = pointsContainer.getSentProc();
-
-        // calculate this->duplicated_points_
-        this->UpdateDuplicatedPoints(sentProc, sentPoints);
-        // remove whomever that does not appear both in my sent vector and receive vector (because if one appears in only one, it means that we either sent it a point, or received one, but has no used of it at all (otherwise it would require a symetric call))
-        // this->EnsureSymmetry(sentProc, {alreadyRecvProcs, smallRangeAgent.getRecvProc(), bigRangeAgent.getRecvProc()});    // todo: uncomment
-        this->EnsureSymmetry(sentProc, {alreadyRecvProcs, smallRangeAgent.getRecvProc(), bigRangeAgent.getRecvProc()});    
-    }
-    #endif // MADVORO_WITH_MPI
 }
 
 #ifdef MADVORO_WITH_MPI
@@ -3855,8 +2242,7 @@ std::pair<PointT, PointT> Voronoi3D<PointT>::GetBoxCoordinates(void) const
 template <typename PointT>
 void Voronoi3D<PointT>::ShrinkToFit(void)
 {
-    PointTetras_.shrink_to_fit();
-    R_.shrink_to_fit();
+    meshPoints_.shrink_to_fit();
     tetra_centers_.shrink_to_fit();
     FacesInCell_.shrink_to_fit();
     PointsInFace_.shrink_to_fit();
@@ -3871,18 +2257,30 @@ void Voronoi3D<PointT>::ShrinkToFit(void)
     radiuses.shrink_to_fit();
     periodicImageTranslation_.shrink_to_fit();
     periodicImagePhysical_.shrink_to_fit();
-    del_.ShrinkToFit();
+    builder_.ShrinkToFit();
 #ifdef MADVORO_WITH_MPI
     sentprocs_.shrink_to_fit();
-    for(auto &v : sentpoints_) v.shrink_to_fit();
+    for(auto &v : sentpoints_)
+    {
+        v.shrink_to_fit();
+    }
     sentpoints_.shrink_to_fit();
     duplicatedprocs_.shrink_to_fit();
-    for(auto &v : duplicated_points_) v.shrink_to_fit();
+    for(auto &v : duplicated_points_)
+    {
+        v.shrink_to_fit();
+    }
     duplicated_points_.shrink_to_fit();
     real_duplicated_proc.shrink_to_fit();
-    for(auto &v : real_duplicated_points) v.shrink_to_fit();
+    for(auto &v : real_duplicated_points)
+    {
+        v.shrink_to_fit();
+    }
     real_duplicated_points.shrink_to_fit();
-    for(auto &v : Nghost_) v.shrink_to_fit();
+    for(auto &v : Nghost_)
+    {
+        v.shrink_to_fit();
+    }
     Nghost_.shrink_to_fit();
     self_index_.shrink_to_fit();
 #endif
@@ -3891,8 +2289,7 @@ void Voronoi3D<PointT>::ShrinkToFit(void)
 template <typename PointT>
 void Voronoi3D<PointT>::ReleaseMemory(void)
 {
-    ContainerOps::release_container_memory(PointTetras_);
-    ContainerOps::release_container_memory(R_);
+    ContainerOps::release_container_memory(meshPoints_);
     ContainerOps::release_container_memory(tetra_centers_);
     ContainerOps::release_container_memory(FacesInCell_);
     ContainerOps::release_container_memory(PointsInFace_);
@@ -3908,7 +2305,7 @@ void Voronoi3D<PointT>::ReleaseMemory(void)
     ContainerOps::release_container_memory(radiuses);
     ContainerOps::release_container_memory(indicesInAllMyPoints);
     ContainerOps::release_container_memory(periodicImageTranslation_);
-    del_.ReleaseMemory();
+    builder_.ReleaseMemory();
 #ifdef MADVORO_WITH_MPI
     ContainerOps::release_container_memory(sentprocs_);
     ContainerOps::release_container_memory(sentpoints_);
@@ -3925,113 +2322,42 @@ template <typename PointT>
 void Voronoi3D<PointT>::BuildNoBox(vector<PointT> const &points, vector<vector<PointT>> const &ghosts, vector<size_t> toduplicate)
 {
     assert(points.size() > 0);
-    // Clear data
-    PointTetras_.clear();
-    R_.clear();
-    R_.reserve(points.size());
-    tetra_centers_.clear();
-    tetra_centers_.reserve(points.size() * 7);
-    del_.Clean();
-    // Voronoi Data
-    FacesInCell_.clear();
-    PointsInFace_.clear();
-    FaceNeighbors_.clear();
-    CM_.clear();
-    Face_CM_.clear();
-    volume_.clear();
-    area_.clear();
-    Norg_ = points.size();
-    #ifdef MADVORO_WITH_MPI
-        duplicatedprocs_.clear();
-        duplicated_points_.clear();
-        Nghost_.clear();
-    #endif // MADVORO_WITH_MPI
-
-    std::vector<size_t> order = HilbertOrder3D(points);
-
-    del_.Build(points, ur_, ll_, order);
-
-    for (size_t i = 0; i < ghosts.size(); ++i)
-    {
-        del_.BuildExtra(ghosts[i]);
-    }
+    this->BuildInitialize(points.size());
+    // the ghosts, then the points of `toduplicate` mirrored across the box faces
+    std::vector<std::vector<PointT>> mirrors;
+    vector<vector<size_t>> past_duplicates;
     vector<std::pair<size_t, size_t>> duplicate(6);
-    for (size_t j = 0; j < toduplicate.size(); ++j)
+    for(const size_t &point : toduplicate)
     {
-        for (size_t i = 0; i < 6; ++i)
-            duplicate[i] = std::pair<size_t, size_t>(i, toduplicate[j]);
-        vector<vector<size_t>> past_duplicates;
-        vector<PointT> extra_points = CreateBoundaryPoints(duplicate, past_duplicates);
-        del_.BuildExtra(extra_points);
-    }
-
-    R_.resize(del_.tetras_.size());
-    ContainerOps::conditional_shrink(R_);
-    // std::fill(R_.begin(), R_.end(), RADIUS_UNINITIALIZED);
-    tetra_centers_.resize(R_.size());
-    ContainerOps::conditional_shrink(tetra_centers_);
-    bigtet_ = SetPointTetras();
-
-    CM_.resize(Norg_);
-    ContainerOps::conditional_shrink(CM_);
-    volume_.resize(Norg_, 0);
-    ContainerOps::conditional_shrink(volume_);
-    // Create Voronoi
-    BuildVoronoi(order);
-
-    if(flatVoronoi_.CellCount() != Norg_)
-    {
-        MadVoro::Exception::MadVoroException eo("Voronoi3D: cell moments need the tessellation of this build");
-        eo.addEntry("cells in tessellation", flatVoronoi_.CellCount());
-        eo.addEntry("Norg", Norg_);
-        throw eo;
-    }
-    if(Norg_ > 0)
-        this->WithGeometryExecutor([this](auto &executor) { executor.CellMoments(this->flatVoronoi_); });
-    Geometry::HostParallelFor(Norg_, [this](std::size_t c)
-    {
-        volume_[c] = flatVoronoi_.cellVolume[c];
-        CM_[c] = PointT(flatVoronoi_.cellCM[c].x, flatVoronoi_.cellCM[c].y, flatVoronoi_.cellCM[c].z);
-    });
-    CM_.resize(del_.points_.size());
-    ContainerOps::conditional_shrink(CM_);
-    for (std::size_t i = 0; i < FaceNeighbors_.size(); ++i)
-    {
-        if (BoundaryFace(i))
+        for(size_t i = 0; i < 6; ++i)
         {
-            const std::pair<std::size_t, std::size_t> &neighbors = FaceNeighbors_[i];
-            const std::size_t real = (neighbors.first >= Norg_) ? neighbors.second : neighbors.first;
-            const std::size_t other = (neighbors.first >= Norg_) ? neighbors.first : neighbors.second;
-            CM_[other] = Geometry::MirroredCM(del_.points_[neighbors.first], del_.points_[neighbors.second], CM_[real],
-                                              tetra_centers_[PointsInFace_[i][0]]);
+            duplicate[i] = std::pair<size_t, size_t>(i, point);
         }
+        mirrors.push_back(this->CreateBoundaryPoints(points, duplicate, past_duplicates));
     }
+    std::vector<const std::vector<PointT> *> extras;
+    for(const std::vector<PointT> &group : ghosts)
+    {
+        extras.push_back(&group);
+    }
+    for(const std::vector<PointT> &group : mirrors)
+    {
+        extras.push_back(&group);
+    }
+    std::vector<double> noRadii;
+    DistributedBuild<PointT> built = this->Output();
+    this->builder_.BuildKnown(this->Domain(), std::vector<PointT>(), std::vector<size_t>(), noRadii, points, extras, built);
+    this->AfterBuild(built);
 }
 
 template <typename PointT>
 void Voronoi3D<PointT>::BuildPartially(const std::vector<PointT> &allPoints, const std::vector<size_t> &indicesToBuild)
 {
-    const std::vector<PointT> activePoints = this->PreparePartialBuild(allPoints, indicesToBuild);
-    if(this->UsesThreadSubdomains())
-    {
-        this->BuildFromThreadSubdomains(false);
-        return;
-    }
-    const std::vector<size_t> order = this->BuildPartialDelaunay(activePoints);
-
-    #ifdef MADVORO_WITH_MPI
-        this->BringGhostPointsToBuild(MPI_COMM_SELF);
-    #else // MADVORO_WITH_MPI
-        this->BringGhostPointsToBuild(); 
-    #endif // MADVORO_WITH_MPI
-
-    this->FinishPartialBuild(order);
+    this->PreparePartialBuild(allPoints, indicesToBuild);
+    this->BuildCells(false);
 }
 
-/**
- * \brief The start of a partial build: the points of this build (`indicesToBuild` of
- * `allPoints`, returned), and the cleared tessellation.
-*/
+/** \brief Returns the points of a partial build and clears the tessellation. */
 template <typename PointT>
 std::vector<PointT> Voronoi3D<PointT>::PreparePartialBuild(const std::vector<PointT> &allPoints, const std::vector<size_t> &indicesToBuild)
 {
@@ -4061,184 +2387,14 @@ std::vector<PointT> Voronoi3D<PointT>::PreparePartialBuild(const std::vector<Poi
     return activePoints;
 }
 
-/**
- * \brief The Delaunay of a partial build's points, and what its ghost search needs: the
- * trees of the points, the points' radii, and the range finder. Returns the points'
- * Hilbert order.
-*/
-template <typename PointT>
-std::vector<size_t> Voronoi3D<PointT>::BuildPartialDelaunay(const std::vector<PointT> &activePoints)
-{
-    // Norg_ = points.size();
-    // // Clear data
-    // PointTetras_.clear();
-    // R_.clear();
-    // R_.reserve(this->Norg_ * 11);
-    // tetra_centers_.clear();
-    // tetra_centers_.reserve(this->Norg_ * 11);
-    // // Voronoi Data
-    // FacesInCell_.clear();
-    // PointsInFace_.clear();
-    // FaceNeighbors_.clear();
-    // CM_.clear();
-    // Face_CM_.clear();
-    // volume_.clear();
-    // area_.clear();
-    // Nghost_.clear();
-
-    std::chrono::high_resolution_clock::time_point start, end;
-    start = std::chrono::high_resolution_clock::now();
-    
-    std::vector<size_t> order = HilbertOrder3D(activePoints);
-
-    // build delaunay
-    if(not activePoints.empty())
-    {
-        std::pair<PointT, PointT> bounding_box = std::make_pair(activePoints[0], activePoints[0]);
-        for(const PointT &point : activePoints)
-        {
-            bounding_box.first.x = std::min(bounding_box.first.x, point.x);
-            bounding_box.second.x = std::max(bounding_box.second.x, point.x);
-            bounding_box.first.y = std::min(bounding_box.first.y, point.y);
-            bounding_box.second.y = std::max(bounding_box.second.y, point.y);
-            bounding_box.first.z = std::min(bounding_box.first.z, point.z);
-            bounding_box.second.z = std::max(bounding_box.second.z, point.z);
-        }
-
-        bounding_box.first.x = std::min(bounding_box.first.x, this->ll_.x);
-        bounding_box.first.y = std::min(bounding_box.first.y, this->ll_.y);
-        bounding_box.first.z = std::min(bounding_box.first.z, this->ll_.z);
-        bounding_box.second.x = std::max(bounding_box.second.x, this->ur_.x);
-        bounding_box.second.y = std::max(bounding_box.second.y, this->ur_.y);
-        bounding_box.second.z = std::max(bounding_box.second.z, this->ur_.z);
-        
-        // performs internal tesselation:
-        // std::cout << "checking duplications..." << std::endl;
-        // reportDuplications(new_points);
-        // order = HilbertOrder3D(activePoints);
-        
-        // initial build for the points
-        this->del_.Build(activePoints, bounding_box.second, bounding_box.first, order);    
-    }        
-    // updates the radiuses array of the tetrahedra, as well as the lists for each point what tetras it belongs to
-    this->R_.resize(this->del_.tetras_.size());
-    ContainerOps::conditional_shrink(this->R_);
-    // std::fill(this->R_.begin(), this->R_.end(), RADIUS_UNINITIALIZED);
-    this->tetra_centers_.resize(this->R_.size());
-    ContainerOps::conditional_shrink(this->tetra_centers_);
-    this->bigtet_ = SetPointTetras();
-    
-    end = std::chrono::high_resolution_clock::now();
-    if(not this->IsThreadSubdomain())
-        std::cout << "Time for initial build: " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
-
-    start = std::chrono::high_resolution_clock::now();
-    if(this->sharedPointsTree_ != nullptr)
-    {
-        this->allMyPointsTree = this->sharedPointsTree_;
-    }
-    else
-    {
-        this->allMyPointsTree = std::make_shared<OctTree<IVec>>(IVec(this->ll_, std::numeric_limits<size_t>::max()),
-                                                                        IVec(this->ur_, std::numeric_limits<size_t>::max()));
-        size_t allPointsNum = this->allMyPoints.size();
-        for(size_t pointIdx = 0; pointIdx < allPointsNum; pointIdx++)
-        {
-            const PointT &point = this->allMyPoints[pointIdx];
-            this->allMyPointsTree->insert(IVec(point.x, point.y, point.z, pointIdx));
-        }
-    }
-
-    if(this->allMyPoints.size() == activePoints.size())
-    {
-        // not a real parital build
-        this->myPointsTree = this->allMyPointsTree;
-    }
-    else if(this->sharedPointsTree_ == nullptr) // (a thread subdomain does not search its own points)
-    {
-        this->myPointsTree = std::make_shared<OctTree<IVec>>(IVec(this->ll_, std::numeric_limits<size_t>::max()),
-                                                                        IVec(this->ur_, std::numeric_limits<size_t>::max()));
-        for(size_t pointIdx = 0; pointIdx < this->Norg_; pointIdx++)
-        {
-            const PointT &point = activePoints[pointIdx];
-            this->myPointsTree->insert(IVec(point.x, point.y, point.z, pointIdx));
-        }
-    }
-
-    this->UpdateRadiuses(activePoints);
-
-    this->UpdateRangeFinder();
-    
-    end = std::chrono::high_resolution_clock::now();
-
-    if(not this->IsThreadSubdomain())
-        std::cout << "Time for data structures initialization: " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
-    return order;
-}
-
-/**
- * \brief The end of a partial build, after its ghost search: the tessellation.
-*/
-template <typename PointT>
-void Voronoi3D<PointT>::FinishPartialBuild(const std::vector<size_t> &order)
-{
-    // vector<std::pair<std::size_t, std::size_t>> ghost_index = SerialFirstIntersections();
-    // vector<vector<size_t>> past_duplicates;
-    // vector<PointT> extra_points = CreateBoundaryPoints(ghost_index, past_duplicates);
-
-    // del_.BuildExtra(extra_points);
-
-    // R_.resize(del_.tetras_.size());
-    // std::fill(R_.begin(), R_.end(), RADIUS_UNINITIALIZED);
-    // tetra_centers_.resize(R_.size());
-    // bigtet_ = SetPointTetras(PointTetras_, Norg_, del_.tetras_, del_.empty_tetras_);
-    // ghost_index = SerialFindIntersections(true);
-    // extra_points = CreateBoundaryPoints(ghost_index, past_duplicates);
-    // del_.BuildExtra(extra_points);
-
-    // R_.resize(del_.tetras_.size());
-    // std::fill(R_.begin(), R_.end(), RADIUS_UNINITIALIZED);
-    // tetra_centers_.resize(R_.size());
-    // bigtet_ = SetPointTetras(PointTetras_, Norg_, del_.tetras_, del_.empty_tetras_);
-    // ghost_index = SerialFindIntersections(false);
-    // extra_points = CreateBoundaryPoints(ghost_index, past_duplicates);
-    // del_.BuildExtra(extra_points);
-    // bigtet_ = SetPointTetras(PointTetras_, Norg_, del_.tetras_, del_.empty_tetras_);
-
-    // std::vector<std::pair<size_t, size_t>>().swap(ghost_index);
-    // std::vector<std::vector<size_t>>().swap(past_duplicates);
-    // std::vector<PointT>().swap(extra_points);
-
-    CM_.resize(del_.points_.size());
-    ContainerOps::conditional_shrink(CM_);
-    volume_.resize(Norg_);
-    ContainerOps::conditional_shrink(volume_);
-
-    // Create Voronoi
-    BuildVoronoi(order);
-
-    this->UpdateCMs();
-}
-
-/**
- * \brief Whether this build is built from thread subdomains: they are asked for (any
- * build: full or partial, with or without periodic boundaries).
-*/
-template <typename PointT>
-bool Voronoi3D<PointT>::UsesThreadSubdomains(void) const
-{
-    return this->threadSubdomainCount_ > 0;
-}
-
-/**
- * \brief Says once that thread subdomains were asked for but a load balance switch of a
- * periodic box rebuilds as one domain.
-*/
+/** \brief Says once that a periodic load balance switch rebuilds without thread subdomains. */
 template <typename PointT>
 void Voronoi3D<PointT>::ReportUnusedThreadSubdomains(void)
 {
-    if(this->threadSubdomainCount_ == 0 or this->reportedUnusedSubdomains_)
+    if(this->threadSubdomainCount_ <= 1 or this->reportedUnusedSubdomains_)
+    {
         return;
+    }
     this->reportedUnusedSubdomains_ = true;
     int rank = 0;
     #ifdef MADVORO_WITH_MPI
@@ -4246,1153 +2402,52 @@ void Voronoi3D<PointT>::ReportUnusedThreadSubdomains(void)
     #endif // MADVORO_WITH_MPI
     if(rank == 0)
     {
-        std::cout << "MadVoro: " << this->threadSubdomainCount_ << " thread subdomains were asked for, but a load balance "
-                  << "switch of a periodic box rebuilds each rank as one domain" << std::endl;
+        std::cout << "MadVoro: " << this->threadSubdomainCount_ << " thread subdomains were asked for, but a load balance " << "switch of a periodic box rebuilds each rank as one domain" << std::endl;
     }
 }
 
-/**
- * \brief A thread subdomain's ghost search between its rounds: the state of
- * BringGhostPointsToBuild's loop.
-*/
+/** \brief Builds the prepared cells (expects the build prepared up to BuildInitialize). */
 template <typename PointT>
-struct Voronoi3D<PointT>::SubdomainGhostSearch
+void Voronoi3D<PointT>::BuildCells(bool otherRanks, const std::vector<PointT> *knownGhosts, const std::vector<PointT> *knownMirrors)
 {
-    SubdomainGhostSearch(const RangeFinder<PointT> *rangeFinder, const RangeFinder<PointT> *imageFinder)
-        #ifdef MADVORO_WITH_MPI
-            : bigAgent(rangeFinder, nullptr, pointsContainer, MPI_COMM_SELF), smallAgent(rangeFinder, nullptr, pointsContainer, MPI_COMM_SELF),
-              imageBigAgent(imageFinder, nullptr, pointsContainer, MPI_COMM_SELF), imageSmallAgent(imageFinder, nullptr, pointsContainer, MPI_COMM_SELF)
-        #else // MADVORO_WITH_MPI
-            : bigAgent(rangeFinder), smallAgent(rangeFinder), imageBigAgent(imageFinder), imageSmallAgent(imageFinder)
-        #endif // MADVORO_WITH_MPI
-    {}
-
-    std::vector<size_t> order; // the Hilbert order of the subdomain's points
-    std::vector<Face3D<PointT>> box;
-    std::vector<PointT> normals;
-    boost::container::flat_set<size_t> smallPoints, largePoints;
-    boost::container::flat_map<size_t, size_t> firstLargeIteration;
-    std::vector<double> currentRadiuses;
-    PeriodicIgnoreSets<PointT> ignorePoints;
-    std::set<std::pair<size_t, size_t>> mirrored;
-    size_t iterations = 0;
-    // the searches of the current round
-    std::vector<SmallRangeQueryData<PointT>> smallQueries;
-    std::vector<BigRangeQueryData<PointT>> bigQueries;
-    std::vector<std::pair<size_t, size_t>> mirroredPoints;
-    boost::container::flat_map<size_t, size_t> smallResults, bigResults;
-    // the searches of the current round that reach other ranks (positions in smallQueries
-    // and bigQueries), and the points other ranks sent for them (all-points indices)
-    std::vector<size_t> otherRankSmall, otherRankBig;
-    struct OtherRankAnswer
+    const size_t pointsNum = this->Norg_;
+    std::vector<size_t> cells(pointsNum);
+    for(size_t k = 0; k < pointsNum; ++k)
     {
-        bool big;
-        size_t query;
-        std::vector<size_t> points;
-    };
-    std::vector<OtherRankAnswer> otherRankAnswers;
-    #ifdef MADVORO_WITH_MPI
-        // the rank's domain decomposition, when the rank searches other ranks
-        std::shared_ptr<EnvironmentAgent<PointT>> envAgent;
-        int rank = 0;
-        SentPointsContainer pointsContainer; // (unused: a subdomain sends nothing)
-    #endif // MADVORO_WITH_MPI
-    BigRangeAgent<PointT> bigAgent;
-    SmallRangeAgent<PointT> smallAgent;
-    // the searches of the box's periodic images, in the rank's points only
-    BigRangeAgent<PointT> imageBigAgent;
-    SmallRangeAgent<PointT> imageSmallAgent;
-};
-
-/**
- * \brief The start of a thread subdomain's build: its Delaunay, and the start of its
- * ghost search (as at the start of BringGhostPointsToBuild).
-*/
-template <typename PointT>
-void Voronoi3D<PointT>::BeginSubdomain(const std::vector<PointT> &points, const std::vector<size_t> &indicesToBuild)
-{
-    const std::vector<PointT> activePoints = this->PreparePartialBuild(points, indicesToBuild);
-    SubdomainGhostSearch &search = *this->subdomainSearch_;
-    search.order = this->BuildPartialDelaunay(activePoints);
-
-    search.box.clear();
-    search.normals.clear();
-    this->InitialBoxBuild(search.box, search.normals);
-    this->periodicImageTranslation_.assign(this->del_.points_.size(), PointT());
-    search.smallPoints.clear();
-    search.largePoints.clear();
-    search.firstLargeIteration.clear();
-    search.currentRadiuses.assign(this->Norg_, RADIUS_UNINITIALIZED);
-    search.ignorePoints = PeriodicIgnoreSets<PointT>();
-    for(const std::pair<size_t, size_t> &indices : this->indicesInAllMyPoints)
-    {
-        search.smallPoints.insert(indices.first);
-        search.currentRadiuses[indices.first] = this->radiuses[indices.second];
-        search.ignorePoints[ZERO_IMAGE_CODE].insert(indices.second);
+        cells[k] = this->indicesInAllMyPoints.at(k);
     }
-    search.mirrored.clear();
-    search.iterations = 0;
-}
-
-/**
- * \brief The first part of a round of a thread subdomain's ghost search: its searches
- * and mirrors (as in a round of BringGhostPointsToBuild). Returns whether it searches.
-*/
-template <typename PointT>
-bool Voronoi3D<PointT>::PrepareSubdomainRound(void)
-{
-    SubdomainGhostSearch &search = *this->subdomainSearch_;
-    search.iterations++;
-    std::tie(search.smallQueries, search.bigQueries) = this->CreateBatches(search.smallPoints, search.largePoints, search.firstLargeIteration,
-                                                                           search.currentRadiuses, search.iterations);
-    search.mirroredPoints = MirrorPoints(search.smallQueries, search.box, search.normals);
-    const std::vector<std::pair<size_t, size_t>> moreMirroredPoints = MirrorPoints(search.bigQueries, search.box, search.normals);
-    search.mirroredPoints.insert(search.mirroredPoints.end(), moreMirroredPoints.begin(), moreMirroredPoints.end());
-    if(this->HasPeriodicBoundaries())
+    const BuildDomain<PointT> domain = this->Domain();
+    if(knownGhosts != nullptr and knownMirrors != nullptr and DistributedBuilder<PointT>::SubdomainsFor(this->threadSubdomainCount_, pointsNum) == 1)
     {
-        // as in BringGhostPointsToBuild: no mirrors across periodic faces, and each search
-        // also searches the periodic images of the box it reaches
-        search.mirroredPoints.erase(std::remove_if(search.mirroredPoints.begin(), search.mirroredPoints.end(),
-                                                   [this](const std::pair<size_t, size_t> &mirror) { return this->IsPeriodicFace(mirror.first); }),
-                                    search.mirroredPoints.end());
-        std::vector<SmallRangeQueryData<PointT>> expandedSmallQueries;
-        std::vector<BigRangeQueryData<PointT>> expandedBigQueries;
-        ExpandPeriodicQueries(search.smallQueries, this->periodic_, this->ll_, this->ur_, expandedSmallQueries);
-        ExpandPeriodicQueries(search.bigQueries, this->periodic_, this->ll_, this->ur_, expandedBigQueries);
-        search.smallQueries = std::move(expandedSmallQueries);
-        search.bigQueries = std::move(expandedBigQueries);
-    }
-    search.smallResults.clear();
-    search.bigResults.clear();
-    for(const SmallRangeQueryData<PointT> &query : search.smallQueries)
-    {
-        search.smallResults[query.pointIdx] = 0;
-    }
-    for(const BigRangeQueryData<PointT> &query : search.bigQueries)
-    {
-        search.bigResults[query.pointIdx] = 0;
-    }
-
-    // the searches that reach other ranks' domains (the others need no message)
-    search.otherRankSmall.clear();
-    search.otherRankBig.clear();
-    #ifdef MADVORO_WITH_MPI
-        if(search.envAgent != nullptr)
-        {
-            const auto reachesOtherRanks = [&search](const auto &query)
-            {
-                for(int otherRank : search.envAgent->getIntersectingRanks(PointT(query.center.x, query.center.y, query.center.z), query.radius))
-                {
-                    if(otherRank != search.rank)
-                        return true;
-                }
-                return false;
-            };
-            for(size_t j = 0; j < search.smallQueries.size(); ++j)
-            {
-                if(reachesOtherRanks(search.smallQueries[j]))
-                    search.otherRankSmall.push_back(j);
-            }
-            for(size_t j = 0; j < search.bigQueries.size(); ++j)
-            {
-                if(reachesOtherRanks(search.bigQueries[j]))
-                    search.otherRankBig.push_back(j);
-            }
-        }
-    #endif // MADVORO_WITH_MPI
-    return not (search.smallQueries.empty() and search.bigQueries.empty());
-}
-
-/**
- * \brief The second part of a round of a thread subdomain's ghost search, after the
- * points other ranks sent were added to `otherRankPoints`: the searches in the points
- * of the other subdomains and of other ranks, the mirrors, and the points of the next
- * round (as in a round of BringGhostPointsToBuild).
-*/
-template <typename PointT>
-void Voronoi3D<PointT>::FinishSubdomainRound(const RankGhostPoints<PointT> &otherRankPoints)
-{
-    SubdomainGhostSearch &search = *this->subdomainSearch_;
-    // the points other ranks sent follow the rank's points
-    const std::vector<PointT> &sent = otherRankPoints.Points();
-    for(size_t i = this->allMyPoints.size() - otherRankPoints.FirstIndex(); i < sent.size(); ++i)
-    {
-        this->allMyPoints.push_back(sent[i]);
-    }
-    if(search.smallQueries.empty() and search.bigQueries.empty())
-    {
+        // nothing to search: the ghosts (at their recorded indices) before the mirrors
+        const std::vector<PointT> points = MadVoro::ContainerOps::VectorValues(this->allMyPoints, cells);
+        DistributedBuild<PointT> built = this->Output();
+        this->builder_.BuildKnown(domain, this->allMyPoints, cells, this->radiuses, points, {knownGhosts, knownMirrors}, built);
+        this->AfterBuild(built);
+        this->SyncGhostValues();
         return;
     }
-
-    // The points other ranks sent for this subdomain's searches, added as BringRemoteGhostPoints
-    // adds them: those of the big searches, then those of the small ones, each in the order
-    // they arrived (their order among the rank's points). So one subdomain adds the points in
-    // the order of a build as one domain, which decides the Delaunay of degenerate points.
-    std::array<std::vector<size_t>, 2> received; // (big, small)
-    for(const typename SubdomainGhostSearch::OtherRankAnswer &answer : search.otherRankAnswers)
-    {
-        std::vector<size_t> &into = received[answer.big ? 0 : 1];
-        into.insert(into.end(), answer.points.begin(), answer.points.end());
-        if(answer.big)
-            search.bigResults[search.bigQueries[answer.query].pointIdx] += answer.points.size();
-        else
-            search.smallResults[search.smallQueries[answer.query].pointIdx] += answer.points.size();
-    }
-    search.otherRankAnswers.clear();
-    for(std::vector<size_t> &indices : received)
-    {
-        std::sort(indices.begin(), indices.end());
-        std::vector<PointT> answered;
-        for(const size_t &pointIdxInAll : indices)
-        {
-            if(search.ignorePoints[ZERO_IMAGE_CODE].insert(pointIdxInAll).second)
-            {
-                this->indicesInAllMyPoints[this->del_.points_.size() + answered.size()] = pointIdxInAll;
-                answered.push_back(this->allMyPoints[pointIdxInAll]);
-            }
-        }
-        this->BuildExtraTracked(answered);
-    }
-
-    // then the points of the other subdomains, and the points other ranks sent for other subdomains
-    // (searches of the periodic images of the box: the images of the rank's points, the
-    // subdomain's own included; an image of a point of another rank comes from that rank)
-    std::vector<SmallRangeQueryData<PointT>> smallQueries, smallImageQueries;
-    std::vector<BigRangeQueryData<PointT>> bigQueries, bigImageQueries;
-    for(const SmallRangeQueryData<PointT> &query : search.smallQueries)
-    {
-        (ImageCode(query.imageTranslation) == ZERO_IMAGE_CODE ? smallQueries : smallImageQueries).push_back(query);
-    }
-    for(const BigRangeQueryData<PointT> &query : search.bigQueries)
-    {
-        (ImageCode(query.imageTranslation) == ZERO_IMAGE_CODE ? bigQueries : bigImageQueries).push_back(query);
-    }
-    const bool selfQueriesCanFindPoints = (search.ignorePoints[ZERO_IMAGE_CODE].size() < this->allMyPoints.size());
-    if(selfQueriesCanFindPoints)
-    {
-        this->BringSelfGhostPoints(bigQueries, smallQueries, search.bigAgent, search.smallAgent, search.bigResults,
-                                   search.smallResults, search.ignorePoints);
-    }
-    else
-    {
-        this->RecordEmptySelfAnswers(bigQueries, smallQueries, search.bigAgent, search.smallAgent, search.bigResults,
-                                     search.smallResults, search.ignorePoints);
-    }
-    if(not (smallImageQueries.empty() and bigImageQueries.empty()))
-    {
-        this->BringSelfGhostPoints(bigImageQueries, smallImageQueries, search.imageBigAgent, search.imageSmallAgent, search.bigResults,
-                                   search.smallResults, search.ignorePoints);
-    }
-
-    std::vector<PointT> newPoints;
-    newPoints.reserve(search.mirroredPoints.size());
-    for(const std::pair<size_t, size_t> &pairFacePoint : search.mirroredPoints)
-    {
-        if(search.mirrored.insert(pairFacePoint).second)
-        {
-            newPoints.push_back(MirrorPoint(search.box[pairFacePoint.first], this->del_.points_[pairFacePoint.second]));
-        }
-    }
-    this->BuildExtraTracked(newPoints);
-
-    this->R_.resize(this->del_.tetras_.size(), RADIUS_UNINITIALIZED);
-    ContainerOps::conditional_shrink(this->R_);
-    this->tetra_centers_.resize(this->R_.size());
-    ContainerOps::conditional_shrink(this->tetra_centers_);
-    this->bigtet_ = SetPointTetras();
-
-    std::tie(search.smallPoints, search.largePoints) = this->DetermineNextIterationPoints(search.iterations, search.firstLargeIteration, search.currentRadiuses,
-                                                                                          search.smallResults, search.bigResults);
-}
-
-/**
- * \brief The end of a thread subdomain's build, after its ghost search: its tessellation.
-*/
-template <typename PointT>
-void Voronoi3D<PointT>::EndSubdomain(void)
-{
-    this->FinishPartialBuild(this->subdomainSearch_->order);
-}
-
-/**
- * \brief Builds the tessellation of the points (the built points of allMyPoints, as
- * indicesInAllMyPoints lists them) from thread subdomains.
- * The built points are cut into contiguous ranges of their Hilbert order. Each range is
- * a subdomain, built by its own Voronoi3D as a partial build of the rank's points. In a
- * partial build the rank's points that are not built are ghosts of any subdomain, as
- * the points of other subdomains are; with periodic boundaries each subdomain also
- * searches the periodic images of the box, in the rank's points (its own included),
- * and other ranks send the images of their points. The
- * subdomains search for their ghosts together, round by round, as one domain does:
- * in each round each subdomain prepares its searches; with `otherRanks`, the rank
- * sends the searches that reach other ranks in one exchange, and adds the points it
- * receives to the points the subdomains search; then each subdomain searches the
- * rank's points and the received points, and adds what it finds. The rounds end when
- * no subdomain, on any rank, searches any more. The subdomains' tessellations are then
- * merged (see MergeSubdomains), and the ghosts the rank received, and the ghosts that
- * are copies of its points, are recorded as in a build as one domain. Expects the build
- * to be prepared up to and including BuildInitialize.
- * `knownGhosts` are points of other ranks the rank already has, which the subdomains
- * search from the first round, after the rank's points and the four bounding points
- * (MockMesh knows every ghost the rank needs, and searches no other rank).
- * The subdomains' work runs in parallel, with Kokkos on host threads (one subdomain
- * after another without Kokkos), and touches only the subdomain's own Voronoi3D and
- * what the rank shares with it read-only; only the rank's own thread talks to other
- * ranks, between the parallel parts. Kokkos cannot launch a parallel loop from inside
- * one, so a subdomain built in parallel runs its own geometry serially (in a
- * SerialGeometryScope), on the host also when the build's geometry kernels run on a
- * device (see WithGeometryExecutor): the subdomains are built the same way on one host
- * thread, on many, and next to a device.
- * Octree nodes come from one pool without a lock, so the subdomains neither build nor
- * destroy trees: the rank builds them and releases the last build's here.
-*/
-template <typename PointT>
-void Voronoi3D<PointT>::BuildFromThreadSubdomains([[maybe_unused]] bool otherRanks, const std::vector<PointT> *knownGhosts)
-{
-    const size_t pointsNum = this->Norg_; // the points built
-    const size_t rankPointsNum = this->allMyPoints.size(); // the rank's points (a partial build does not build all)
-    const size_t count = std::min({this->threadSubdomainCount_, pointsNum, SubdomainGrid<PointT>::MAX_SUBDOMAINS});
-    const auto searchStart = std::chrono::high_resolution_clock::now();
-
-    // The built points, in the order of the build
-    std::vector<size_t> builtIndex(pointsNum);
-    bool builtInOrder = (pointsNum == rankPointsNum);
-    for(size_t k = 0; k < pointsNum; ++k)
-    {
-        builtIndex[k] = this->indicesInAllMyPoints.at(k);
-        builtInOrder = builtInOrder and (builtIndex[k] == k);
-    }
-    const std::vector<PointT> builtPoints = builtInOrder ? std::vector<PointT>() : MadVoro::ContainerOps::VectorValues(this->allMyPoints, builtIndex);
-
-    // Subdomain s is the range [s * pointsNum / count, (s + 1) * pointsNum / count) of the
-    // Hilbert order of the built points
-    const std::vector<size_t> order = HilbertOrder3D(this->allMyPoints);
-    const std::vector<size_t> builtOrder = builtInOrder ? order : HilbertOrder3D(builtPoints);
-
-    // One tree of the rank's points, and one of the built points (the same tree when the
-    // rank builds all its points in their order). A tree does not depend on the order of
-    // insertion; inserting along the Hilbert curve keeps consecutive insertions in the same
-    // part of the tree.
-    const PointT width = this->ur_ - this->ll_;
-    this->allMyPointsTree = std::make_shared<OctTree<IVec>>(IVec(this->ll_ - width * 0.00001, std::numeric_limits<size_t>::max()),
-                                                            IVec(this->ur_ + width * 0.00001, std::numeric_limits<size_t>::max()));
-    for(const size_t &pointIdx : order)
-    {
-        const PointT &point = this->allMyPoints[pointIdx];
-        this->allMyPointsTree->insert(IVec(point.x, point.y, point.z, pointIdx));
-    }
-    if(builtInOrder)
-    {
-        this->myPointsTree = this->allMyPointsTree;
-    }
-    else
-    {
-        this->myPointsTree = std::make_shared<OctTree<IVec>>(IVec(this->ll_ - width * 0.00001, std::numeric_limits<size_t>::max()),
-                                                             IVec(this->ur_ + width * 0.00001, std::numeric_limits<size_t>::max()));
-        for(const size_t &k : builtOrder)
-        {
-            const PointT &point = builtPoints[k];
-            this->myPointsTree->insert(IVec(point.x, point.y, point.z, k));
-        }
-    }
-    const auto subdomainBegin = [pointsNum, count](size_t s) { return s * pointsNum / count; };
-
-    // What the subdomains search: the rank's points, where there may be points of other
-    // subdomains (or points not built, which no subdomain has), and the points other ranks
-    // send (indices from rankPointsNum on)
-    using subdomain_t = typename SubdomainGrid<PointT>::subdomain_t;
-    std::vector<subdomain_t> subdomainOf(rankPointsNum, static_cast<subdomain_t>(count));
-    for(size_t s = 0; s < count; ++s)
-    {
-        for(size_t i = subdomainBegin(s); i < subdomainBegin(s + 1); ++i)
-        {
-            subdomainOf[builtIndex[builtOrder[i]]] = static_cast<subdomain_t>(s);
-        }
-    }
-    const std::shared_ptr<SubdomainGrid<PointT>> grid = std::make_shared<SubdomainGrid<PointT>>(this->allMyPoints, subdomainOf);
-    // (with periodic boundaries other ranks send periodic images too, up to a period outside the box)
-    const PointT period = this->HasPeriodicBoundaries() ? width : PointT();
-    const std::shared_ptr<RankGhostPoints<PointT>> otherRankPoints = std::make_shared<RankGhostPoints<PointT>>(this->ll_ - period, this->ur_ + period, rankPointsNum);
-    const std::shared_ptr<OctTreeFinder<PointT>> pointsFinder = std::make_shared<OctTreeFinder<PointT>>(this->allMyPointsTree.get(), this->allMyPoints);
-    // other ranks' searches are answered from the rank's own points
-    this->rangeFinder = pointsFinder;
-
-    std::vector<std::unique_ptr<Voronoi3D<PointT>>> &subdomains = this->threadSubdomains_.meshes;
-    subdomains.resize(count);
-    for(size_t s = 0; s < count; ++s)
-    {
-        if(subdomains[s] == nullptr)
-        {
-            subdomains[s] = std::make_unique<Voronoi3D<PointT>>(this->ll_, this->ur_);
-            #ifdef MADVORO_WITH_MPI
-                // a subdomain talks to no other rank
-                subdomains[s]->SetPointsManager(nullptr);
-            #endif // MADVORO_WITH_MPI
-        }
-        Voronoi3D<PointT> &subdomain = *subdomains[s];
-        subdomain.ll_ = this->ll_;
-        subdomain.ur_ = this->ur_;
-        subdomain.box_faces_ = this->box_faces_;
-        subdomain.periodic_ = this->periodic_;
-        // Octree nodes come from one pool without a lock (spatial_ds), so subdomain threads
-        // must neither build nor destroy trees: release the trees of the last build here
-        subdomain.allMyPointsTree = this->allMyPointsTree;
-        subdomain.myPointsTree.reset();
-        subdomain.rangeFinder.reset(); // (the last build's finder owns that build's tree of points other ranks sent)
-        subdomain.sharedPointsTree_ = this->allMyPointsTree;
-        subdomain.sharedRangeFinder_ = std::make_shared<SubdomainRangeFinder<PointT>>(pointsFinder, otherRankPoints, grid, static_cast<subdomain_t>(s));
-        subdomain.subdomainSearch_ = std::make_shared<SubdomainGhostSearch>(subdomain.sharedRangeFinder_.get(), pointsFinder.get());
-    }
-
-    std::vector<std::exception_ptr> errors(count);
-    const auto forEachSubdomain = [&](const auto &task)
-    {
-        const auto run = [&](size_t s)
-        {
-            try
-            {
-                task(s);
-            }
-            catch(...)
-            {
-                errors[s] = std::current_exception();
-            }
-        };
-        // On Kokkos' host threads (one after another without Kokkos), also in a device
-        // build: a subdomain's geometry runs on its own thread (WithGeometryExecutor)
-        Geometry::HostParallelFor(count, [&run](size_t s)
-        {
-            const Geometry::SerialGeometryScope serialGeometry;
-            run(s);
-        });
-        for(const std::exception_ptr &error : errors)
-        {
-            if(error)
-                std::rethrow_exception(error);
-        }
-    };
-
-    // The mesh's points while searching: the built points, the bounding points (set by the
-    // merge), then the points other ranks send
-    this->del_.points_ = builtInOrder ? this->allMyPoints : builtPoints;
-    this->del_.points_.resize(pointsNum + 4);
-    const auto addOtherRankPoints = [&](const std::vector<PointT> &received)
-    {
-        for(const PointT &point : received)
-        {
-            this->del_.points_.push_back(point);
-            otherRankPoints->Add(point);
-        }
-        grid->AddOtherRankPoints(received.begin(), received.end());
-    };
-
-    std::vector<std::vector<size_t>> subdomainIndices(count);
-    for(size_t s = 0; s < count; ++s)
-    {
-        // in the order of the build, so one subdomain is the same build as one domain
-        std::vector<size_t> built(builtOrder.begin() + subdomainBegin(s), builtOrder.begin() + subdomainBegin(s + 1));
-        std::sort(built.begin(), built.end());
-        for(const size_t &k : built)
-        {
-            subdomainIndices[s].push_back(builtIndex[k]);
-        }
-    }
-    forEachSubdomain([&](size_t s)
-    {
-        subdomains[s]->radiuses = this->radiuses; // (copied here, in parallel)
-        subdomains[s]->BeginSubdomain(this->allMyPoints, subdomainIndices[s]);
-    });
-    if(knownGhosts != nullptr)
-    {
-        addOtherRankPoints(*knownGhosts);
-    }
-
     #ifdef MADVORO_WITH_MPI
-        // As BringGhostPointsToBuild does with other ranks
-        int size = 1;
-        std::vector<int> alreadyRecvProcs;
-        std::optional<SentPointsContainer> pointsContainer;
-        std::optional<BigRangeAgent<PointT>> bigRangeAgent;
-        std::optional<SmallRangeAgent<PointT>> smallRangeAgent;
+        std::optional<typename DistributedBuilder<PointT>::ExchangeRequest> request;
         if(otherRanks)
         {
-            const MPI_Comm comm = MPI_COMM_WORLD;
-            MPI_Comm_size(comm, &size);
-            auto [ghostPointsFromLastBuild, alreadySentPoints1, alreadyRecvPoints1] = this->InitialGhostPointsExchange(comm);
-            std::vector<int> alreadySentProcs;
-            std::vector<std::vector<size_t>> alreadySentPoints2, alreadyRecvPoints2;
-            for(rank_t _rank = 0; _rank < size; _rank++)
-            {
-                if(alreadySentPoints1[_rank].size() > 0)
-                {
-                    alreadySentProcs.push_back(_rank);
-                    alreadySentPoints2.emplace_back(std::move(alreadySentPoints1[_rank]));
-                }
-                if(alreadyRecvPoints1[_rank].size() > 0)
-                {
-                    alreadyRecvProcs.push_back(_rank);
-                    alreadyRecvPoints2.emplace_back(std::move(alreadyRecvPoints1[_rank]));
-                }
-            }
-            this->SetGhostArray(alreadyRecvProcs, alreadyRecvPoints2);
-            addOtherRankPoints(ghostPointsFromLastBuild);
-            pointsContainer.emplace(alreadySentProcs, alreadySentPoints2);
-
             const std::shared_ptr<EnvironmentAgent<PointT>> envAgent = this->pointsManager->getEnvironmentAgent();
-            if(!envAgent)
+            if(not envAgent)
             {
-                throw MadVoro::Exception::MadVoroException("BuildFromThreadSubdomains: environment agent is null");
+                throw MadVoro::Exception::MadVoroException("BuildCells: environment agent is null");
             }
-            bigRangeAgent.emplace(pointsFinder.get(), envAgent, *pointsContainer, comm);
-            smallRangeAgent.emplace(pointsFinder.get(), envAgent, *pointsContainer, comm);
-            int rank;
-            MPI_Comm_rank(comm, &rank);
-            for(const std::unique_ptr<Voronoi3D<PointT>> &subdomain : subdomains)
-            {
-                subdomain->subdomainSearch_->envAgent = envAgent;
-                subdomain->subdomainSearch_->rank = rank;
-            }
+            // the last build's real ghosts go first
+            request.emplace(typename DistributedBuilder<PointT>::ExchangeRequest{envAgent, this->real_duplicated_proc, this->real_duplicated_points, MPI_COMM_WORLD});
         }
+        DistributedBuild<PointT> built = this->Output();
+        this->builder_.Build(domain, this->threadSubdomainCount_, this->allMyPoints, cells, this->radiuses, knownGhosts, request ? &*request : nullptr, built);
+        this->AfterBuild(built);
     #else // MADVORO_WITH_MPI
-        const int size = 1;
+        DistributedBuild<PointT> built = this->Output();
+        this->builder_.Build(domain, this->threadSubdomainCount_, this->allMyPoints, cells, this->radiuses, knownGhosts, built);
+        this->AfterBuild(built);
     #endif // MADVORO_WITH_MPI
-
-    size_t rounds = 0;
-    std::vector<char> searching(count, 0);
-    while(true)
-    {
-        rounds++;
-        forEachSubdomain([&](size_t s) { searching[s] = subdomains[s]->PrepareSubdomainRound() ? 1 : 0; });
-        int finished = std::none_of(searching.begin(), searching.end(), [](char c) { return c != 0; }) ? 1 : 0;
-        #ifdef MADVORO_WITH_MPI
-            MPI_Request finishedReq;
-            int I_finished = finished;
-            if(otherRanks)
-            {
-                MPI_Iallreduce(&I_finished, &finished, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD, &finishedReq);
-                // The searches of every subdomain that reach other ranks, in one exchange. A
-                // search is sent with its point's index among the rank's points (unique among
-                // the subdomains), and the points sent for it go to the subdomain that asked.
-                std::vector<BigRangeQueryData<PointT>> bigQueries;
-                std::vector<SmallRangeQueryData<PointT>> smallQueries;
-                std::vector<std::pair<size_t, size_t>> bigOrigins, smallOrigins; // (subdomain, search)
-                for(size_t s = 0; s < count; ++s)
-                {
-                    const Voronoi3D<PointT> &subdomain = *subdomains[s];
-                    const SubdomainGhostSearch &search = *subdomain.subdomainSearch_;
-                    for(const size_t &j : search.otherRankBig)
-                    {
-                        bigQueries.push_back(search.bigQueries[j]);
-                        bigQueries.back().pointIdx = subdomain.indicesInAllMyPoints.at(search.bigQueries[j].pointIdx);
-                        bigOrigins.emplace_back(s, j);
-                    }
-                    for(const size_t &j : search.otherRankSmall)
-                    {
-                        smallQueries.push_back(search.smallQueries[j]);
-                        smallQueries.back().pointIdx = subdomain.indicesInAllMyPoints.at(search.smallQueries[j].pointIdx);
-                        smallOrigins.emplace_back(s, j);
-                    }
-                }
-                const auto giveAnswers = [&](const auto &batchInfo, const std::vector<std::pair<size_t, size_t>> &origins, bool big)
-                {
-                    // the points of this batch, by position (a received point is in exactly one answer)
-                    std::map<std::array<double, 3>, size_t> received;
-                    const size_t first = rankPointsNum + otherRankPoints->Points().size();
-                    for(size_t i = 0; i < batchInfo.result.size(); ++i)
-                    {
-                        received.emplace(std::array<double, 3>{batchInfo.result[i].x, batchInfo.result[i].y, batchInfo.result[i].z}, first + i);
-                    }
-                    for(const auto &answer : batchInfo.queriesAnswers)
-                    {
-                        if(answer.finalResults.empty())
-                            continue;
-                        typename SubdomainGhostSearch::OtherRankAnswer given{big, origins[answer.id].second, {}};
-                        for(const PointT &point : answer.finalResults)
-                        {
-                            given.points.push_back(received.at(std::array<double, 3>{point.x, point.y, point.z}));
-                        }
-                        subdomains[origins[answer.id].first]->subdomainSearch_->otherRankAnswers.push_back(std::move(given));
-                    }
-                };
-                QueryBatchInfo<BigRangeQueryData<PointT>, PointT> bigBatchInfo = bigRangeAgent->runBatch(bigQueries);
-                this->SetGhostArray(bigRangeAgent->getRecvProc(), bigRangeAgent->getRecvPoints());
-                giveAnswers(bigBatchInfo, bigOrigins, true);
-                addOtherRankPoints(bigBatchInfo.result);
-                QueryBatchInfo<SmallRangeQueryData<PointT>, PointT> smallBatchInfo = smallRangeAgent->runBatch(smallQueries);
-                this->SetGhostArray(smallRangeAgent->getRecvProc(), smallRangeAgent->getRecvPoints());
-                giveAnswers(smallBatchInfo, smallOrigins, false);
-                addOtherRankPoints(smallBatchInfo.result);
-            }
-        #endif // MADVORO_WITH_MPI
-        forEachSubdomain([&](size_t s) { subdomains[s]->FinishSubdomainRound(*otherRankPoints); });
-        #ifdef MADVORO_WITH_MPI
-            if(otherRanks)
-            {
-                MPI_Wait(&finishedReq, MPI_STATUS_IGNORE);
-            }
-        #endif // MADVORO_WITH_MPI
-        if(finished == size)
-        {
-            break;
-        }
-    }
-
-    #ifdef MADVORO_WITH_MPI
-        if(otherRanks)
-        {
-            // as at the end of BringGhostPointsToBuild
-            const std::vector<std::vector<size_t>> &sentPoints = pointsContainer->getSentData();
-            const std::vector<int> &sentProc = pointsContainer->getSentProc();
-            this->UpdateDuplicatedPoints(sentProc, sentPoints);
-            this->EnsureSymmetry(sentProc, {alreadyRecvProcs, smallRangeAgent->getRecvProc(), bigRangeAgent->getRecvProc()});
-        }
-    #endif // MADVORO_WITH_MPI
-    int rank = 0;
-    #ifdef MADVORO_WITH_MPI
-        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    #endif // MADVORO_WITH_MPI
-    if(rank == 0)
-    {
-        std::cout << "Time for bringing ghosts (" << count << " thread subdomains): "
-                  << std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - searchStart).count()
-                  << " seconds, " << rounds << " rounds" << std::endl;
-    }
-
-    forEachSubdomain([&](size_t s) { subdomains[s]->EndSubdomain(); });
-
-    std::vector<const Voronoi3D<PointT> *> parts;
-    for(const std::unique_ptr<Voronoi3D<PointT>> &subdomain : subdomains)
-    {
-        parts.push_back(subdomain.get());
-    }
-    // The merge reuses the memory of the rank's arrays (BuildInitialize emptied them), so a
-    // rebuild neither frees nor allocates them again
-    SubdomainMerge<PointT> storage;
-    storage.cellFaces = std::move(this->FacesInCell_);
-    storage.faceNeighbors = std::move(this->FaceNeighbors_);
-    storage.faceVertices = std::move(this->PointsInFace_);
-    storage.faceArea = std::move(this->area_);
-    storage.faceCM = std::move(this->Face_CM_);
-    storage.vertices = std::move(this->tetra_centers_);
-    storage.volume = std::move(this->volume_);
-    storage.CM = std::move(this->CM_);
-    // Where each point a subdomain may have goes: the built points by their order in the
-    // build, then the points other ranks sent after the bounding points
-    constexpr size_t NOT_BUILT = std::numeric_limits<size_t>::max();
-    const size_t otherRankPointsNum = otherRankPoints->Points().size();
-    std::vector<size_t> mergedIndexOf(rankPointsNum + otherRankPointsNum, NOT_BUILT);
-    for(size_t k = 0; k < pointsNum; ++k)
-    {
-        mergedIndexOf[builtIndex[k]] = k;
-    }
-    for(size_t i = 0; i < otherRankPointsNum; ++i)
-    {
-        mergedIndexOf[rankPointsNum + i] = pointsNum + 4 + i;
-    }
-    SubdomainMerge<PointT> merged = MergeSubdomains(parts, this->del_.points_, pointsNum, mergedIndexOf, rankPointsNum, std::move(storage));
-    this->del_.points_ = std::move(merged.points);
-    this->del_.Norg_ = pointsNum;
-    this->FacesInCell_ = std::move(merged.cellFaces);
-    this->FaceNeighbors_ = std::move(merged.faceNeighbors);
-    this->PointsInFace_ = std::move(merged.faceVertices);
-    this->area_ = std::move(merged.faceArea);
-    this->Face_CM_ = std::move(merged.faceCM);
-    this->tetra_centers_ = std::move(merged.vertices);
-    this->volume_ = std::move(merged.volume);
-    this->CM_ = std::move(merged.CM);
-    // the ghosts that are copies of the rank's points are the rank's points (as a build as
-    // one domain records them), after the points other ranks sent
-    for(size_t g = 0; g < merged.rankPointGhosts.size(); ++g)
-    {
-        this->indicesInAllMyPoints[pointsNum + 4 + otherRankPointsNum + g] = merged.rankPointGhosts[g];
-    }
-    // a periodic image lies outside the box, by the translation from its point
-    this->periodicImageTranslation_.assign(this->del_.points_.size(), PointT());
-    if(this->HasPeriodicBoundaries())
-    {
-        for(size_t i = pointsNum + 4; i < this->del_.points_.size(); ++i)
-        {
-            this->periodicImageTranslation_[i] = this->InferPeriodicTranslation(this->del_.points_[i]);
-        }
-    }
-
-    // the radii carried to the next build: each point's, from the subdomain that built it
-    forEachSubdomain([&](size_t s)
-    {
-        const Voronoi3D<PointT> &subdomain = *subdomains[s];
-        for(size_t j = 0; j < subdomain.Norg_; ++j)
-        {
-            const size_t pointIdx = subdomain.indicesInAllMyPoints.at(j);
-            this->radiuses[pointIdx] = subdomain.radiuses[pointIdx];
-        }
-    });
-    this->SyncPartialBuildData(this->CM_, this->all_CM);
-    this->ShiftPeriodicImageCMs();
-}
-
-template <typename PointT>
-void Voronoi3D<PointT>::BuildVoronoi(std::vector<size_t> const &order)
-{
-    #ifdef MADVORO_GEOMETRY_TIMING
-        auto timePoint = std::chrono::high_resolution_clock::now();
-        const auto reportTime = [&timePoint](const char *caption)
-        {
-            const auto now = std::chrono::high_resolution_clock::now();
-            int timingRank = 0;
-            #ifdef MADVORO_WITH_MPI
-                MPI_Comm_rank(MPI_COMM_WORLD, &timingRank);
-            #endif // MADVORO_WITH_MPI
-            if(timingRank == 0)
-                std::cout << "Time for " << caption << ": " << std::chrono::duration<double>(now - timePoint).count() << " seconds" << std::endl;
-            timePoint = now;
-        };
-    #else // MADVORO_GEOMETRY_TIMING
-        const auto reportTime = [](const char *) {};
-    #endif // MADVORO_GEOMETRY_TIMING
-
-    // Flat copies of the Delaunay and of each point's tetrahedra. The tetrahedra are
-    // kept in PointTetras_'s order, which decides the face numbering.
-    flatMesh_ = Geometry::MakeFlatMesh(del_, PointTetras_);
-    const Geometry::FlatMeshView mesh = flatMesh_.View();
-    const std::size_t Ntetra = del_.tetras_.size();
-    flatVoronoi_ = Geometry::FlatVoronoi();
-    flatVoronoi_.ResizeCellsAndTetras(Norg_, Ntetra);
-    const Geometry::FlatVoronoiView voronoi = flatVoronoi_.View();
-    reportTime("flat mesh");
-
-    // Circumcenters. GetRadius caches a tetrahedron's radius in R_ and its center in
-    // tetra_centers_, and SetPointTetras resets R_ for every tetrahedron the Delaunay
-    // changed, so a positive R_ marks a center that is still valid. Reuse is only
-    // trusted when no Delaunay change is pending.
-    const bool reuseCenters = del_.newTetras_.empty() and del_.changed_tetras_.empty() and R_.size() >= Ntetra;
-    std::vector<std::uint8_t> computeCenter(Ntetra, 0);
-    Geometry::HostParallelFor(Ntetra, [&](std::size_t i)
-    {
-        if(not ShouldCalcTetraRadius(del_.tetras_[i], Norg_))
-            return;
-        if(reuseCenters and R_[i] > 0)
-            voronoi.vertices[i] = Geometry::ToFlatPoint(tetra_centers_[i]);
-        else
-            computeCenter[i] = 1;
-    });
-    this->WithGeometryExecutor([&](auto &executor)
-    {
-        executor.SetMesh(flatMesh_);
-        executor.Circumcenters(computeCenter, flatVoronoi_);
-    });
-    Geometry::HostParallelFor(Ntetra, [&](std::size_t i)
-    {
-        if(computeCenter[i] != 0)
-        {
-            if(voronoi.tetraStatus[i] == Geometry::GeometryStatus::Ok)
-                tetra_centers_[i] = PointT(voronoi.vertices[i].x, voronoi.vertices[i].y, voronoi.vertices[i].z);
-            return;
-        }
-        #ifndef NDEBUG
-            if(ShouldCalcTetraRadius(del_.tetras_[i], Norg_))
-            {
-                Geometry::FlatPoint check{0.0, 0.0, 0.0};
-                double radius = 0;
-                const Tetrahedron &tetra = del_.tetras_[i];
-                if(Geometry::Circumcenter(mesh.points[tetra.points[0]], mesh.points[tetra.points[1]], mesh.points[tetra.points[2]],
-                                          mesh.points[tetra.points[3]], check, radius) == Geometry::GeometryStatus::Ok)
-                    assert(check.x == voronoi.vertices[i].x and check.y == voronoi.vertices[i].y and check.z == voronoi.vertices[i].z);
-            }
-        #endif // NDEBUG
-    });
-    for(std::size_t i = 0; i < Ntetra; ++i)
-    {
-        if(voronoi.tetraStatus[i] == Geometry::GeometryStatus::NeedsHost)
-        {
-            CalcTetraRadiusCenterHiPrecision(i);
-            voronoi.vertices[i] = Geometry::ToFlatPoint(tetra_centers_[i]);
-            voronoi.tetraStatus[i] = Geometry::GeometryStatus::Ok;
-        }
-    }
-    this->WithGeometryExecutor([this](auto &executor) { executor.SetVertices(this->flatVoronoi_); });
-    reportTime("circumcenters");
-
-    // Faces. Faces against points outside the domain (that are not periodic images) use a looser small-area cut.
-    std::vector<std::uint8_t> looseAreaCut(del_.points_.size());
-    Geometry::HostParallelFor(looseAreaCut.size(), [&](std::size_t p)
-    {
-        looseAreaCut[p] = (IsPointOutsideBox(p) and not IsPeriodicImage(p)) ? 1 : 0;
-    });
-    const Geometry::FaceBuildReport report = this->WithGeometryExecutor([&](auto &executor)
-    {
-        return executor.BuildFaces(order, looseAreaCut, flatVoronoi_);
-    });
-    if(report.result.error != Geometry::FaceBuildError::None)
-    {
-        const size_t point = report.point;
-        const size_t point_other = report.result.other;
-        std::string message = "Voronoi3D:BuildVoronoi: face construction failed";
-        switch(report.result.error)
-        {
-            case Geometry::FaceBuildError::BadNextLoopTetra:
-                message = "Bad NextLoopTetra";
-                break;
-            case Geometry::FaceBuildError::FanTooLong:
-                message = "Voronoi3D:BuildVoronoi: the tetrahedron fan around a face visited more tetrahedra than the point has";
-                break;
-            case Geometry::FaceBuildError::BigTetraNeighbor:
-                message = "Neighboring big tet point";
-                break;
-            case Geometry::FaceBuildError::DegenerateFace:
-                message = "MakeRightHandFace: every edge of the face is degenerate";
-                break;
-            case Geometry::FaceBuildError::NoSecondEdge:
-                message = "MakeRightHandFace: could not find a second non degenerate edge of the face";
-                break;
-            default:
-                break;
-        }
-        MadVoro::Exception::MadVoroException eo(message);
-        if(report.result.error == Geometry::FaceBuildError::FanTooLong)
-        {
-            eo.addEntry("fan size", report.result.fanSize);
-            eo.addEntry("tetras of point", PointTetras_[point].size());
-        }
-        if(report.result.error == Geometry::FaceBuildError::BigTetraNeighbor)
-        {
-            eo.addEntry("Bounding Box", std::make_pair(this->ll_, this->ur_));
-        }
-        eo.addEntry("point", point);
-        eo.addEntry("point_other", point_other);
-        eo.addEntry("Norg", Norg_);
-        eo.addEntry("Point", del_.points_[point]);
-        if(point_other < del_.points_.size())
-            eo.addEntry("Point other", del_.points_[point_other]);
-        throw eo;
-    }
-    reportTime("faces");
-
-    // The tessellation in the containers the rest of Voronoi3D reads
-    const Geometry::ConstFlatVoronoiView faces = static_cast<const Geometry::FlatVoronoi &>(flatVoronoi_).View();
-    const std::size_t Nfaces = faces.faceCount;
-    FacesInCell_.resize(Norg_);
-    PointsInFace_.resize(Nfaces);
-    FaceNeighbors_.resize(Nfaces);
-    area_.resize(Nfaces);
-    Face_CM_.resize(Nfaces);
-    Geometry::HostParallelFor(Norg_, [&](std::size_t c)
-    {
-        FacesInCell_[c].assign(faces.cellFaces + faces.cellFaceOffsets[c], faces.cellFaces + faces.cellFaceOffsets[c + 1]);
-    });
-    Geometry::HostParallelFor(Nfaces, [&](std::size_t f)
-    {
-        PointsInFace_[f].assign(faces.faceVertices + faces.faceVertexOffsets[f], faces.faceVertices + faces.faceVertexOffsets[f + 1]);
-        FaceNeighbors_[f] = std::make_pair(faces.faceNeighbor0[f], faces.faceNeighbor1[f]);
-        area_[f] = faces.faceArea[f];
-        Face_CM_[f] = PointT(faces.faceCM[f].x, faces.faceCM[f].y, faces.faceCM[f].z);
-    });
-    reportTime("copying faces");
-}
-
-template <typename PointT>
-inline double Voronoi3D<PointT>::GetRadius(const size_t &index) const
-{ 
-    if(R_[index] < 0)
-    {
-        // Compute and cache the circumcenter; tetrahedra the kernel cannot certify are
-        // recomputed in extended precision.
-        const Tetrahedron &tetra = del_.tetras_[index];
-        Geometry::FlatPoint center{0.0, 0.0, 0.0};
-        double radius = 0;
-        const Geometry::GeometryStatus status = Geometry::Circumcenter(
-            Geometry::ToFlatPoint(del_.points_[tetra.points[0]]), Geometry::ToFlatPoint(del_.points_[tetra.points[1]]),
-            Geometry::ToFlatPoint(del_.points_[tetra.points[2]]), Geometry::ToFlatPoint(del_.points_[tetra.points[3]]),
-            center, radius);
-        tetra_centers_[index] = PointT(center.x, center.y, center.z);
-        R_[index] = (status == Geometry::GeometryStatus::Ok) ? radius : CalcTetraRadiusCenterHiPrecision(index);
-    }
-    if(std::isnan(this->R_[index]) or not std::isfinite(this->R_[index]))
-    {
-        MadVoro::Exception::MadVoroException eo("Voronoi3D:GetRadius: Radius is invalid");
-        size_t N_points = this->del_.points_.size();
-		bool found = false;
-        for(size_t i = 0; i < N_points; ++i)
-		{
-			for(size_t j = 0; j < N_points; ++j)
-			{
-				if(i != j and this->del_.points_[i] == this->del_.points_[j])
-				{
-					eo.Append2ErrorMessage(" - Duplicated point found");
-					eo.addEntry("Point1", this->del_.points_[i]);
-					eo.addEntry("Point2", this->del_.points_[j]);
-                    eo.addEntry("Point Index 1", i);
-                    eo.addEntry("Point Index 2", j);
-                    found = true;
-                    break;
-				}
-			}
-            if(found)
-            {
-                break;
-            }
-		}
-		eo.Append2ErrorMessage(" - Though no duplicated points found");
-        eo.addEntry("Radius", this->R_[index]);
-        eo.addEntry("Tetra Index", index);
-        const Tetrahedron &tet = this->del_.tetras_[index];
-        eo.addEntry("Tetra Points Indices", std::vector({tet.points[0], tet.points[1], tet.points[2], tet.points[3]}));
-        eo.addEntry("Tetra Points", std::vector({this->del_.points_[tet.points[0]], this->del_.points_[tet.points[1]], this->del_.points_[tet.points[2]], this->del_.points_[tet.points[3]]}));
-        eo.addEntry("Norg", this->Norg_);
-        throw eo;
-    }
-    return this->R_[index];
-}
-
-template <typename PointT>
-void Voronoi3D<PointT>::FindIntersectionsSingle(vector<Face3D<PointT>> const &box, std::size_t point, Sphere<PointT> &sphere,
-                                                                                vector<size_t> &intersecting_faces, std::vector<double> &Rtemp, std::vector<PointT> &vtemp)
-{
-    intersecting_faces.clear();
-    std::size_t N = PointTetras_[point].size();
-    Rtemp.resize(N);
-    vtemp.resize(N);
-    for (std::size_t i = 0; i < N; ++i)
-    {
-        Rtemp[i] = GetRadius(PointTetras_[point][i]);
-        vtemp[i] = tetra_centers_[PointTetras_[point][i]];
-    }
-    size_t bsize = box.size();
-    for (std::size_t j = 0; j < bsize; ++j)
-    {
-        PointT normal = CrossProduct(box[j].vertices[1] - box[j].vertices[0], box[j].vertices[2] - box[j].vertices[0]);
-        normal *= (1.0 / fastsqrt(ScalarProd(normal, normal)));
-        for (std::size_t i = 0; i < N; ++i)
-        {
-            sphere.radius = Rtemp[i];
-            sphere.center = vtemp[i];
-            if (FaceSphereIntersections(box[j], sphere, normal))
-            {
-                intersecting_faces.push_back(j);
-                break;
-            }
-        }
-    }
-}
-
-template <typename PointT>
-void Voronoi3D<PointT>::GetPointToCheck(std::size_t point, vector<unsigned char> const &checked, vector<std::size_t> &res)
-{
-    res.clear();
-    std::size_t ntetra = PointTetras_[point].size();
-    for (std::size_t i = 0; i < ntetra; ++i)
-    {
-        size_t tetra = PointTetras_[point][i];
-        for (std::size_t j = 0; j < 4; ++j)
-            if (del_.tetras_[tetra].points[j] < Norg_ && checked[del_.tetras_[tetra].points[j]] == 0)
-                res.push_back(del_.tetras_[tetra].points[j]);
-    }
-    std::sort(res.begin(), res.end());
-    MadVoro::ContainerOps::unique_inplace(res);
-}
-
-template <typename PointT>
-std::size_t Voronoi3D<PointT>::GetFirstPointToCheck(void) const
-{
-    std::size_t i;
-    Tetrahedron const &tet = del_.tetras_[bigtet_];
-    for (i = 0; i < 4; ++i)
-        if (tet.points[i] < Norg_)
-            break;
-    if (i < 4)
-        return tet.points[i];
-    else
-        throw MadVoro::Exception::MadVoroException("Can't find first point to start boundary search");
-}
-
-template <typename PointT>
-vector<std::pair<std::size_t, std::size_t>> Voronoi3D<PointT>::SerialFirstIntersections(void)
-{
-    vector<Face3D<PointT>> box;
-    vector<PointT> normals;
-    this->InitialBoxBuild(box, normals);
-    size_t Nfaces = box.size();
-
-    //    vector<std::size_t> point_neigh;
-    vector<std::pair<std::size_t, std::size_t>> res;
-    Sphere<PointT> sphere;
-    vector<unsigned char> will_check(Norg_, 0);
-    std::size_t cur_loc;
-    std::stack<std::size_t> check_stack;
-    FirstCheckList(check_stack, will_check, Norg_, del_, PointTetras_);
-    std::vector<double> vdist(Nfaces);
-    std::vector<PointT> vtemp(Nfaces);
-    while (!check_stack.empty())
-    {
-        cur_loc = check_stack.top();
-        check_stack.pop();
-        double inv_max = 0;
-        size_t max_loc = 0;
-        size_t j = 0;
-#if defined(__INTEL_COMPILER) || defined(__INTEL_LLVM_COMPILER)
-#pragma ivdep
-#endif
-        for (; j < Nfaces; ++j)
-        {
-            vtemp[j] = del_.points_[cur_loc];
-            vtemp[j] -= box[j].vertices[0];
-            double sprod = vtemp[j].x * normals[j].x + vtemp[j].y * normals[j].y + vtemp[j].z * normals[j].z;
-            vdist[j] = 1.0 / std::abs(sprod);
-        }
-        j = 0;
-        for (; j < Nfaces; ++j)
-        {
-            if (vdist[j] > inv_max)
-            {
-                inv_max = vdist[j];
-                max_loc = j;
-            }
-        }
-        res.push_back(std::pair<std::size_t, std::size_t>(max_loc, cur_loc));
-    }
-    return res;
-}
-
-template <typename PointT>
-vector<std::pair<std::size_t, std::size_t>> Voronoi3D<PointT>::SerialFindIntersections(bool first_run)
-{
-    if (Norg_ < 50)
-    {
-        vector<std::pair<std::size_t, std::size_t>> res;
-        size_t const Nfaces = box_faces_.empty() ? 6 : box_faces_.size();
-        res.reserve(Norg_ * Nfaces);
-        for (size_t i = 0; i < Norg_; ++i)
-            for (size_t j = 0; j < Nfaces; ++j)
-                res.push_back(std::pair<std::size_t, std::size_t>(j, i));
-        return res;
-    }
-    std::stack<std::size_t> check_stack;
-    vector<Face3D<PointT>> box = box_faces_.empty() ? BuildBox(ll_, ur_) : box_faces_;
-    vector<std::size_t> point_neigh;
-    vector<std::pair<std::size_t, std::size_t>> res;
-    Sphere<PointT> sphere;
-    vector<unsigned char> checked(Norg_, 0), will_check(Norg_, 0);
-    std::size_t cur_loc;
-    if (first_run)
-    {
-        FirstCheckList(check_stack, will_check, Norg_, del_, PointTetras_);
-        //cur_loc = check_stack.top();
-        check_stack.pop();
-    }
-    else
-    {
-        cur_loc = GetFirstPointToCheck();
-        check_stack.push(cur_loc);
-        will_check[cur_loc] = true;
-    }
-    vector<size_t> intersecting_faces;
-    std::vector<double> Rtemp;
-    std::vector<PointT> vtemp;
-    while (!check_stack.empty())
-    {
-        cur_loc = check_stack.top();
-        check_stack.pop();
-        checked[cur_loc] = true;
-        // Does sphere have any intersections?
-        bool added = false;
-        FindIntersectionsSingle(box, cur_loc, sphere, intersecting_faces, Rtemp, vtemp);
-        if (!intersecting_faces.empty())
-        {
-            added = true;
-            for (std::size_t j = 0; j < intersecting_faces.size(); ++j)
-                res.push_back(std::pair<std::size_t, std::size_t>(intersecting_faces[j], cur_loc));
-        }
-        if (added && !first_run)
-        {
-            GetPointToCheck(cur_loc, checked, point_neigh);
-            std::size_t Nneigh = point_neigh.size();
-            for (std::size_t j = 0; j < Nneigh; ++j)
-                if (point_neigh[j] < Norg_ && !will_check[point_neigh[j]])
-                {
-                    check_stack.push(point_neigh[j]);
-                    will_check[point_neigh[j]] = true;
-                }
-        }
-    }
-    return res;
-}
-
-template <typename PointT>
-double Voronoi3D<PointT>::CalcTetraRadiusCenterHiPrecision(const size_t &index) const
-{
-    std::array<boost::multiprecision::cpp_dec_float_50, 3> V0;
-    V0[0] = del_.points_[del_.tetras_[index].points[0]].x;
-    V0[1] = del_.points_[del_.tetras_[index].points[0]].y;
-    V0[2] = del_.points_[del_.tetras_[index].points[0]].z;
-    std::array<boost::multiprecision::cpp_dec_float_50, 3> V2;
-    V2[0] = del_.points_[del_.tetras_[index].points[1]].x;
-    V2[1] = del_.points_[del_.tetras_[index].points[1]].y;
-    V2[2] = del_.points_[del_.tetras_[index].points[1]].z;
-    std::array<boost::multiprecision::cpp_dec_float_50, 3> V3;
-    V3[0] = del_.points_[del_.tetras_[index].points[2]].x;
-    V3[1] = del_.points_[del_.tetras_[index].points[2]].y;
-    V3[2] = del_.points_[del_.tetras_[index].points[2]].z;
-    std::array<boost::multiprecision::cpp_dec_float_50, 3> V4;
-    V4[0] = del_.points_[del_.tetras_[index].points[3]].x;
-    V4[1] = del_.points_[del_.tetras_[index].points[3]].y;
-    V4[2] = del_.points_[del_.tetras_[index].points[3]].z;
-    V2[0] -= V0[0];
-    V2[1] -= V0[1];
-    V2[2] -= V0[2];
-    V3[0] -= V0[0];
-    V3[1] -= V0[1];
-    V3[2] -= V0[2];
-    V4[0] -= V0[0];
-    V4[1] -= V0[1];
-    V4[2] -= V0[2];
-    std::array<boost::multiprecision::cpp_dec_float_50, 9> mat;
-    mat[0] = V2[0];
-    mat[1] = V2[1];
-    mat[2] = V2[2];
-    mat[3] = V3[0];
-    mat[4] = V3[1];
-    mat[5] = V3[2];
-    mat[6] = V4[0];
-    mat[7] = V4[1];
-    mat[8] = V4[2];
-    boost::multiprecision::cpp_dec_float_50 ba = Calc33Det(mat);
-    mat[0] = V2[0] * V2[0] + V2[1] * V2[1] + V2[2] * V2[2];
-    mat[1] = V2[1];
-    mat[2] = V2[2];
-    mat[3] = V3[0] * V3[0] + V3[1] * V3[1] + V3[2] * V3[2];
-    mat[4] = V3[1];
-    mat[5] = V3[2];
-    mat[6] = V4[0] * V4[0] + V4[1] * V4[1] + V4[2] * V4[2];
-    mat[7] = V4[1];
-    mat[8] = V4[2];
-    boost::multiprecision::cpp_dec_float_50 bDx = Calc33Det(mat);
-    mat[0] = V2[0] * V2[0] + V2[1] * V2[1] + V2[2] * V2[2];
-    mat[1] = V2[0];
-    mat[2] = V2[2];
-    mat[3] = V3[0] * V3[0] + V3[1] * V3[1] + V3[2] * V3[2];
-    mat[4] = V3[0];
-    mat[5] = V3[2];
-    mat[6] = V4[0] * V4[0] + V4[1] * V4[1] + V4[2] * V4[2];
-    mat[7] = V4[0];
-    mat[8] = V4[2];
-    boost::multiprecision::cpp_dec_float_50 bDy = -Calc33Det(mat);
-    mat[0] = V2[0] * V2[0] + V2[1] * V2[1] + V2[2] * V2[2];
-    mat[1] = V2[0];
-    mat[2] = V2[1];
-    mat[3] = V3[0] * V3[0] + V3[1] * V3[1] + V3[2] * V3[2];
-    mat[4] = V3[0];
-    mat[5] = V3[1];
-    mat[6] = V4[0] * V4[0] + V4[1] * V4[1] + V4[2] * V4[2];
-    mat[7] = V4[0];
-    mat[8] = V4[1];
-    boost::multiprecision::cpp_dec_float_50 bDz = Calc33Det(mat);
-    boost::multiprecision::cpp_dec_float_50 temp = (bDx / (2 * ba) + V0[0]);
-    tetra_centers_[index].x = temp.convert_to<double>();
-    temp = (bDy / (2 * ba) + V0[1]);
-    tetra_centers_[index].y = temp.convert_to<double>();
-    temp = (bDz / (2 * ba) + V0[2]);
-    tetra_centers_[index].z = temp.convert_to<double>();
-    temp = (boost::multiprecision::sqrt(bDx * bDx + bDy * bDy + bDz * bDz) / ba);
-    return 0.5 * temp.convert_to<double>();
+    this->SyncGhostValues();
 }
 
 /*
@@ -5403,7 +2458,7 @@ void Voronoi3D<PointT>::CalcCellCMVolume(std::size_t index)
     CM_[index] = PointT();
     std::size_t Nfaces = FacesInCell_[index].size();
     std::array<PointT, 4> tetra;
-    tetra[3] = del_.points_[index];
+    tetra[3] = meshPoints_[index];
     PointT vtemp;
     for (std::size_t i = 0; i < Nfaces; ++i)
         {
@@ -5430,7 +2485,7 @@ void Voronoi3D<PointT>::CalcCellCMVolume(std::size_t index)
 template <typename PointT>
 size_t Voronoi3D<PointT>::GetContainingCell(const PointT &point) const
 {
-    if(!this->HasPeriodicBoundaries())
+    if(not this->HasPeriodicBoundaries())
     {
         return this->myPointsTree->closestPoint(point).getIndex();
     }
@@ -5459,7 +2514,7 @@ size_t Voronoi3D<PointT>::GetContainingCell(const PointT &point) const
         {
             for(int sz : shiftRanges[2])
             {
-                if(sx == 0 && sy == 0 && sz == 0)
+                if(sx == 0 and sy == 0 and sz == 0)
                 {
                     continue;
                 }
@@ -5487,7 +2542,7 @@ std::size_t Voronoi3D<PointT>::GetPointNo(void) const
 template <typename PointT>
 const PointT &Voronoi3D<PointT>::GetMeshPoint(std::size_t index) const
 {
-    return del_.points_[index];
+    return meshPoints_[index];
 }
 
 template <typename PointT>
@@ -5529,13 +2584,13 @@ face_vec const &Voronoi3D<PointT>::GetCellFaces(std::size_t index) const
 template <typename PointT>
 vector<PointT> &Voronoi3D<PointT>::accessMeshPoints(void)
 {
-    return del_.points_;
+    return meshPoints_;
 }
 
 template <typename PointT>
 const vector<PointT> &Voronoi3D<PointT>::getMeshPoints(void) const
 {
-    return del_.points_;
+    return meshPoints_;
 }
 
 template <typename PointT>
@@ -5586,10 +2641,10 @@ void Voronoi3D<PointT>::GetNeighbors(size_t index, vector<size_t> &res) const
 
 
 template <typename PointT>
-Voronoi3D<PointT>::Voronoi3D(Voronoi3D<PointT> const &other) : ll_(other.ll_), ur_(other.ur_), Norg_(other.Norg_), bigtet_(other.bigtet_),
-                                                set_temp_(other.set_temp_), stack_temp_(other.stack_temp_), del_(other.del_), PointTetras_(other.PointTetras_), R_(other.R_),
+Voronoi3D<PointT>::Voronoi3D(Voronoi3D<PointT> const &other) : ll_(other.ll_), ur_(other.ur_), Norg_(other.Norg_),
+                                                set_temp_(other.set_temp_), stack_temp_(other.stack_temp_), meshPoints_(other.meshPoints_),
                                                 tetra_centers_(other.tetra_centers_), FacesInCell_(other.FacesInCell_), PointsInFace_(other.PointsInFace_),
-                                                FaceNeighbors_(other.FaceNeighbors_), CM_(other.CM_), Face_CM_(other.Face_CM_), volume_(other.volume_), area_(other.area_),
+                                                FaceNeighbors_(other.FaceNeighbors_), CM_(other.CM_), Face_CM_(other.Face_CM_), volume_(other.volume_), area_(other.area_), builder_(other.builder_), cellBuilder_(other.cellBuilder_),
                                                 #ifdef MADVORO_WITH_MPI
                                                     sentprocs_(other.sentprocs_), sentpoints_(other.sentpoints_), duplicatedprocs_(other.duplicatedprocs_), duplicated_points_(other.duplicated_points_),
                                                     Nghost_(other.Nghost_), self_index_(other.self_index_),
@@ -5599,7 +2654,7 @@ Voronoi3D<PointT>::Voronoi3D(Voronoi3D<PointT> const &other) : ll_(other.ll_), u
                                                 threadSubdomainCount_(other.threadSubdomainCount_),
                                                 #ifdef MADVORO_WITH_MPI
                                                     pointsManager(other.pointsManager->clone()), indexingToSave(other.indexingToSave),
-                                                    rangeFinder(other.rangeFinder), radiuses(other.radiuses), allMyPoints(other.allMyPoints), allPointsWeights(other.allPointsWeights),
+                                                    radiuses(other.radiuses), allMyPoints(other.allMyPoints), allPointsWeights(other.allPointsWeights),
                                                 #endif // MADVORO_WITH_MPI
                                                 indicesInAllMyPoints(other.indicesInAllMyPoints)
                                                 {}
@@ -5633,7 +2688,7 @@ bool Voronoi3D<PointT>::IsPointInCell(const PointT &point, size_t cellIndex, boo
         verboseInfo.emplace("Voronoi3D<PointT>::IsPointInCell verbose");
         verboseInfo->addEntry("point", point);
         verboseInfo->addEntry("cellIndex", cellIndex);
-        verboseInfo->addEntry("cellCenter", this->del_.points_[cellIndex]);
+        verboseInfo->addEntry("cellCenter", this->meshPoints_[cellIndex]);
 
         PointT cellLL(std::numeric_limits<double>::max());
         PointT cellUR(std::numeric_limits<double>::lowest());
@@ -5662,7 +2717,7 @@ bool Voronoi3D<PointT>::IsPointInCell(const PointT &point, size_t cellIndex, boo
     if(this->HasPeriodicBoundaries())
     {
         PointT L = this->ur_ - this->ll_;
-        typename PointT::coord_type deltas[3] = {q.x - this->del_.points_[cellIndex].x, q.y - this->del_.points_[cellIndex].y, q.z - this->del_.points_[cellIndex].z};
+        typename PointT::coord_type deltas[3] = {q.x - this->meshPoints_[cellIndex].x, q.y - this->meshPoints_[cellIndex].y, q.z - this->meshPoints_[cellIndex].z};
         typename PointT::coord_type lengths[3] = {L.x, L.y, L.z};
         typename PointT::coord_type *qCoords[3] = {&q.x, &q.y, &q.z};
         for(size_t d = 0; d < 3; ++d)
@@ -5675,8 +2730,8 @@ bool Voronoi3D<PointT>::IsPointInCell(const PointT &point, size_t cellIndex, boo
     }
     for(size_t faceIdx : this->FacesInCell_[cellIndex])
     {
-        const PointT &p1 = this->del_.points_[this->GetFaceNeighbors(faceIdx).first];
-        const PointT &p2 = this->del_.points_[this->GetFaceNeighbors(faceIdx).second];
+        const PointT &p1 = this->meshPoints_[this->GetFaceNeighbors(faceIdx).first];
+        const PointT &p2 = this->meshPoints_[this->GetFaceNeighbors(faceIdx).second];
         PointT normal = (this->GetFaceNeighbors(faceIdx).second == cellIndex)? p2 - p1 : p1 - p2;
         PointT p = (p1 + p2) * 0.5;
         double dot = ScalarProd(normal, q - p);
@@ -5729,7 +2784,7 @@ std::pair<bool, size_t> Voronoi3D<PointT>::FindViolatedFaceNeighbor(const PointT
     if(this->HasPeriodicBoundaries())
     {
         PointT L = this->ur_ - this->ll_;
-        typename PointT::coord_type deltas[3] = {q.x - this->del_.points_[cellIndex].x, q.y - this->del_.points_[cellIndex].y, q.z - this->del_.points_[cellIndex].z};
+        typename PointT::coord_type deltas[3] = {q.x - this->meshPoints_[cellIndex].x, q.y - this->meshPoints_[cellIndex].y, q.z - this->meshPoints_[cellIndex].z};
         typename PointT::coord_type lengths[3] = {L.x, L.y, L.z};
         typename PointT::coord_type *qCoords[3] = {&q.x, &q.y, &q.z};
         for(size_t d = 0; d < 3; ++d)
@@ -5743,9 +2798,8 @@ std::pair<bool, size_t> Voronoi3D<PointT>::FindViolatedFaceNeighbor(const PointT
     for(size_t faceIdx : this->FacesInCell_[cellIndex])
     {
         const auto &[n1, n2] = this->GetFaceNeighbors(faceIdx);
-        PointT normal = (n2 == cellIndex) ? del_.points_[n2] - del_.points_[n1]
-                                          : del_.points_[n1] - del_.points_[n2];
-        PointT mid = (del_.points_[n1] + del_.points_[n2]) * 0.5;
+        PointT normal = (n2 == cellIndex) ? meshPoints_[n2] - meshPoints_[n1] : meshPoints_[n1] - meshPoints_[n2];
+        PointT mid = (meshPoints_[n1] + meshPoints_[n2]) * 0.5;
         double dot = ScalarProd(normal, q - mid);
         if(dot < -1e-12 * width)
         {
@@ -5759,48 +2813,51 @@ std::pair<bool, size_t> Voronoi3D<PointT>::FindViolatedFaceNeighbor(const PointT
 template <typename PointT>
 bool Voronoi3D<PointT>::IsPointOutsideBox(size_t index) const
 {
-    if(box_faces_.empty())
-        return !PointInDomain(ll_, ur_, del_.points_[index]);
-    else
-        return !PointInPoly(box_faces_, del_.points_[index]);
+    return this->IsPointOutsideBox(this->meshPoints_[index]);
 }
 
 template <typename PointT>
 bool Voronoi3D<PointT>::IsPointOutsideBox(const PointT &point) const
 {
-    if(box_faces_.empty())
-        return !PointInDomain(ll_, ur_, point);
-    else
-        return !PointInPoly(box_faces_, point);
+    return this->box_faces_.empty() ? not PointInDomain(this->ll_, this->ur_, point) : not PointInPoly(this->box_faces_, point);
 }
 
 template <typename PointT>
 bool Voronoi3D<PointT>::BoundaryFace(std::size_t index) const
 {
     size_t other = std::max(FaceNeighbors_[index].first, FaceNeighbors_[index].second);
-    if(other >= Norg_ && IsPeriodicImage(other))
+    if(other >= Norg_ and IsPeriodicImage(other))
     {
         return false;
     }
-    if (FaceNeighbors_[index].first >= Norg_ || FaceNeighbors_[index].second >= Norg_)
+    if (FaceNeighbors_[index].first >= Norg_ or FaceNeighbors_[index].second >= Norg_)
     {
 #ifdef MADVORO_WITH_MPI
         if(box_faces_.empty())
         {
-            if (PointInDomain(ll_, ur_, del_.points_[other]))
+            if (PointInDomain(ll_, ur_, meshPoints_[other]))
+            {
                 return false;
+            }
             else
+            {
                 return true;
+            }
+        }
+        else if(PointInPoly(box_faces_, meshPoints_[other]))
+        {
+            return false;
         }
         else
-            if(PointInPoly(box_faces_, del_.points_[other]))
-                return false;
-            else
 #endif
+        {
             return true;
+        }
     }
     else
+    {
         return false;
+    }
 }
 
 #ifdef MADVORO_WITH_MPI
@@ -5851,7 +2908,7 @@ template <typename PointT>
 template <typename PointT>
 std::size_t Voronoi3D<PointT>::GetTotalPointNumber(void) const
 {
-    return del_.points_.size();
+    return meshPoints_.size();
 }
 
 template <typename PointT>
@@ -5942,7 +2999,7 @@ vector<double> Voronoi3D<PointT>::GetAllVolumes(void) const
 template <typename PointT>
 PointT Voronoi3D<PointT>::Normal(std::size_t faceindex) const
 {
-    return del_.points_[FaceNeighbors_[faceindex].second] - del_.points_[FaceNeighbors_[faceindex].first];
+    return meshPoints_[FaceNeighbors_[faceindex].second] - meshPoints_[FaceNeighbors_[faceindex].first];
 }
 
 template <typename PointT>
@@ -6205,7 +3262,9 @@ void Voronoi3D<PointT>::SyncPartialBuildData(std::vector<T> &partialBuildData, s
   #ifdef MADVORO_WITH_MPI
       // without a points manager (e.g. a thread subdomain) the build talked to no other rank
       if(this->pointsManager == nullptr)
+      {
           return;
+      }
       std::vector<std::vector<T>> incoming = MPI_exchange_data_indexed(this->GetDuplicatedProcs(), allBuildData, this->GetDuplicatedPoints());
       size_t incomingSize = incoming.size();
       const std::vector<std::vector<size_t>> &Nghost = this->GetGhostIndeces();
@@ -6222,12 +3281,6 @@ void Voronoi3D<PointT>::SyncPartialBuildData(std::vector<T> &partialBuildData, s
       }
   #endif // MADVORO_WITH_MPI
 }
-
-
-
-/**
- * TODO: following functions should be here?
-*/
 
 } // namespace MadVoro
 

@@ -44,7 +44,8 @@ template <typename PointT>
 bool InsideBigTetra(PointT const& tocheck, vector<PointT> const& cor, size_t Norg)
 {
     int sum = 0;
-    for(size_t i = 0; i < 4; ++i) {
+    for(size_t i = 0; i < 4; ++i)
+    {
         PointT normal = CrossProduct(cor[Norg + (1 + i) % 4] - cor[Norg + i], cor[Norg + (2 + i) % 4] - cor[Norg + i]);
         double s1 = ScalarProd(normal, cor[Norg + (3 + i) % 4] - cor[Norg + i]);
         double s2 = ScalarProd(normal, tocheck - cor[Norg + i]);
@@ -157,64 +158,38 @@ template <typename PointT>
 class Delaunay3D
 {
 public:
-  //! \brief List of tetrahedra
   vector<Tetrahedron> tetras_;
-  //! \brief List of mesh generating points
   vector<PointT> points_;
-  //! \brief List of empty tetrahedra
   boost::container::flat_set<size_t> empty_tetras_;
-  //! \brief Length of list of real points (the first `Norg_` points from `points_` are actually mine, the rest are ghosts)
+  // the first Norg_ points of points_ are real, the rest are ghosts
   std::size_t Norg_; 
-  //! \brief List of outside neighbours
   std::size_t outside_neighbor_;
   std::vector<std::pair<size_t, Tetrahedron>> changed_tetras_;
   std::vector<size_t> newTetras_;
 
   Delaunay3D();
 
-  /*! \brief Copy constructor
-    \param other Source
-   */
   Delaunay3D(Delaunay3D const& other);
 
-  /*! \brief Copy assingment
-    \param other Source
-    \return Reference to new object
-   */
   Delaunay3D& operator=(Delaunay3D const& other);
 
   ~Delaunay3D();
 
-  /*! \brief Build triangulation
-    \param points Mesh generating points
-    \param maxv Bounding point
-    \param minv Bounding point
-    \param order Sorted list of indices
-   */ 
   void Build(vector<PointT> const& points, PointT const& maxv, PointT const& minv, std::vector<size_t> &order);
 
-  /*! \brief Add new points and rebuild
-    \param points New points
-   */
+  // Adds new points to the triangulation
   void BuildExtra(vector<PointT> const& points);
 
-  /*! \brief Dump data to file
-    \param filename Name of output file
-   */
   void output(string const& filename) const;
 
-  /*! \brief Validate input
-    \return True if input is valid
-   */
   bool CheckCorrect(void);
 
-  //! \brief Clear data
   void Clean(void);
 
-  //! \brief Clear data and release retained buffers
+  // Clears data and releases retained buffers
   void ReleaseMemory(void);
 
-  //! \brief Drops spare capacity of every container while keeping the mesh valid.
+  // Drops spare capacity while keeping the mesh valid
   void ShrinkToFit(void);
 private:
   void InsertPoint(std::size_t index);
@@ -335,11 +310,7 @@ void Delaunay3D<PointT>::flip23(std::size_t tetra0, std::size_t tetra1, std::siz
     newtet_.neighbors[1] = tetra0;
     newtet_.neighbors[2] = tetra1;
 
-    // mark tetras as new (need to be checked)
-    tetras_[tetra0].checkBig = true;
-    tetras_[tetra1].checkBig = true;
-    newtet_.checkBig = true;
-
+    // mark tetras as new
     tetras_[tetra0].newTetra = true;
     tetras_[tetra1].newTetra = true;
     newtet_.newTetra = true;
@@ -620,9 +591,6 @@ void Delaunay3D<PointT>::flip32(std::size_t tetra0, std::size_t tetra1, std::siz
     }
     tetras_[tetra1] = newtet_;
 
-    // mark tetras as new (need to be checked)
-    tetras_[tetra0].checkBig = true;
-    tetras_[tetra1].checkBig = true;
     tetras_[tetra0].newTetra = true;
     tetras_[tetra1].newTetra = true;
     newTetras_.push_back(tetra0);
@@ -692,34 +660,34 @@ Delaunay3D<PointT>::~Delaunay3D()
 template <typename PointT>
 void Delaunay3D<PointT>::BuildExtra(vector<PointT> const& points)
 {
-    if(points_.size() < 4 || Norg_ > points_.size() - 4)
+    if(points_.size() < 4 or Norg_ > points_.size() - 4)
     {
-        MadVoro::Exception::MadVoroException eo(
-            "Delaunay3D::BuildExtra requires an initialized bounding tetrahedron");
+        MadVoro::Exception::MadVoroException eo("Delaunay3D::BuildExtra requires an initialized bounding tetrahedron");
         eo.addEntry("point count", points_.size());
         eo.addEntry("original point count", Norg_);
         throw eo;
     }
     if(points.empty())
+    {
         return;
+    }
 
-    // The predicate scope sees every point except the four bounding-tetrahedron
-    // points, in this order. It is built before points_ grows, since growing can
-    // reallocate it.
-    const std::array<PointRange<PointT>, 3> predicateRanges = {{
-        {points_.data(), points_.data() + Norg_},
-        {points_.data() + Norg_ + 4, points_.data() + points_.size()},
-        {points.data(), points.data() + points.size()}}};
+    // all points but the bounding tetrahedron; built before points_ grows, since growing can reallocate it
+    const std::array<PointRange<PointT>, 3> predicateRanges = {{{points_.data(), points_.data() + Norg_}, {points_.data() + Norg_ + 4, points_.data() + points_.size()}, {points.data(), points.data() + points.size()}}};
     LatticePredicateScope predicateScope(predicateRanges);
     size_t Nstart = points_.size();
     points_.insert(points_.end(), points.begin(), points.end());
     size_t N = points.size();
     std::vector<size_t> order = HilbertOrder3D(points);
     if(predicateScope.active())
+    {
         ShuffleDegenerateInsertionOrder(order);
+    }
     assert(to_check_.empty());
-    for(std::size_t i = 0; i < N; ++i) {
-        if(InsideBigTetra(points_[order[i] + Nstart], points_, Norg_)) {
+    for(std::size_t i = 0; i < N; ++i)
+    {
+        if(InsideBigTetra(points_[order[i] + Nstart], points_, Norg_))
+        {
             InsertPoint(order[i] + Nstart);
         }
     }
@@ -1126,8 +1094,7 @@ void Delaunay3D<PointT>::flip14(std::size_t point, std::size_t tetra)
     toadd.points[2] = point;
     toadd.points[3] = tetras_[tetra].points[3];
 
-    // mark tetras as new (need to be checked)
-    toadd.checkBig = true;
+    // mark tetras as new
     toadd.newTetra = true;
 
     if(toadd.neighbors[2] != outside_neighbor_) {
@@ -1206,8 +1173,7 @@ void Delaunay3D<PointT>::flip14(std::size_t point, std::size_t tetra)
     tetras_[tetra].neighbors[2] = Nloc[2];
     tetras_[tetra].points[3] = point;
 
-    // mark tetras as new (need to be checked)
-    tetras_[tetra].checkBig = true;
+    // mark tetras as new
     tetras_[tetra].newTetra = true;
     newTetras_.push_back(tetra);
 

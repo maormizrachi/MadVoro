@@ -11,7 +11,6 @@ namespace MadVoro
 namespace Portable
 {
 
-//! \brief std::numeric_limits<double>::min(), usable in device code.
 constexpr double DOUBLE_MIN = std::numeric_limits<double>::min();
 
 MADVORO_INLINE_FUNCTION double Sqrt(double x)
@@ -41,7 +40,17 @@ MADVORO_INLINE_FUNCTION double Pow(double x, double y)
 #endif
 }
 
-//! \brief Same result as std::max(a, b), including for NaN arguments.
+// a * b + c with one rounding
+MADVORO_INLINE_FUNCTION double Fma(double a, double b, double c)
+{
+#ifdef MADVORO_WITH_GPU
+    return Kokkos::fma(a, b, c);
+#else
+    return std::fma(a, b, c);
+#endif
+}
+
+// Same result as std::max(a, b), including for NaN arguments.
 MADVORO_INLINE_FUNCTION double Max(double a, double b)
 {
     return (a < b) ? b : a;

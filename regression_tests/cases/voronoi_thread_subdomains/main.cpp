@@ -1,21 +1,6 @@
-// Building from thread subdomains must give the tessellation of a build as one domain.
-// With one subdomain the result must be the same bit for bit (points, faces, face
-// vertices, volumes, centroids, radii carried to the next build). With several, each
-// cell must have the same neighbors and its volume and centroid must agree closely.
-// Every face between two cells must be listed by both. Each case builds twice: on the
-// points, then on slightly moved points, so the second build starts from the radii the
-// first one left.
-// Near a wall a cell, its mirror, another point and that point's mirror are always on
-// one sphere, so a build may leave a sliver face (of zero area in exact arithmetic)
-// between a cell and the mirror of another point. A subdomain only mirrors its own
-// points, so its slivers differ from those of a build as one domain: faces against
-// mirrors are compared above SLIVER_AREA, and volumes and centroids to MOMENTS_TOLERANCE,
-// orders of magnitude below the error of a missing neighbor.
-// The same comparison holds in a periodic box (all axes, or x only) and for partial
-// builds (a scattered third of the points, also in a periodic box), where a subdomain
-// adds its ghosts in another order than one domain does, so one subdomain is compared
-// within the tolerances too; there, building again with 4 subdomains must give the same
-// result bit for bit.
+// Builds from thread subdomains must match a build as one domain: bit for bit with one subdomain,
+// same neighbors and close volumes/centroids with several (also periodic and partial builds).
+// Faces against mirrors are compared above SLIVER_AREA, since subdomains only mirror their own points.
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -46,7 +31,7 @@ constexpr double MOMENTS_TOLERANCE = 1e-7;
 
 bool Same(const Vector3D &a, const Vector3D &b)
 {
-    return a.x == b.x && a.y == b.y && a.z == b.z;
+    return a.x == b.x and a.y == b.y and a.z == b.z;
 }
 
 double Distance(const Vector3D &a, const Vector3D &b)
@@ -61,13 +46,19 @@ std::vector<Vector3D> MakePoints(const std::string &kind, std::size_t count, int
     {
         if(kind == "lattice")
         {
-            // A dyadic lattice: cospherical degeneracy everywhere
+            // Dyadic lattice: cospherical degeneracy everywhere
             const std::size_t side = 24;
             const double h = 1.0 / 32.0;
             for(std::size_t i = 0; i < side; ++i)
+            {
                 for(std::size_t j = 0; j < side; ++j)
+                {
                     for(std::size_t k = 0; k < side; ++k)
+                    {
                         points.emplace_back(h * (i + 4), h * (j + 4), h * (k + 4));
+                    }
+                }
+            }
         }
         else
         {
@@ -84,7 +75,9 @@ std::vector<Vector3D> MakePoints(const std::string &kind, std::size_t count, int
 std::vector<Vector3D> Moved(const std::vector<Vector3D> &points, const std::string &kind)
 {
     if(kind == "lattice")
+    {
         return points;
+    }
     std::vector<Vector3D> moved = points;
     for(std::size_t i = 0; i < moved.size(); ++i)
     {
@@ -96,7 +89,6 @@ std::vector<Vector3D> Moved(const std::vector<Vector3D> &points, const std::stri
     return moved;
 }
 
-// The box's boundaries and which points are built
 struct Setup
 {
     std::string name;
@@ -134,7 +126,9 @@ void BuildTwice(VoronoiGrid &grid, const std::vector<Vector3D> &points, const st
     for(std::size_t i = 0; i < points.size(); ++i)
     {
         if(InScatteredThird(points[i]))
+        {
             active.push_back(i);
+        }
     }
     Build(grid, points, active, setup);
     Build(grid, Moved(points, kind), active, setup);
@@ -150,35 +144,42 @@ std::size_t CountExactDifferences(VoronoiGrid &a, VoronoiGrid &b)
     count(a.GetTotalFacesNumber() != b.GetTotalFacesNumber());
     count(a.GetFacePoints().size() != b.GetFacePoints().size());
     if(differences > 0)
+    {
         return differences;
+    }
     for(std::size_t p = 0; p < a.getMeshPoints().size(); ++p)
-        count(!Same(a.getMeshPoints()[p], b.getMeshPoints()[p]));
+    {
+        count(not Same(a.getMeshPoints()[p], b.getMeshPoints()[p]));
+    }
     for(std::size_t c = 0; c < a.GetPointNo(); ++c)
     {
         count(a.GetVolume(c) != b.GetVolume(c));
-        count(!Same(a.GetCellCM(c), b.GetCellCM(c)));
+        count(not Same(a.GetCellCM(c), b.GetCellCM(c)));
         const auto &facesA = a.GetCellFaces(c);
         const auto &facesB = b.GetCellFaces(c);
-        count(!std::equal(facesA.begin(), facesA.end(), facesB.begin(), facesB.end()));
+        count(not std::equal(facesA.begin(), facesA.end(), facesB.begin(), facesB.end()));
     }
     for(std::size_t f = 0; f < a.GetTotalFacesNumber(); ++f)
     {
         count(a.GetFaceNeighbors(f) != b.GetFaceNeighbors(f));
         count(a.GetArea(f) != b.GetArea(f));
-        count(!Same(a.FaceCM(f), b.FaceCM(f)));
+        count(not Same(a.FaceCM(f), b.FaceCM(f)));
         const auto &verticesA = a.GetPointsInFace(f);
         const auto &verticesB = b.GetPointsInFace(f);
         count(verticesA.size() != verticesB.size());
         for(std::size_t k = 0; k < std::min(verticesA.size(), verticesB.size()); ++k)
-            count(!Same(a.GetFacePoints()[verticesA[k]], b.GetFacePoints()[verticesB[k]]));
+        {
+            count(not Same(a.GetFacePoints()[verticesA[k]], b.GetFacePoints()[verticesB[k]]));
+        }
     }
     for(std::size_t p = 0; p < a.getMeshPoints().size(); ++p)
-        count(!Same(a.GetAllCM()[p], b.GetAllCM()[p]));
+    {
+        count(not Same(a.GetAllCM()[p], b.GetAllCM()[p]));
+    }
     return differences;
 }
 
-// A cell's neighbors over faces that are not negligibly small: own cells by index,
-// ghosts by position
+// Neighbors over non-negligible faces: own cells by index, ghosts by position
 std::set<std::tuple<std::size_t, double, double, double>> Neighbors(const VoronoiGrid &grid, std::size_t cell, double width)
 {
     std::set<std::tuple<std::size_t, double, double, double>> neighbors;
@@ -188,7 +189,9 @@ std::set<std::tuple<std::size_t, double, double, double>> Neighbors(const Vorono
         const std::size_t other = (pair.first == cell) ? pair.second : pair.first;
         const double minArea = ((other < grid.GetPointNo()) ? CELL_FACE_AREA : SLIVER_AREA) * width * width;
         if(grid.GetArea(face) <= minArea)
+        {
             continue;
+        }
         if(other < grid.GetPointNo())
         {
             neighbors.emplace(other, 0.0, 0.0, 0.0);
@@ -226,13 +229,11 @@ Comparison Compare(const VoronoiGrid &subdomains, const VoronoiGrid &reference)
     {
         const double width = std::cbrt(reference.GetVolume(c));
         result.neighborMismatches += (Neighbors(subdomains, c, width) != Neighbors(reference, c, width)) ? 1 : 0;
-        result.maxVolumeError = std::max(result.maxVolumeError,
-                                         std::abs(subdomains.GetVolume(c) - reference.GetVolume(c)) / reference.GetVolume(c));
+        result.maxVolumeError = std::max(result.maxVolumeError, std::abs(subdomains.GetVolume(c) - reference.GetVolume(c)) / reference.GetVolume(c));
         result.maxCMError = std::max(result.maxCMError, Distance(subdomains.GetCellCM(c), reference.GetCellCM(c)) / width);
         totalVolume += subdomains.GetVolume(c);
         referenceVolume += reference.GetVolume(c);
     }
-    // (the whole box in a full build)
     referenceVolume = MadVoro::regression_tests::ReduceGlobalVolume(referenceVolume);
     result.totalVolumeError = std::abs(MadVoro::regression_tests::ReduceGlobalVolume(totalVolume) - referenceVolume) / referenceVolume;
     for(std::size_t f = 0; f < subdomains.GetTotalFacesNumber(); ++f)
@@ -241,7 +242,9 @@ Comparison Compare(const VoronoiGrid &subdomains, const VoronoiGrid &reference)
         for(std::size_t cell : {pair.first, pair.second})
         {
             if(cell >= cells)
+            {
                 continue;
+            }
             const auto &faces = subdomains.GetCellFaces(cell);
             result.unlistedFaces += (std::find(faces.begin(), faces.end(), f) == faces.end()) ? 1 : 0;
         }
@@ -269,70 +272,61 @@ int main()
         metrics << "mode " << (worldSize > 1 ? "mpi" : "serial") << "\n";
     }
     bool pass = (worldSize == 1);
-    if(rank == 0 && worldSize != 1)
-        std::cout << "voronoi_thread_subdomains runs on one rank" << std::endl;
-    const std::vector<Setup> setups = {{"box", {false, false, false}, false},
-                                       {"periodic", {true, true, true}, false},
-                                       {"periodic_x", {true, false, false}, false},
-                                       {"partial", {false, false, false}, true},
-                                       {"partial_periodic", {true, true, true}, true}};
-    for(const Setup &setup : setups)
-    for(const std::string kind : {"uniform", "lattice"})
+    if(rank == 0 and worldSize != 1)
     {
-        // (the box keeps the names of its metrics)
-        const std::string name = (setup.name == "box") ? kind : setup.name + "_" + kind;
-        const std::vector<Vector3D> points = MakePoints(kind, numPoints, rank);
-        VoronoiGrid reference(Vector3D(0, 0, 0), Vector3D(1, 1, 1));
-        BuildTwice(reference, points, kind, setup);
-
-        if(setup.name == "box")
+        std::cout << "voronoi_thread_subdomains runs on one rank" << std::endl;
+    }
+    const std::vector<Setup> setups = {{"box", {false, false, false}, false}, {"periodic", {true, true, true}, false}, {"periodic_x", {true, false, false}, false}, {"partial", {false, false, false}, true}, {"partial_periodic", {true, true, true}, true}};
+    for(const Setup &setup : setups)
+    {
+        for(const std::string kind : {"uniform", "lattice"})
         {
-            VoronoiGrid one(Vector3D(0, 0, 0), Vector3D(1, 1, 1));
-            one.SetThreadSubdomains(1);
-            BuildTwice(one, points, kind, setup);
-            const std::size_t exactDifferences = CountExactDifferences(one, reference);
-            pass = pass && (exactDifferences == 0);
-            if(rank == 0)
-            {
-                std::cout << name << " subdomains=1: differences=" << exactDifferences << std::endl;
-                metrics << name << "_1_differences " << exactDifferences << "\n";
-            }
-        }
+            // The box keeps the names of its metrics
+            const std::string name = (setup.name == "box") ? kind : setup.name + "_" + kind;
+            const std::vector<Vector3D> points = MakePoints(kind, numPoints, rank);
+            VoronoiGrid reference(Vector3D(0, 0, 0), Vector3D(1, 1, 1));
+            BuildTwice(reference, points, kind, setup);
 
-        const std::vector<std::size_t> counts = (setup.name == "box") ? std::vector<std::size_t>{2, 4, 8} : std::vector<std::size_t>{1, 2, 4, 8};
-        for(std::size_t count : counts)
-        {
-            VoronoiGrid grid(Vector3D(0, 0, 0), Vector3D(1, 1, 1));
-            grid.SetThreadSubdomains(count);
-            BuildTwice(grid, points, kind, setup);
-            const Comparison c = Compare(grid, reference);
-            const bool ok = c.neighborMismatches == 0 && c.unlistedFaces == 0 && c.maxVolumeError < MOMENTS_TOLERANCE &&
-                            c.maxCMError < MOMENTS_TOLERANCE && c.totalVolumeError < MOMENTS_TOLERANCE;
-            pass = pass && ok;
-            if(rank == 0)
+            if(setup.name == "box")
             {
-                std::cout << name << " subdomains=" << count << ": neighbor_mismatches=" << c.neighborMismatches
-                          << " unlisted_faces=" << c.unlistedFaces << " max_volume_error=" << c.maxVolumeError
-                          << " max_cm_error=" << c.maxCMError << " total_volume_error=" << c.totalVolumeError
-                          << (ok ? "" : " FAIL") << std::endl;
-                metrics << name << "_" << count << "_neighbor_mismatches " << c.neighborMismatches << "\n"
-                        << name << "_" << count << "_unlisted_faces " << c.unlistedFaces << "\n"
-                        << name << "_" << count << "_max_volume_error " << c.maxVolumeError << "\n"
-                        << name << "_" << count << "_max_cm_error " << c.maxCMError << "\n"
-                        << name << "_" << count << "_total_volume_error " << c.totalVolumeError << "\n";
-            }
-            if(count == 4 and setup.name != "box")
-            {
-                VoronoiGrid again(Vector3D(0, 0, 0), Vector3D(1, 1, 1));
-                again.SetThreadSubdomains(count);
-                BuildTwice(again, points, kind, setup);
-                const std::size_t repeatedDifferences = CountExactDifferences(again, grid);
-                pass = pass && (repeatedDifferences == 0);
+                VoronoiGrid one(Vector3D(0, 0, 0), Vector3D(1, 1, 1));
+                one.SetThreadSubdomains(1);
+                BuildTwice(one, points, kind, setup);
+                const std::size_t exactDifferences = CountExactDifferences(one, reference);
+                pass = pass and (exactDifferences == 0);
                 if(rank == 0)
                 {
-                    std::cout << name << " subdomains=4_repeated: differences=" << repeatedDifferences
-                              << (repeatedDifferences == 0 ? "" : " FAIL") << std::endl;
-                    metrics << name << "_4_repeated_differences " << repeatedDifferences << "\n";
+                    std::cout << name << " subdomains=1: differences=" << exactDifferences << std::endl;
+                    metrics << name << "_1_differences " << exactDifferences << "\n";
+                }
+            }
+
+            const std::vector<std::size_t> counts = (setup.name == "box") ? std::vector<std::size_t>{2, 4, 8} : std::vector<std::size_t>{1, 2, 4, 8};
+            for(std::size_t count : counts)
+            {
+                VoronoiGrid grid(Vector3D(0, 0, 0), Vector3D(1, 1, 1));
+                grid.SetThreadSubdomains(count);
+                BuildTwice(grid, points, kind, setup);
+                const Comparison c = Compare(grid, reference);
+                const bool ok = c.neighborMismatches == 0 and c.unlistedFaces == 0 and c.maxVolumeError < MOMENTS_TOLERANCE and c.maxCMError < MOMENTS_TOLERANCE and c.totalVolumeError < MOMENTS_TOLERANCE;
+                pass = pass and ok;
+                if(rank == 0)
+                {
+                    std::cout << name << " subdomains=" << count << ": neighbor_mismatches=" << c.neighborMismatches << " unlisted_faces=" << c.unlistedFaces << " max_volume_error=" << c.maxVolumeError << " max_cm_error=" << c.maxCMError << " total_volume_error=" << c.totalVolumeError << (ok ? "" : " FAIL") << std::endl;
+                    metrics << name << "_" << count << "_neighbor_mismatches " << c.neighborMismatches << "\n" << name << "_" << count << "_unlisted_faces " << c.unlistedFaces << "\n" << name << "_" << count << "_max_volume_error " << c.maxVolumeError << "\n" << name << "_" << count << "_max_cm_error " << c.maxCMError << "\n" << name << "_" << count << "_total_volume_error " << c.totalVolumeError << "\n";
+                }
+                if(count == 4 and setup.name != "box")
+                {
+                    VoronoiGrid again(Vector3D(0, 0, 0), Vector3D(1, 1, 1));
+                    again.SetThreadSubdomains(count);
+                    BuildTwice(again, points, kind, setup);
+                    const std::size_t repeatedDifferences = CountExactDifferences(again, grid);
+                    pass = pass and (repeatedDifferences == 0);
+                    if(rank == 0)
+                    {
+                        std::cout << name << " subdomains=4_repeated: differences=" << repeatedDifferences << (repeatedDifferences == 0 ? "" : " FAIL") << std::endl;
+                        metrics << name << "_4_repeated_differences " << repeatedDifferences << "\n";
+                    }
                 }
             }
         }

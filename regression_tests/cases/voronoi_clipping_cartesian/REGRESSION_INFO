@@ -1,0 +1,7 @@
+# Building the cells of a Cartesian grid (every vertex shared by 8 cells) by clipping: cubes as the Delaunay builder's, in a first build and in rebuilds
+TAGS="serial mpi"
+CATEGORY="code_correctness"
+CHECK_FUNCTION="check_voronoi_clipping_cartesian_case"
+TIMEOUT=1800
+MPI_NP=8
+SLURM_PARTITION=bigrun

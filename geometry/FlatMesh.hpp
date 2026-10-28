@@ -14,13 +14,10 @@ namespace MadVoro
 namespace Geometry
 {
 
-/*! \brief Index type of the flat layouts. It matches the Delaunay's own indices, so
-    no conversion is needed, and FLAT_INVALID_INDEX is the value the Delaunay
-    stores in the slots of removed tetrahedra. */
+// Matches the Delaunay's own indices; FLAT_INVALID_INDEX marks removed tetrahedra there too.
 using flat_index_t = std::size_t;
 constexpr flat_index_t FLAT_INVALID_INDEX = std::numeric_limits<flat_index_t>::max();
 
-//! \brief A point as three plain doubles, usable in host and device code.
 struct FlatPoint
 {
     double x;
@@ -59,7 +56,7 @@ inline FlatPoint ToFlatPoint(const PointT &point)
     return FlatPoint{point.x, point.y, point.z};
 }
 
-//! \brief A tetrahedron as plain indices. A removed tetrahedron has every entry FLAT_INVALID_INDEX.
+//! \brief A removed tetrahedron has every entry FLAT_INVALID_INDEX.
 struct FlatTetra
 {
     flat_index_t points[4];
@@ -69,13 +66,7 @@ struct FlatTetra
 static_assert(std::is_trivially_copyable<FlatPoint>::value, "FlatPoint must be trivially copyable");
 static_assert(std::is_trivially_copyable<FlatTetra>::value, "FlatTetra must be trivially copyable");
 
-/*! \brief Read-only view of a flat Delaunay mesh: raw pointers and sizes only, so it
-    can be copied into a kernel. The pointers may refer to host or device memory.
-
-    Points [0, ownedCount) are the cells being built; the rest are ghosts, mirrors
-    and the four bounding-tetrahedron points. The point-to-tetrahedra lists exist
-    for the owned points only, in CSR form: the tetrahedra of owned point p are
-    pointTetras[pointTetraOffsets[p] .. pointTetraOffsets[p + 1]). */
+//! \brief Points [0, ownedCount) are owned; point-to-tetrahedra lists (CSR) exist for those only.
 struct FlatMeshView
 {
     const FlatPoint *points = nullptr;
@@ -107,7 +98,6 @@ struct FlatMeshView
     }
 };
 
-//! \brief Host storage of a flat Delaunay mesh.
 struct FlatMesh
 {
     std::vector<FlatPoint> points;
@@ -150,8 +140,7 @@ namespace detail
                 mesh.tetras[t].neighbors[k] = del.tetras_[t].neighbors[k];
             }
         }
-        // Free slots keep stale indices until Voronoi3D::SetPointTetras clears them;
-        // mark them removed here so the result does not depend on that.
+        // Free slots keep stale indices until Voronoi3D::SetPointTetras clears them.
         for(const std::size_t &t : del.empty_tetras_)
         {
             for(int k = 0; k < 4; ++k)
@@ -163,10 +152,7 @@ namespace detail
     }
 } // namespace detail
 
-/*! \brief Flattens a Delaunay mesh (Delaunay3D), building the point-to-tetrahedra
-    lists from the tetrahedra: count per owned point, prefix sum, fill. Each list is
-    in increasing tetrahedron order, which does not depend on the insertion history.
-    Slots on the Delaunay's free list come out as removed tetrahedra. */
+//! \brief Builds the point-to-tetrahedra lists in increasing tetrahedron order.
 template<typename DelaunayT>
 FlatMesh MakeFlatMesh(const DelaunayT &del)
 {
@@ -214,10 +200,7 @@ FlatMesh MakeFlatMesh(const DelaunayT &del)
     return mesh;
 }
 
-/*! \brief Flattens a Delaunay mesh (Delaunay3D), keeping the point-to-tetrahedra
-    lists exactly as given, in their order. Voronoi3D keeps such lists (PointTetras_),
-    and their order decides the order in which faces are numbered.
-    \param pointTetras One list of tetrahedron indices per owned point */
+//! \brief Keeps the given point-to-tetrahedra lists in their order (it decides the face numbering).
 template<typename DelaunayT, typename TetraListT>
 FlatMesh MakeFlatMesh(const DelaunayT &del, const std::vector<TetraListT> &pointTetras)
 {

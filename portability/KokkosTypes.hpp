@@ -11,8 +11,7 @@
 #define MADVORO_INLINE_FUNCTION inline
 #endif
 
-// Before a host-device function template that some callers instantiate with host-only
-// types (e.g. a std::vector sink): tells nvcc not to warn about those host instantiations.
+// Silences nvcc warnings for host-device templates instantiated with host-only types.
 #if defined(__CUDACC__)
 #define MADVORO_HOST_DEVICE_TEMPLATE _Pragma("nv_exec_check_disable")
 #else

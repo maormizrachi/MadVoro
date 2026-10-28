@@ -24,8 +24,7 @@ namespace MadVoro::regression_tests
 
 using VoronoiGrid = MadVoro::Voronoi3D<Vector3D>;
 
-inline std::vector<Vector3D> RandRectangular(std::size_t pointNum, const Vector3D &ll, const Vector3D &ur,
-                                             boost::mt19937_64 &gen)
+inline std::vector<Vector3D> RandRectangular(std::size_t pointNum, const Vector3D &ll, const Vector3D &ur, boost::mt19937_64 &gen)
 {
     boost::random::uniform_real_distribution<> dist;
     std::vector<Vector3D> points;
@@ -40,8 +39,7 @@ inline std::vector<Vector3D> RandRectangular(std::size_t pointNum, const Vector3
     return points;
 }
 
-inline std::vector<Vector3D> RandRectangular(std::size_t pointNum, const Vector3D &ll, const Vector3D &ur,
-                                             std::uint64_t seed)
+inline std::vector<Vector3D> RandRectangular(std::size_t pointNum, const Vector3D &ll, const Vector3D &ur, std::uint64_t seed)
 {
     boost::mt19937_64 gen(seed);
     return RandRectangular(pointNum, ll, ur, gen);
@@ -74,12 +72,10 @@ inline double BoxVolume(const Vector3D &ll, const Vector3D &ur)
     return (ur.x - ll.x) * (ur.y - ll.y) * (ur.z - ll.z);
 }
 
-inline bool WriteVolumeMetrics(const std::string &filename, const std::string &modeLabel, bool periodic,
-                               std::size_t numPoints, double totalVolume, double boxVolume, double relError,
-                               int passFlag)
+inline bool WriteVolumeMetrics(const std::string &filename, const std::string &modeLabel, bool periodic, std::size_t numPoints, double totalVolume, double boxVolume, double relError, int passFlag)
 {
     std::ofstream out(filename);
-    if(!out)
+    if(not out)
     {
         return false;
     }
@@ -122,7 +118,7 @@ inline std::size_t FindOwnedCellBruteForce(const VoronoiGrid &grid, const Vector
     const std::size_t localCells = grid.GetPointNo();
     for(std::size_t cell = 0; cell < localCells; ++cell)
     {
-        if(!grid.IsPointInCell(point, cell))
+        if(not grid.IsPointInCell(point, cell))
         {
             continue;
         }

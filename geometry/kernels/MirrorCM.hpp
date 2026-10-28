@@ -8,15 +8,10 @@ namespace MadVoro
 namespace Geometry
 {
 
-/*! \brief Centroid of the cell behind a rigid boundary face: the mirror image of the
-    real cell's centroid across the face plane.
-    \param first, second The face's two points (FaceNeighbors order)
-    \param realCM Centroid of the real cell
-    \param faceVertex Any vertex of the face (it lies on the face plane) */
+//! \brief Mirror image of the real cell's centroid across a rigid boundary face.
 template<typename PointT>
 inline PointT MirroredCM(const PointT &first, const PointT &second, const PointT &realCM, const PointT &faceVertex)
 {
-    // The point type's own operations when it has them, MadVoro's otherwise.
     using namespace MadVoro::fallback;
     const PointT normal = normalize(first - second);
     return realCM - 2 * normal * ScalarProd(normal, realCM - faceVertex);

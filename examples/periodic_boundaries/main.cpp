@@ -33,22 +33,22 @@ static bool TestSentPointsContainer()
     std::vector<size_t> third = container.addPointsAsSent(1, std::vector<size_t>({42}), ImageCode(txMinus));
     std::vector<size_t> fourth = container.addPointsAsSent(1, std::vector<size_t>({42}), ImageCode(tyMinus));
 
-    if(first.size() != 1 || first[0] != 42)
+    if(first.size() != 1 or first[0] != 42)
     {
         std::cerr << "SentPointsContainer: expected first insert to return {42}" << std::endl;
         return false;
     }
-    if(!second.empty())
+    if(not second.empty())
     {
         std::cerr << "SentPointsContainer: expected duplicate zero-code insert to return empty" << std::endl;
         return false;
     }
-    if(third.size() != 1 || third[0] != 42)
+    if(third.size() != 1 or third[0] != 42)
     {
         std::cerr << "SentPointsContainer: expected x-minus image insert to return {42}" << std::endl;
         return false;
     }
-    if(fourth.size() != 1 || fourth[0] != 42)
+    if(fourth.size() != 1 or fourth[0] != 42)
     {
         std::cerr << "SentPointsContainer: expected y-minus image insert to return {42}" << std::endl;
         return false;
@@ -82,7 +82,7 @@ static bool TestOnePointPeriodicSerial()
 
     double boxVolume = 1.0;
     double cellVolume = voronoi.GetVolume(0);
-    if(!ApproxEqual(cellVolume, boxVolume))
+    if(not ApproxEqual(cellVolume, boxVolume))
     {
         std::cerr << "One-point periodic: expected cell volume " << boxVolume << ", got " << cellVolume << std::endl;
         return false;
@@ -118,10 +118,9 @@ static bool TestLattice2x2x2Serial()
     double expectedCellVolume = 1.0 / 8.0;
     for(size_t i = 0; i < points.size(); ++i)
     {
-        if(!ApproxEqual(voronoi.GetVolume(i), expectedCellVolume))
+        if(not ApproxEqual(voronoi.GetVolume(i), expectedCellVolume))
         {
-            std::cerr << "2x2x2 lattice: cell " << i << " volume " << voronoi.GetVolume(i)
-                      << " != " << expectedCellVolume << std::endl;
+            std::cerr << "2x2x2 lattice: cell " << i << " volume " << voronoi.GetVolume(i) << " != " << expectedCellVolume << std::endl;
             return false;
         }
     }
@@ -132,7 +131,7 @@ static bool TestLattice2x2x2Serial()
 static bool TestOwnerWrapping(const MadVoro::Voronoi3D<Vector3D> &voronoi)
 {
     Vector3D wrapped = voronoi.WrapPeriodicPoint(Vector3D(-0.03, 0.5, 0.5));
-    if(!ApproxEqual(wrapped.x, 0.97))
+    if(not ApproxEqual(wrapped.x, 0.97))
     {
         std::cerr << "WrapPeriodicPoint: expected x=0.97, got " << wrapped.x << std::endl;
         return false;
@@ -199,12 +198,10 @@ static bool TestPeriodicMockMeshRebalance(MPI_Comm comm)
     double volumeAfter = 0.0;
     MPI_Allreduce(&localVolume, &volumeAfter, 1, MPI_DOUBLE, MPI_SUM, comm);
 
-    bool pass = ApproxEqual(volumeBefore, 1.0) && ApproxEqual(volumeAfter, 1.0) && voronoi.DidRebalance();
-    if(!pass && rank == 0)
+    bool pass = ApproxEqual(volumeBefore, 1.0) and ApproxEqual(volumeAfter, 1.0) and voronoi.DidRebalance();
+    if(not pass and rank == 0)
     {
-        std::cerr << "Periodic MockMesh: before=" << volumeBefore
-                  << " after=" << volumeAfter
-                  << " didRebalance=" << voronoi.DidRebalance() << std::endl;
+        std::cerr << "Periodic MockMesh: before=" << volumeBefore << " after=" << volumeAfter << " didRebalance=" << voronoi.DidRebalance() << std::endl;
     }
 
     int localOk = pass ? 1 : 0;
@@ -251,18 +248,18 @@ static bool TestPeriodicParallel(MPI_Comm comm)
     MPI_Allreduce(&localVolume, &totalVolume, 1, MPI_DOUBLE, MPI_SUM, comm);
 
     bool pass = ApproxEqual(totalVolume, 1.0);
-    if(!pass && rank == 0)
+    if(not pass and rank == 0)
     {
         std::cerr << "Periodic parallel: total volume " << totalVolume << " != 1.0 (size=" << size << ")" << std::endl;
     }
 
     bool ownerPass = TestOwnerWrapping(voronoi);
-    if(!ownerPass && rank == 0)
+    if(not ownerPass and rank == 0)
     {
         std::cerr << "Periodic parallel: owner wrapping test failed" << std::endl;
     }
 
-    int localOk = (pass && ownerPass) ? 1 : 0;
+    int localOk = (pass and ownerPass) ? 1 : 0;
     int globalOk = 0;
     MPI_Allreduce(&localOk, &globalOk, 1, MPI_INT, MPI_MIN, comm);
     return globalOk == 1;
@@ -278,7 +275,7 @@ int main(int argc, char *argv[])
     int rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
-    if(!TestSentPointsContainer())
+    if(not TestSentPointsContainer())
     {
         if(rank == 0)
         {
@@ -293,7 +290,7 @@ int main(int argc, char *argv[])
 #endif
 
 #ifndef MADVORO_WITH_MPI
-    if(!TestOnePointPeriodicSerial())
+    if(not TestOnePointPeriodicSerial())
     {
         std::cerr << "FAILED: one-point fully periodic serial test" << std::endl;
         ++failed;
@@ -303,7 +300,7 @@ int main(int argc, char *argv[])
         std::cout << "PASSED: one-point fully periodic serial test" << std::endl;
     }
 
-    if(!TestLattice2x2x2Serial())
+    if(not TestLattice2x2x2Serial())
     {
         std::cerr << "FAILED: 2x2x2 periodic lattice serial test" << std::endl;
         ++failed;
@@ -315,7 +312,7 @@ int main(int argc, char *argv[])
 #endif
 
 #ifdef MADVORO_WITH_MPI
-    if(!TestPeriodicMockMeshRebalance(MPI_COMM_WORLD))
+    if(not TestPeriodicMockMeshRebalance(MPI_COMM_WORLD))
     {
         if(rank == 0)
         {
@@ -328,7 +325,7 @@ int main(int argc, char *argv[])
         std::cout << "PASSED: periodic MockMesh rebalance test" << std::endl;
     }
 
-    if(!TestPeriodicParallel(MPI_COMM_WORLD))
+    if(not TestPeriodicParallel(MPI_COMM_WORLD))
     {
         if(rank == 0)
         {

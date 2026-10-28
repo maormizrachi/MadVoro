@@ -1,7 +1,4 @@
-// Partial builds must tessellate only the participating points while keeping
-// the non-participating ones as neighbours: every participating cell has to
-// match the same cell of a full build.  Under MPI the non-participating points
-// must also survive the points exchange (not be dropped or duplicated).
+// Partial builds must match a full build on the participating cells and keep the other points.
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -52,8 +49,7 @@ std::vector<double> GatherCells(const VoronoiGrid &grid)
         }
         global.resize(displs[worldSize - 1] + counts[worldSize - 1]);
     }
-    MPI_Gatherv(local.data(), localCount, MPI_DOUBLE, global.data(), counts.data(), displs.data(),
-                MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    MPI_Gatherv(local.data(), localCount, MPI_DOUBLE, global.data(), counts.data(), displs.data(), MPI_DOUBLE, 0, MPI_COMM_WORLD);
     return global;
 #else
     return local;
@@ -104,10 +100,8 @@ struct SubsetResult
     double maxRelError = 0.0;
 };
 
-// Runs one partial build on the grid's current points and compares it with the
-// full-build volumes.  Meaningful on rank 0 only.
-SubsetResult CheckSubset(VoronoiGrid &grid, bool (*isActive)(const Vector3D &),
-                         const std::map<PointKey, double> &fullVolumes)
+// Compares one partial build with the full-build volumes; meaningful on rank 0 only.
+SubsetResult CheckSubset(VoronoiGrid &grid, bool (*isActive)(const Vector3D &), const std::map<PointKey, double> &fullVolumes)
 {
     const std::vector<Vector3D> points = grid.getAllPoints();
     std::vector<std::size_t> active;
@@ -145,20 +139,13 @@ SubsetResult CheckSubset(VoronoiGrid &grid, bool (*isActive)(const Vector3D &),
     return result;
 }
 
-bool Report(int rank, const std::string &label, const SubsetResult &result, std::size_t totalPoints,
-            double tolerance, std::ostream &metrics)
+bool Report(int rank, const std::string &label, const SubsetResult &result, std::size_t totalPoints, double tolerance, std::ostream &metrics)
 {
-    const bool pass = result.activeCells == result.expectedActive && result.expectedActive > 0 &&
-                      result.expectedActive < totalPoints && result.allPointsAfter == totalPoints &&
-                      result.unmatched == 0 && result.duplicates == 0 && result.maxRelError < tolerance;
+    const bool pass = result.activeCells == result.expectedActive and result.expectedActive > 0 and result.expectedActive < totalPoints and result.allPointsAfter == totalPoints and result.unmatched == 0 and result.duplicates == 0 and result.maxRelError < tolerance;
     if(rank == 0)
     {
-        std::cout << label << ": active_cells=" << result.activeCells << " expected=" << result.expectedActive
-                  << " all_points_after=" << result.allPointsAfter << " (of " << totalPoints << ")"
-                  << " unmatched=" << result.unmatched << " duplicates=" << result.duplicates
-                  << " max_rel_error=" << result.maxRelError << " pass=" << (pass ? 1 : 0) << std::endl;
-        metrics << label << "_max_rel_error " << result.maxRelError << "\n"
-                << label << "_pass " << (pass ? 1 : 0) << "\n";
+        std::cout << label << ": active_cells=" << result.activeCells << " expected=" << result.expectedActive << " all_points_after=" << result.allPointsAfter << " (of " << totalPoints << ")" << " unmatched=" << result.unmatched << " duplicates=" << result.duplicates << " max_rel_error=" << result.maxRelError << " pass=" << (pass ? 1 : 0) << std::endl;
+        metrics << label << "_max_rel_error " << result.maxRelError << "\n" << label << "_pass " << (pass ? 1 : 0) << "\n";
     }
     return pass;
 }
@@ -192,7 +179,7 @@ int main()
     points = MadVoro::regression_tests::RandRectangular(numPoints, ll, ur, seed);
 #endif
 
-    // Full build: the reference volumes.  Later builds reuse this grid, as RICH does.
+    // Full build: the reference volumes. Later builds reuse this grid, as RICH does.
     VoronoiGrid grid(ll, ur);
     MadVoro::regression_tests::BuildVoronoiMesh(grid, points);
     std::map<PointKey, double> fullVolumes;
@@ -208,34 +195,28 @@ int main()
     if(rank == 0)
     {
         metrics.open("voronoi_partial_build_metrics.txt");
-        metrics << "mode " << (worldSize > 1 ? "mpi" : "serial") << "\n"
-                << "num_points " << numPoints << "\n";
+        metrics << "mode " << (worldSize > 1 ? "mpi" : "serial") << "\n" << "num_points " << numPoints << "\n";
     }
 
-    bool pass = (rank != 0) || (fullVolumes.size() == numPoints);
-    pass = Report(rank, "half_box", CheckSubset(grid, InHalfBox, fullVolumes), numPoints, tolerance,
-                  metrics) && pass;
-    pass = Report(rank, "scattered_third", CheckSubset(grid, InScatteredThird, fullVolumes), numPoints,
-                  tolerance, metrics) && pass;
+    bool pass = (rank != 0) or (fullVolumes.size() == numPoints);
+    pass = Report(rank, "half_box", CheckSubset(grid, InHalfBox, fullVolumes), numPoints, tolerance, metrics) and pass;
+    pass = Report(rank, "scattered_third", CheckSubset(grid, InScatteredThird, fullVolumes), numPoints, tolerance, metrics) and pass;
 
     // A full rebuild after partial builds must still tile the box.
     {
         const std::vector<Vector3D> current = grid.getAllPoints();
         MadVoro::regression_tests::BuildVoronoiMesh(grid, current);
-        const double totalVolume = MadVoro::regression_tests::ReduceGlobalVolume(
-            MadVoro::regression_tests::SumOwnedCellVolumes(grid));
+        const double totalVolume = MadVoro::regression_tests::ReduceGlobalVolume(MadVoro::regression_tests::SumOwnedCellVolumes(grid));
         const double boxVolume = MadVoro::regression_tests::BoxVolume(ll, ur);
         const double relError = std::abs(totalVolume - boxVolume) / boxVolume;
         const std::size_t cells = GlobalSum(grid.GetPointNo());
-        const bool rebuildPass = relError < tolerance && cells == numPoints;
+        const bool rebuildPass = relError < tolerance and cells == numPoints;
         if(rank == 0)
         {
-            std::cout << "full_rebuild: cells=" << cells << " rel_volume_error=" << relError
-                      << " pass=" << (rebuildPass ? 1 : 0) << std::endl;
-            metrics << "full_rebuild_rel_error " << relError << "\n"
-                    << "full_rebuild_pass " << (rebuildPass ? 1 : 0) << "\n";
+            std::cout << "full_rebuild: cells=" << cells << " rel_volume_error=" << relError << " pass=" << (rebuildPass ? 1 : 0) << std::endl;
+            metrics << "full_rebuild_rel_error " << relError << "\n" << "full_rebuild_pass " << (rebuildPass ? 1 : 0) << "\n";
         }
-        pass = rebuildPass && pass;
+        pass = rebuildPass and pass;
     }
 
     int passed = pass ? 1 : 0;

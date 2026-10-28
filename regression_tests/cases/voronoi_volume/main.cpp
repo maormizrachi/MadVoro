@@ -22,9 +22,7 @@ int main()
     const Vector3D ll(0.0, 0.0, 0.0);
     const Vector3D ur(1.0, 1.0, 1.0);
     const std::uint64_t seed = 424242ULL;
-    const std::size_t numPoints = (worldSize > 1)
-        ? static_cast<std::size_t>(100000)
-        : static_cast<std::size_t>(10000);
+    const std::size_t numPoints = (worldSize > 1) ? static_cast<std::size_t>(100000) : static_cast<std::size_t>(10000);
 
     std::vector<Vector3D> points;
 #ifdef MADVORO_WITH_MPI
@@ -40,28 +38,16 @@ int main()
     MadVoro::regression_tests::VoronoiGrid grid(ll, ur);
     MadVoro::regression_tests::BuildVoronoiMesh(grid, points);
 
-    const double totalVolume = MadVoro::regression_tests::ReduceGlobalVolume(
-        MadVoro::regression_tests::SumOwnedCellVolumes(grid));
+    const double totalVolume = MadVoro::regression_tests::ReduceGlobalVolume(MadVoro::regression_tests::SumOwnedCellVolumes(grid));
     const double boxVolume = MadVoro::regression_tests::BoxVolume(ll, ur);
     const double relError = std::abs(totalVolume - boxVolume) / boxVolume;
     const int passed = (relError < 1e-10) ? 1 : 0;
 
     if(rank == 0)
     {
-        std::cout << "voronoi_volume seed=" << seed << "\n"
-                  << "total_volume = " << totalVolume << "\n"
-                  << "box_volume   = " << boxVolume << "\n"
-                  << "rel_error    = " << relError << "\n"
-                  << "pass         = " << passed << std::endl;
+        std::cout << "voronoi_volume seed=" << seed << "\n" << "total_volume = " << totalVolume << "\n" << "box_volume   = " << boxVolume << "\n" << "rel_error    = " << relError << "\n" << "pass         = " << passed << std::endl;
 
-        if(!MadVoro::regression_tests::WriteVolumeMetrics("voronoi_volume_metrics.txt",
-                                                          worldSize > 1 ? "mpi" : "serial",
-                                                          false,
-                                                          numPoints,
-                                                          totalVolume,
-                                                          boxVolume,
-                                                          relError,
-                                                          passed))
+        if(not MadVoro::regression_tests::WriteVolumeMetrics("voronoi_volume_metrics.txt", worldSize > 1 ? "mpi" : "serial", false, numPoints, totalVolume, boxVolume, relError, passed))
         {
             std::cerr << "voronoi_volume FAIL: could not write metrics file" << std::endl;
 #ifdef MADVORO_WITH_MPI

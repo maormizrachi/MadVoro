@@ -46,8 +46,7 @@ struct RangeQueryData
     coord_type radius;
     PointT imageTranslation;
 
-    RangeQueryData(size_t pointIdx, const PointT &center, coord_type radius):
-        pointIdx(pointIdx), center(center), radius(radius), imageTranslation(PointT())
+    RangeQueryData(size_t pointIdx, const PointT &center, coord_type radius): pointIdx(pointIdx), center(center), radius(radius), imageTranslation(PointT())
     {};
 
     RangeQueryData(): pointIdx(0), center(PointT()), radius(0), imageTranslation(PointT()){};

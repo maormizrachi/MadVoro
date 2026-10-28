@@ -64,36 +64,34 @@ namespace {
 	{
 	public:
 		template<typename PointT>
-		explicit LatticePredicateScope(const std::vector<PointT>& points)
-			: LatticePredicateScope(std::array<PointRange<PointT>, 1>{
-				{{points.data(), points.data() + points.size()}}})
+		explicit LatticePredicateScope(const std::vector<PointT>& points) : LatticePredicateScope(std::array<PointRange<PointT>, 1>{{{points.data(), points.data() + points.size()}}})
 		{
 		}
 
-		// The ranges are read in order, exactly as if they were one concatenated
-		// vector, so callers need not copy them together. No pointer is kept after
-		// construction.
+		// Reads the ranges in order as one concatenated vector; keeps no pointer.
 		template<typename PointT, std::size_t N>
-		explicit LatticePredicateScope(const std::array<PointRange<PointT>, N>& ranges)
-			: previous_(lattice_predicate_state())
+		explicit LatticePredicateScope(const std::array<PointRange<PointT>, N>& ranges) : previous_(lattice_predicate_state())
 		{
 			LatticePredicateState next;
 			std::size_t count = 0;
 			const PointT* front = nullptr;
-			for(const PointRange<PointT>& range : ranges) {
-				if(front == nullptr && range.first != range.last)
+			for(const PointRange<PointT>& range : ranges)
+			{
+				if(front == nullptr and range.first != range.last)
+				{
 					front = range.first;
+				}
 				count += static_cast<std::size_t>(range.last - range.first);
 			}
-			if(count < 8) {
+			if(count < 8)
+			{
 				lattice_predicate_state() = next;
 				return;
 			}
 
 			std::int64_t anchor[3];
-			if(!lattice_integer(front->x, anchor[0]) ||
-				!lattice_integer(front->y, anchor[1]) ||
-				!lattice_integer(front->z, anchor[2])) {
+			if(not lattice_integer(front->x, anchor[0]) or not lattice_integer(front->y, anchor[1]) or not lattice_integer(front->z, anchor[2]))
+			{
 				lattice_predicate_state() = next;
 				return;
 			}
@@ -102,34 +100,36 @@ namespace {
 			std::int64_t maximum[3] = {anchor[0], anchor[1], anchor[2]};
 			std::uint64_t divisor = 0;
 			for(const PointRange<PointT>& range : ranges)
-			for(const PointT* it = range.first; it != range.last; ++it) {
-				const PointT& point = *it;
-				std::int64_t coordinate[3];
-				if(!lattice_integer(point.x, coordinate[0]) ||
-					!lattice_integer(point.y, coordinate[1]) ||
-					!lattice_integer(point.z, coordinate[2])) {
-					lattice_predicate_state() = next;
-					return;
-				}
-				for(unsigned axis = 0; axis < 3; ++axis) {
-					minimum[axis] = std::min(minimum[axis], coordinate[axis]);
-					maximum[axis] = std::max(maximum[axis], coordinate[axis]);
-					const std::int64_t difference = coordinate[axis] - anchor[axis];
-					const std::uint64_t magnitude = difference < 0
-						? static_cast<std::uint64_t>(-difference)
-						: static_cast<std::uint64_t>(difference);
-					divisor = std::gcd(divisor, magnitude);
+			{
+				for(const PointT* it = range.first; it != range.last; ++it)
+				{
+					const PointT& point = *it;
+					std::int64_t coordinate[3];
+					if(not lattice_integer(point.x, coordinate[0]) or not lattice_integer(point.y, coordinate[1]) or not lattice_integer(point.z, coordinate[2]))
+					{
+						lattice_predicate_state() = next;
+						return;
+					}
+					for(unsigned axis = 0; axis < 3; ++axis)
+					{
+						minimum[axis] = std::min(minimum[axis], coordinate[axis]);
+						maximum[axis] = std::max(maximum[axis], coordinate[axis]);
+						const std::int64_t difference = coordinate[axis] - anchor[axis];
+						const std::uint64_t magnitude = difference < 0 ? static_cast<std::uint64_t>(-difference) : static_cast<std::uint64_t>(difference);
+						divisor = std::gcd(divisor, magnitude);
+					}
 				}
 			}
-			if(divisor == 0 || (divisor & (divisor - 1)) != 0) {
+			if(divisor == 0 or (divisor & (divisor - 1)) != 0)
+			{
 				lattice_predicate_state() = next;
 				return;
 			}
-			// With a common power-of-two spacing and span <= 255, every
-			// orientation/insphere intermediate has an exact binary64 significand.
-			for(unsigned axis = 0; axis < 3; ++axis) {
-				if(static_cast<std::uint64_t>(maximum[axis] - minimum[axis]) /
-					divisor > 255) {
+			// With a common power-of-two spacing and span <= 255, every orientation/insphere intermediate has an exact binary64 significand.
+			for(unsigned axis = 0; axis < 3; ++axis)
+			{
+				if(static_cast<std::uint64_t>(maximum[axis] - minimum[axis]) / divisor > 255)
+				{
 					lattice_predicate_state() = next;
 					return;
 				}
@@ -141,14 +141,17 @@ namespace {
 			next.minY = next.maxY = front->y;
 			next.minZ = next.maxZ = front->z;
 			for(const PointRange<PointT>& range : ranges)
-			for(const PointT* it = range.first; it != range.last; ++it) {
-				const PointT& point = *it;
-				next.minX = std::min(next.minX, point.x);
-				next.maxX = std::max(next.maxX, point.x);
-				next.minY = std::min(next.minY, point.y);
-				next.maxY = std::max(next.maxY, point.y);
-				next.minZ = std::min(next.minZ, point.z);
-				next.maxZ = std::max(next.maxZ, point.z);
+			{
+				for(const PointT* it = range.first; it != range.last; ++it)
+				{
+					const PointT& point = *it;
+					next.minX = std::min(next.minX, point.x);
+					next.maxX = std::max(next.maxX, point.x);
+					next.minY = std::min(next.minY, point.y);
+					next.maxY = std::max(next.maxY, point.y);
+					next.minZ = std::min(next.minZ, point.z);
+					next.maxZ = std::max(next.maxZ, point.z);
+				}
 			}
 			lattice_predicate_state() = next;
 		}

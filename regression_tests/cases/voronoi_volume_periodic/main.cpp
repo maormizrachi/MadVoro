@@ -42,10 +42,9 @@ bool TestOnePointPeriodicSerial(MadVoro::regression_tests::VoronoiGrid &grid)
 
     const double boxVolume = 1.0;
     const double cellVolume = grid.GetVolume(0);
-    if(!ApproxEqual(cellVolume, boxVolume))
+    if(not ApproxEqual(cellVolume, boxVolume))
     {
-        std::cerr << "One-point periodic: expected cell volume " << boxVolume
-                  << ", got " << cellVolume << std::endl;
+        std::cerr << "One-point periodic: expected cell volume " << boxVolume << ", got " << cellVolume << std::endl;
         return false;
     }
     if(CellHasPhysicalBoundary(grid, 0))
@@ -75,7 +74,7 @@ bool TestLatticePeriodicSerial(MadVoro::regression_tests::VoronoiGrid &grid)
     const double expectedCellVolume = 1.0 / 8.0;
     for(std::size_t i = 0; i < points.size(); ++i)
     {
-        if(!ApproxEqual(grid.GetVolume(i), expectedCellVolume))
+        if(not ApproxEqual(grid.GetVolume(i), expectedCellVolume))
         {
             std::cerr << "Lattice periodic: cell " << i << " volume mismatch" << std::endl;
             return false;
@@ -104,9 +103,7 @@ int main()
     const Vector3D ll(0.0, 0.0, 0.0);
     const Vector3D ur(1.0, 1.0, 1.0);
     const std::uint64_t seed = 515151ULL;
-    const std::size_t numPoints = (worldSize > 1)
-        ? static_cast<std::size_t>(100000)
-        : static_cast<std::size_t>(10000);
+    const std::size_t numPoints = (worldSize > 1) ? static_cast<std::size_t>(100000) : static_cast<std::size_t>(10000);
 
     int passed = 1;
 #ifndef MADVORO_WITH_MPI
@@ -133,28 +130,16 @@ int main()
     grid.SetPeriodicBoundaries(true, true, true);
     MadVoro::regression_tests::BuildVoronoiMesh(grid, points);
 
-    const double totalVolume = MadVoro::regression_tests::ReduceGlobalVolume(
-        MadVoro::regression_tests::SumOwnedCellVolumes(grid));
+    const double totalVolume = MadVoro::regression_tests::ReduceGlobalVolume(MadVoro::regression_tests::SumOwnedCellVolumes(grid));
     const double boxVolume = MadVoro::regression_tests::BoxVolume(ll, ur);
     const double relError = std::abs(totalVolume - boxVolume) / boxVolume;
     passed = (relError < 1e-10) ? passed : 0;
 
     if(rank == 0)
     {
-        std::cout << "voronoi_volume_periodic seed=" << seed << "\n"
-                  << "total_volume = " << totalVolume << "\n"
-                  << "box_volume   = " << boxVolume << "\n"
-                  << "rel_error    = " << relError << "\n"
-                  << "pass         = " << passed << std::endl;
+        std::cout << "voronoi_volume_periodic seed=" << seed << "\n" << "total_volume = " << totalVolume << "\n" << "box_volume   = " << boxVolume << "\n" << "rel_error    = " << relError << "\n" << "pass         = " << passed << std::endl;
 
-        if(!MadVoro::regression_tests::WriteVolumeMetrics("voronoi_volume_periodic_metrics.txt",
-                                                          worldSize > 1 ? "mpi" : "serial",
-                                                          true,
-                                                          numPoints,
-                                                          totalVolume,
-                                                          boxVolume,
-                                                          relError,
-                                                          passed))
+        if(not MadVoro::regression_tests::WriteVolumeMetrics("voronoi_volume_periodic_metrics.txt", worldSize > 1 ? "mpi" : "serial", true, numPoints, totalVolume, boxVolume, relError, passed))
         {
             std::cerr << "voronoi_volume_periodic FAIL: could not write metrics file" << std::endl;
 #ifdef MADVORO_WITH_MPI

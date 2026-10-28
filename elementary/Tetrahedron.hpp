@@ -8,10 +8,9 @@ class Tetrahedron
 public:
     std::size_t points[4];
     std::size_t neighbors[4];
-    bool checkBig;
     bool newTetra;
 
-    Tetrahedron() : points(), neighbors(), checkBig(true), newTetra(true) {}
+    Tetrahedron() : points(), neighbors(), newTetra(true) {}
 
     Tetrahedron(const Tetrahedron &other) = default;
     Tetrahedron &operator=(const Tetrahedron &other) = default;

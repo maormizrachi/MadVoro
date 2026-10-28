@@ -75,17 +75,11 @@ int main()
     const double relErrorBefore = std::abs(volumeBefore - boxVolume) / boxVolume;
     const double relErrorAfter = std::abs(volumeAfter - boxVolume) / boxVolume;
     const int mockMeshUsed = voronoi.DidRebalance() ? 1 : 0;
-    const int passed = (relErrorBefore < 1e-10 && relErrorAfter < 1e-10 && mockMeshUsed == 1) ? 1 : 0;
+    const int passed = (relErrorBefore < 1e-10 and relErrorAfter < 1e-10 and mockMeshUsed == 1) ? 1 : 0;
 
     if(rank == 0)
     {
-        std::cout << "voronoi_mock_mesh_periodic PASS=" << (passed ? 1 : 0)
-                  << " volume_before=" << volumeBefore
-                  << " volume_after=" << volumeAfter
-                  << " rel_error_before=" << relErrorBefore
-                  << " rel_error_after=" << relErrorAfter
-                  << " did_rebalance=" << mockMeshUsed
-                  << std::endl;
+        std::cout << "voronoi_mock_mesh_periodic PASS=" << (passed ? 1 : 0) << " volume_before=" << volumeBefore << " volume_after=" << volumeAfter << " rel_error_before=" << relErrorBefore << " rel_error_after=" << relErrorAfter << " did_rebalance=" << mockMeshUsed << std::endl;
 
         std::ofstream out("voronoi_mock_mesh_periodic_metrics.txt");
         out.setf(std::ios::scientific);

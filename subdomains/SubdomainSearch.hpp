@@ -1,7 +1,4 @@
-/** \file SubdomainSearch.hpp
-   \brief Searches of a thread subdomain for the points of the other subdomains
-   \author Maor Mizrachi
-*/
+// Searches of a thread subdomain for the points of the other subdomains
 #ifndef MADVORO_SUBDOMAINS_SUBDOMAIN_SEARCH_HPP
 #define MADVORO_SUBDOMAINS_SUBDOMAIN_SEARCH_HPP
 
@@ -22,26 +19,20 @@
 namespace MadVoro
 {
 
-/*! \brief Which thread subdomains have points in each cell of a coarse grid around a
-    rank's points (the smallest and the largest subdomain of the cell's points), and
-    which cells have points other ranks sent. */
+// Coarse grid of the subdomain range (smallest, largest) and of other ranks' points in each cell
 template <typename PointT>
 class SubdomainGrid
 {
 public:
     using subdomain_t = std::uint16_t;
-    //! The largest number of subdomains
     static constexpr std::size_t MAX_SUBDOMAINS = 0xFFFE;
 
-    //! \brief What a sphere may hold besides a subdomain's own points
     struct Reach
     {
         bool otherSubdomains = false;
         bool otherRanks = false;
     };
 
-    /*! \param points The rank's points
-        \param subdomainOf The subdomain of each point */
     SubdomainGrid(const std::vector<PointT> &points, const std::vector<subdomain_t> &subdomainOf)
     {
         // about two points per cell
@@ -85,7 +76,6 @@ public:
         }
     }
 
-    //! \brief Marks points another rank sent.
     template<typename Iterator>
     void AddOtherRankPoints(Iterator first, Iterator last)
     {
@@ -109,9 +99,6 @@ public:
         }
     }
 
-    /*! \brief Whether points of other subdomains, and points other ranks sent, may be in
-        the sphere: each is false only when no cell the sphere's bounding box meets has
-        such a point. */
     Reach MayHold(const PointT &center, double radius, subdomain_t subdomain) const
     {
         Reach reach;
@@ -142,11 +129,12 @@ public:
                 for(int k = from[2]; k <= to[2]; ++k)
                 {
                     const std::size_t cell = this->CellIndex(i, j, k);
-                    reach.otherSubdomains = reach.otherSubdomains or (this->smallest_[cell] <= this->largest_[cell] and
-                                                                      (this->smallest_[cell] != subdomain or this->largest_[cell] != subdomain));
+                    reach.otherSubdomains = reach.otherSubdomains or (this->smallest_[cell] <= this->largest_[cell] and (this->smallest_[cell] != subdomain or this->largest_[cell] != subdomain));
                     reach.otherRanks = reach.otherRanks or (this->otherRanks_[cell] != 0);
                     if(reach.otherSubdomains and reach.otherRanks)
+                    {
                         return reach;
+                    }
                 }
             }
         }
@@ -181,9 +169,7 @@ private:
     bool othersOutside_ = false;
 };
 
-/*! \brief The points other ranks sent to a rank's thread subdomains, in one tree. Their
-    indices follow the rank's own points: the i-th is FirstIndex() + i. Points are added
-    only between the subdomains' searches. */
+// Points other ranks sent, in one tree; the i-th has index FirstIndex() + i. Added only between searches.
 template <typename PointT>
 class RankGhostPoints
 {
@@ -191,9 +177,9 @@ public:
     using coord_type = typename PointT::coord_type;
     static constexpr std::size_t NONE = std::numeric_limits<std::size_t>::max();
 
-    RankGhostPoints(const PointT &ll, const PointT &ur, std::size_t firstIndex)
-        : tree_(IVec(ll - (ur - ll) * 0.00001, NONE), IVec(ur + (ur - ll) * 0.00001, NONE)), firstIndex_(firstIndex)
-    {}
+    RankGhostPoints(const PointT &ll, const PointT &ur, std::size_t firstIndex) : tree_(IVec(ll - (ur - ll) * 0.00001, NONE), IVec(ur + (ur - ll) * 0.00001, NONE)), firstIndex_(firstIndex)
+    {
+    }
 
     void Add(const PointT &point)
     {
@@ -211,30 +197,31 @@ public:
         return this->firstIndex_;
     }
 
-    //! \brief As RangeFinder::range
-    void Range(const PointT &center, coord_type radius, std::size_t N, const std::unordered_set<std::size_t> &ignore,
-               std::vector<std::size_t> &result) const
+    void Range(const PointT &center, coord_type radius, std::size_t N, const std::unordered_set<std::size_t> &ignore, std::vector<std::size_t> &result) const
     {
         if(this->points_.empty() or N == 0)
+        {
             return;
+        }
         constexpr coord_type eps = static_cast<coord_type>(1e-12);
-        for(const IVec &vec : this->tree_.range(Sphere<IVec>(IVec(center.x, center.y, center.z, NONE), radius + eps), N,
-                                                [&ignore](const IVec &v) { return ignore.find(v.getIndex()) == ignore.cend(); }))
+        for(const IVec &vec : this->tree_.range(Sphere<IVec>(IVec(center.x, center.y, center.z, NONE), radius + eps), N, [&ignore](const IVec &v) { return ignore.find(v.getIndex()) == ignore.cend(); }))
         {
             result.push_back(vec.index);
         }
     }
 
-    //! \brief The closest point to `point` in the sphere that is not ignored, and its squared distance (NONE if there is none)
-    std::pair<std::size_t, coord_type> ClosestInSphere(const PointT &center, coord_type radius, const PointT &point,
-                                                       const std::unordered_set<std::size_t> &ignore) const
+    // The closest non-ignored point in the sphere and its squared distance (NONE if there is none)
+    std::pair<std::size_t, coord_type> ClosestInSphere(const PointT &center, coord_type radius, const PointT &point, const std::unordered_set<std::size_t> &ignore) const
     {
         if(this->points_.empty())
+        {
             return {NONE, std::numeric_limits<coord_type>::max()};
-        const std::pair<IVec, coord_type> closest = this->tree_.getClosestPointInSphere(
-            Sphere<PointT>(center, radius), point, [&ignore](const IVec &v) { return ignore.find(v.getIndex()) == ignore.cend(); });
+        }
+        const std::pair<IVec, coord_type> closest = this->tree_.getClosestPointInSphere(Sphere<PointT>(center, radius), point, [&ignore](const IVec &v) { return ignore.find(v.getIndex()) == ignore.cend(); });
         if(closest.second == std::numeric_limits<coord_type>::max())
+        {
             return {NONE, closest.second};
+        }
         return {closest.first.index, closest.second};
     }
 
@@ -246,12 +233,7 @@ private:
     std::size_t firstIndex_;
 };
 
-/*! \brief A thread subdomain's searches for the points of the other subdomains and the
-    points other ranks sent: in the rank's points, then in the sent points. A search
-    whose sphere can hold no such point (see SubdomainGrid) returns nothing without
-    searching, and each of the two is searched only where the grid says it may hold a
-    point. Only for searches that ignore all of the subdomain's own points, as the
-    subdomain's searches for ghosts do. */
+// Searches other subdomains' points, then other ranks' points, skipping what the grid rules out. Only valid when all of the subdomain's own points are ignored.
 template <typename PointT>
 class SubdomainRangeFinder : public RangeFinder<PointT>
 {
@@ -259,38 +241,45 @@ public:
     using coord_type = typename RangeFinder<PointT>::coord_type;
     using subdomain_t = typename SubdomainGrid<PointT>::subdomain_t;
 
-    SubdomainRangeFinder(std::shared_ptr<const RangeFinder<PointT>> points, std::shared_ptr<const RankGhostPoints<PointT>> ghosts,
-                         std::shared_ptr<const SubdomainGrid<PointT>> grid, subdomain_t subdomain)
-        : points_(std::move(points)), ghosts_(std::move(ghosts)), grid_(std::move(grid)), subdomain_(subdomain)
-    {}
+    SubdomainRangeFinder(std::shared_ptr<const RangeFinder<PointT>> points, std::shared_ptr<const RankGhostPoints<PointT>> ghosts, std::shared_ptr<const SubdomainGrid<PointT>> grid, subdomain_t subdomain) : points_(std::move(points)), ghosts_(std::move(ghosts)), grid_(std::move(grid)), subdomain_(subdomain)
+    {
+    }
 
-    std::vector<size_t> range(const PointT &center, coord_type radius, size_t N,
-                              const typename RangeFinder<PointT>::template _set<size_t> &ignore) const override
+    std::vector<size_t> range(const PointT &center, coord_type radius, size_t N, const typename RangeFinder<PointT>::template _set<size_t> &ignore) const override
     {
         const typename SubdomainGrid<PointT>::Reach reach = this->grid_->MayHold(center, radius, this->subdomain_);
         std::vector<size_t> result;
         if(reach.otherSubdomains)
+        {
             result = this->points_->range(center, radius, N, ignore);
+        }
         if(reach.otherRanks)
+        {
             this->ghosts_->Range(center, radius, N - std::min(N, result.size()), ignore, result);
+        }
         return result;
     }
 
-    std::vector<size_t> closestPointInSphere(const PointT &center, coord_type radius, const PointT &point,
-                                             const typename RangeFinder<PointT>::template _set<size_t> &ignore) const override
+    std::vector<size_t> closestPointInSphere(const PointT &center, coord_type radius, const PointT &point, const typename RangeFinder<PointT>::template _set<size_t> &ignore) const override
     {
         const typename SubdomainGrid<PointT>::Reach reach = this->grid_->MayHold(center, radius, this->subdomain_);
         std::vector<size_t> result;
         if(reach.otherSubdomains)
+        {
             result = this->points_->closestPointInSphere(center, radius, point, ignore);
+        }
         if(not reach.otherRanks)
+        {
             return result;
+        }
         const std::pair<std::size_t, coord_type> ghost = this->ghosts_->ClosestInSphere(center, radius, point, ignore);
         if(ghost.first != RankGhostPoints<PointT>::NONE)
         {
             const bool closer = result.empty() or ghost.second < SquaredDistance(this->points_->getPoint(result.front()), point);
             if(closer)
+            {
                 result.assign(1, ghost.first);
+            }
         }
         return result;
     }

@@ -21,12 +21,7 @@ void Check(bool condition, int rank, int &failures, const std::string &message)
     std::cerr << "rank " << rank << ": " << message << std::endl;
 }
 
-int RunOwnershipChecks(MadVoro::regression_tests::VoronoiGrid &grid,
-                       bool periodic,
-                       std::uint64_t seed,
-                       std::size_t numQueries,
-                       int rank,
-                       int nprocs)
+int RunOwnershipChecks(MadVoro::regression_tests::VoronoiGrid &grid, bool periodic, std::uint64_t seed, std::size_t numQueries, int rank, int nprocs)
 {
     const Vector3D ll(0.0, 0.0, 0.0);
     const Vector3D ur(1.0, 1.0, 1.0);
@@ -38,11 +33,7 @@ int RunOwnershipChecks(MadVoro::regression_tests::VoronoiGrid &grid,
     std::vector<Vector3D> meshPoints;
     if(rank == 0)
     {
-        meshPoints = MadVoro::regression_tests::RandRectangular(
-            nprocs > 1 ? static_cast<std::size_t>(20000) : static_cast<std::size_t>(5000),
-            ll,
-            ur,
-            seed);
+        meshPoints = MadVoro::regression_tests::RandRectangular(nprocs > 1 ? static_cast<std::size_t>(20000) : static_cast<std::size_t>(5000), ll, ur, seed);
     }
     meshPoints = MadVoro::regression_tests::SpreadPointsFromRoot(meshPoints, rank);
     MadVoro::regression_tests::BuildVoronoiMesh(grid, meshPoints);
@@ -82,7 +73,7 @@ int RunOwnershipChecks(MadVoro::regression_tests::VoronoiGrid &grid,
         {
             continue;
         }
-        if(!grid.PointInMyDomain(query))
+        if(not grid.PointInMyDomain(query))
         {
             ++skippedQueries;
             continue;
@@ -92,13 +83,11 @@ int RunOwnershipChecks(MadVoro::regression_tests::VoronoiGrid &grid,
         const std::size_t bruteForce = MadVoro::regression_tests::FindOwnedCellBruteForce(grid, query);
         {
             std::ostringstream msg;
-            msg << "query " << queryIdx << " GetContainingCell=" << containing
-                << " brute_force=" << bruteForce;
+            msg << "query " << queryIdx << " GetContainingCell=" << containing << " brute_force=" << bruteForce;
             Check(bruteForce != static_cast<std::size_t>(-2), rank, failures, msg.str() + " (multiple owned matches)");
             Check(bruteForce == containing, rank, failures, msg.str());
         }
-        Check(grid.IsPointInCell(query, containing), rank, failures,
-              "GetContainingCell result failed IsPointInCell");
+        Check(grid.IsPointInCell(query, containing), rank, failures, "GetContainingCell result failed IsPointInCell");
         ++verifiedQueries;
     }
 
@@ -111,9 +100,7 @@ int RunOwnershipChecks(MadVoro::regression_tests::VoronoiGrid &grid,
 
     if(rank == 0)
     {
-        std::cout << (periodic ? "periodic" : "aperiodic")
-                  << " verified_queries=" << globalVerified
-                  << " skipped_queries=" << globalSkipped << std::endl;
+        std::cout << (periodic ? "periodic" : "aperiodic") << " verified_queries=" << globalVerified << " skipped_queries=" << globalSkipped << std::endl;
     }
 
     return globalFailures;
@@ -144,21 +131,11 @@ int main(int argc, char **argv)
     {
         if(totalFailures == 0)
         {
-            std::cout << "voronoi_parallel_check PASS"
-                      << " seed=" << seed
-                      << " queries=" << numQueries
-                      << " aperiodic_failures=" << aperiodicFailures
-                      << " periodic_failures=" << periodicFailures
-                      << std::endl;
+            std::cout << "voronoi_parallel_check PASS" << " seed=" << seed << " queries=" << numQueries << " aperiodic_failures=" << aperiodicFailures << " periodic_failures=" << periodicFailures << std::endl;
         }
         else
         {
-            std::cerr << "voronoi_parallel_check FAIL"
-                      << " seed=" << seed
-                      << " queries=" << numQueries
-                      << " aperiodic_failures=" << aperiodicFailures
-                      << " periodic_failures=" << periodicFailures
-                      << std::endl;
+            std::cerr << "voronoi_parallel_check FAIL" << " seed=" << seed << " queries=" << numQueries << " aperiodic_failures=" << aperiodicFailures << " periodic_failures=" << periodicFailures << std::endl;
         }
     }
 

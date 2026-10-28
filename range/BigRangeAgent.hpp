@@ -16,6 +16,7 @@
 #endif // MADVORO_WITH_MPI
 
 #include "RangeQueryData.h"
+#include "ParallelAnswers.hpp"
 
 template <typename PointT>
 struct BigRangeQueryData : public RangeQueryData<PointT>
@@ -93,12 +94,40 @@ private:
         {
             int code = ImageCode(query.imageTranslation);
             std::unordered_set<size_t> &ignore = ignoreSets[code];
-            std::vector<size_t> indicesResult = this->rangeFinder->closestPointInSphere(PointT(query.center.x, query.center.y, query.center.z), query.radius, PointT(query.originalPoint.x, query.originalPoint.y, query.originalPoint.z), ignore);
+            std::vector<size_t> indicesResult = this->Find(query, ignore);
             ignore.insert(indicesResult.begin(), indicesResult.end());
             return indicesResult;
         }
 
+        // the point in the query's sphere closest to its point that `ignore` does not have (if any)
+        std::vector<size_t> Find(const BigRangeQueryData<PointT> &query, const std::unordered_set<size_t> &ignore) const
+        {
+            return this->rangeFinder->closestPointInSphere(PointT(query.center.x, query.center.y, query.center.z), query.radius, PointT(query.originalPoint.x, query.originalPoint.y, query.originalPoint.z), ignore);
+        }
+
+        // the answers to the rank's own queries, as one after the other would (an answer has at most one point: one taken before is asked again)
+        std::vector<std::vector<size_t>> selfBatchAnswer(const std::vector<BigRangeQueryData<PointT>> &queries, std::array<std::unordered_set<size_t>, NUM_IMAGE_CODES> &ignoreSets)
+        {
+            return range_detail::ParallelAnswers(queries.size(), [&](std::size_t i, const std::unordered_set<size_t> &ignore) { return this->Find(queries[i], ignore); }, [&](std::size_t i) -> std::unordered_set<size_t> & { return ignoreSets[ImageCode(queries[i].imageTranslation)]; }, [](std::size_t) { return std::size_t(1); }, [](std::size_t, std::vector<size_t> &found, std::unordered_set<size_t> &ignore)
+            {
+                ignore.insert(found.begin(), found.end());
+            });
+        }
+
         #ifdef MADVORO_WITH_MPI
+            // the answers to other ranks' queries, as one after the other would
+            void answerBatch(const std::vector<const BigRangeQueryData<PointT> *> &queries, const std::vector<int> &ranks, std::vector<std::vector<PointT>> &results) override
+            {
+                results.assign(queries.size(), std::vector<PointT>());
+                range_detail::ParallelAnswers(queries.size(), [&](std::size_t i, const SentPointsContainer::PointsSet &ignore) { return this->Find(*queries[i], ignore); }, [&](std::size_t i) -> const SentPointsContainer::PointsSet & { return this->pointsContainer.getSentDataSetRank(ranks[i], ImageCode(queries[i]->imageTranslation)); }, [](std::size_t) { return std::size_t(1); }, [&](std::size_t i, std::vector<size_t> &found, const SentPointsContainer::PointsSet &)
+                {
+                    for(const size_t &pointIdx : this->pointsContainer.addPointsAsSent(ranks[i], found, ImageCode(queries[i]->imageTranslation)))
+                    {
+                        results[i].push_back(this->rangeFinder->getPoint(pointIdx) + queries[i]->imageTranslation);
+                    }
+                });
+            }
+
             std::vector<PointT> answer(const BigRangeQueryData<PointT> &query, int _rank) override
             {
                 int code = ImageCode(query.imageTranslation);
@@ -295,12 +324,7 @@ public:
 
     std::vector<std::vector<size_t>> selfBatchAnswer(const std::vector<BigRangeQueryData<PointT>> &bigQueriesBatch, std::array<std::unordered_set<size_t>, NUM_IMAGE_CODES> &ignoreSets)
     {
-        std::vector<std::vector<size_t>> result;
-        for(const BigRangeQueryData<PointT> &query : bigQueriesBatch)
-        {
-            result.emplace_back(this->ansAgent->selfAnswer(query, ignoreSets));
-        }
-        return result;
+        return this->ansAgent->selfBatchAnswer(bigQueriesBatch, ignoreSets);
     }
 
     #ifdef MADVORO_WITH_MPI

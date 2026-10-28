@@ -14,29 +14,14 @@ namespace MadVoro
 namespace Geometry
 {
 
-/*! \brief Outcome of computing one item (a tetrahedron's circumcenter, or one cell's
-    faces) in a portable kernel. NeedsHost marks an item the kernel could not finish,
-    e.g. a near-degenerate tetrahedron that needs extended precision; the host then
-    recomputes it with the existing code. */
+//! \brief NeedsHost marks an item the kernel could not finish (e.g. needs extended precision); the host recomputes it.
 enum class GeometryStatus : std::uint8_t
 {
     Ok = 0,
     NeedsHost = 1
 };
 
-/*! \brief View of a flat Voronoi tessellation: raw pointers and sizes only, so it can
-    be copied into a kernel. The pointers may refer to host or device memory.
-    FlatVoronoiView is writable (for the kernels that fill it) and ConstFlatVoronoiView
-    is read-only (for its users); a writable view converts to a read-only one.
-
-    Layout, with C cells (the owned points), F faces and T tetrahedra:
-    - cell c has faces cellFaces[cellFaceOffsets[c] .. cellFaceOffsets[c + 1])  (CSR)
-    - face f has vertices faceVertices[faceVertexOffsets[f] .. faceVertexOffsets[f + 1]),
-      in right-hand order with respect to faceNeighbor0[f]  (CSR)
-    - a face vertex is a tetrahedron index t, located at vertices[t] (the circumcenter)
-    - faceNeighbor0/1[f] are the two mesh points the face separates
-    - per face: faceArea, faceCM;  per cell: cellVolume, cellCM, maxRadius, cellStatus;
-      per tetrahedron: vertices, tetraRadius, tetraStatus */
+//! \brief CSR cell faces and face vertices (a vertex is a tetrahedron index, right-hand order w.r.t. faceNeighbor0).
 template<bool IsConst>
 struct BasicFlatVoronoiView
 {
@@ -64,16 +49,9 @@ struct BasicFlatVoronoiView
 
     BasicFlatVoronoiView() = default;
 
-    //! \brief Read-only view of a writable one.
-    template<bool OtherConst, typename = std::enable_if_t<IsConst && !OtherConst>>
+    template<bool OtherConst, typename = std::enable_if_t<IsConst and not OtherConst>>
     MADVORO_INLINE_FUNCTION BasicFlatVoronoiView(const BasicFlatVoronoiView<OtherConst> &other)
-        : cellFaceOffsets(other.cellFaceOffsets), cellFaces(other.cellFaces),
-          faceVertexOffsets(other.faceVertexOffsets), faceVertices(other.faceVertices),
-          faceNeighbor0(other.faceNeighbor0), faceNeighbor1(other.faceNeighbor1),
-          faceArea(other.faceArea), faceCM(other.faceCM), cellVolume(other.cellVolume),
-          cellCM(other.cellCM), maxRadius(other.maxRadius), cellStatus(other.cellStatus),
-          vertices(other.vertices), tetraRadius(other.tetraRadius), tetraStatus(other.tetraStatus),
-          cellCount(other.cellCount), faceCount(other.faceCount), tetraCount(other.tetraCount)
+        : cellFaceOffsets(other.cellFaceOffsets), cellFaces(other.cellFaces), faceVertexOffsets(other.faceVertexOffsets), faceVertices(other.faceVertices), faceNeighbor0(other.faceNeighbor0), faceNeighbor1(other.faceNeighbor1), faceArea(other.faceArea), faceCM(other.faceCM), cellVolume(other.cellVolume), cellCM(other.cellCM), maxRadius(other.maxRadius), cellStatus(other.cellStatus), vertices(other.vertices), tetraRadius(other.tetraRadius), tetraStatus(other.tetraStatus), cellCount(other.cellCount), faceCount(other.faceCount), tetraCount(other.tetraCount)
     {
     }
 
@@ -97,7 +75,6 @@ struct BasicFlatVoronoiView
         return this->faceVertices[this->faceVertexOffsets[face] + k];
     }
 
-    //! \brief The neighbor of `cell` across `face`.
     MADVORO_INLINE_FUNCTION flat_index_t OtherSide(flat_index_t face, flat_index_t cell) const
     {
         return (this->faceNeighbor0[face] == cell) ? this->faceNeighbor1[face] : this->faceNeighbor0[face];
@@ -110,7 +87,6 @@ using ConstFlatVoronoiView = BasicFlatVoronoiView<true>;
 static_assert(std::is_trivially_copyable<FlatVoronoiView>::value, "FlatVoronoiView must be trivially copyable");
 static_assert(std::is_trivially_copyable<ConstFlatVoronoiView>::value, "ConstFlatVoronoiView must be trivially copyable");
 
-//! \brief Host storage of a flat Voronoi tessellation (layout as in BasicFlatVoronoiView).
 struct FlatVoronoi
 {
     std::vector<flat_index_t> cellFaceOffsets;
@@ -128,7 +104,7 @@ struct FlatVoronoi
     std::vector<FlatPoint> vertices;
     std::vector<double> tetraRadius;
     std::vector<GeometryStatus> tetraStatus;
-    //! \brief The cells in the order they were built (a Hilbert order), for cache-friendly traversal on the host
+    //! \brief The cells in the order they were built (a Hilbert order).
     std::vector<flat_index_t> cellOrder;
 
     flat_index_t CellCount() const { return this->cellVolume.size(); }
@@ -137,7 +113,6 @@ struct FlatVoronoi
 
     flat_index_t TetraCount() const { return this->vertices.size(); }
 
-    //! \brief Sizes the per-cell and per-tetrahedron arrays, and the cell offsets.
     void ResizeCellsAndTetras(flat_index_t cellCount, flat_index_t tetraCount)
     {
         this->cellFaceOffsets.assign(cellCount + 1, 0);
@@ -150,7 +125,6 @@ struct FlatVoronoi
         this->tetraStatus.assign(tetraCount, GeometryStatus::Ok);
     }
 
-    //! \brief Sizes the per-face arrays and the face offsets.
     void ResizeFaces(flat_index_t faceCount)
     {
         this->faceVertexOffsets.assign(faceCount + 1, 0);
@@ -190,12 +164,7 @@ struct FlatVoronoi
     }
 };
 
-/*! \brief Builds the flat layout of an existing tessellation through its public
-    accessors (GetPointNo, GetTotalFacesNumber, GetCellFaces, GetPointsInFace,
-    GetFaceNeighbors, GetArea, FaceCM, GetVolume, GetCellCM, GetFacePoints), so it
-    works for MadVoro::Voronoi3D and for RICH's Tessellation3D alike.
-    Face and vertex numbering is kept. Tetrahedron radii and per-cell max radii are
-    not part of that interface and are left zero. */
+//! \brief Through the public accessors (Voronoi3D or Tessellation3D); radii are left zero.
 template<typename TessellationT>
 FlatVoronoi MakeFlatVoronoi(const TessellationT &tess)
 {

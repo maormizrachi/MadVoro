@@ -1,0 +1,7 @@
+# Building cells by clipping gives the cells of the Delaunay builder (neighbors, volumes and centroids), serial and on several ranks
+TAGS="serial mpi"
+CATEGORY="code_correctness"
+CHECK_FUNCTION="check_voronoi_clipping_builder_case"
+TIMEOUT=1800
+MPI_NP=8
+SLURM_PARTITION=bigrun

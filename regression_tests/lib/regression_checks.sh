@@ -300,6 +300,56 @@ check_voronoi_thread_subdomains_mpi_case() {
     return 0
 }
 
+check_voronoi_clipping_builder_case() {
+    local run_dir="$1"
+    local start_epoch="$2"
+    local stdout_log="$3"
+    local stderr_log="$4"
+    local metrics_file="${run_dir}/voronoi_clipping_builder_metrics.txt"
+    local pass_flag
+
+    check_no_fatal_markers "$stdout_log" "$stderr_log" || return 1
+    is_nonempty_and_newer "$metrics_file" "$start_epoch" || return 1
+
+    pass_flag=$(awk '$1 == "pass" { print $2 }' "$metrics_file")
+    if [[ -z "$pass_flag" ]]; then
+        REGRESSION_CHECK_MSG="failed to parse voronoi clipping builder metrics"
+        return 1
+    fi
+    if [[ "$pass_flag" != "1" ]]; then
+        REGRESSION_CHECK_MSG="voronoi_clipping_builder: clipped cells differ from the Delaunay builder's ($(awk '$1 == "failed" { print $2 }' "$metrics_file" | tr '\n' ' '))"
+        return 1
+    fi
+
+    REGRESSION_CHECK_MSG="PASS (clipped cells match the Delaunay builder's)"
+    return 0
+}
+
+check_voronoi_clipping_cartesian_case() {
+    local run_dir="$1"
+    local start_epoch="$2"
+    local stdout_log="$3"
+    local stderr_log="$4"
+    local metrics_file="${run_dir}/voronoi_clipping_cartesian_metrics.txt"
+    local pass_flag
+
+    check_no_fatal_markers "$stdout_log" "$stderr_log" || return 1
+    is_nonempty_and_newer "$metrics_file" "$start_epoch" || return 1
+
+    pass_flag=$(awk '$1 == "pass" { print $2 }' "$metrics_file")
+    if [[ -z "$pass_flag" ]]; then
+        REGRESSION_CHECK_MSG="failed to parse voronoi clipping cartesian metrics"
+        return 1
+    fi
+    if [[ "$pass_flag" != "1" ]]; then
+        REGRESSION_CHECK_MSG="voronoi_clipping_cartesian: clipped cells are not the grid's cubes ($(awk '$1 == "failed" { print $2 }' "$metrics_file" | tr '\n' ' '))"
+        return 1
+    fi
+
+    REGRESSION_CHECK_MSG="PASS (clipped cells are the grid's cubes in every build)"
+    return 0
+}
+
 check_voronoi_geometry_backends_case() {
     local run_dir="$1"
     local start_epoch="$2"
