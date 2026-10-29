@@ -2916,28 +2916,35 @@ void Voronoi3D<PointT>::MockMesh(void)
     _prof("MirrorsExchange", std::chrono::duration<double>(_t1 - _t0).count());
     _t0 = std::chrono::high_resolution_clock::now();
 #endif
+    // Each old point sends every mirror among its neighbors to its new owner, so a mirror that two old cells share (a wall
+    // mirror also touched through a degenerate zero-area face, or a box mirror of two cells), possibly on two old ranks,
+    // arrives more than once: insert each mirror once, over all senders (a repeated point aborts the build).
+    std::set<std::array<double, 3>> seenMirrors;
+    std::vector<PointT> uniqueMirrors;
     for(const auto &[_senderRank, incomingMirrors] : _mirrorsResult)
     {
-        if(this->Norg_ > 0 && !incomingMirrors.empty())
+        for(const PointT &mirror : incomingMirrors)
         {
-            if(this->planeMesh_)
+            // BuildLocalPlane recreated the wall mirrors: a plane build keeps only the in-plane box mirrors
+            if(this->planeMesh_ and mirror.z != 0)
             {
-                // BuildLocalPlane recreated the wall mirrors; keep each in-plane box mirror once (two old cells can share one)
-                std::set<std::array<double, 3>> seen;
-                std::vector<PointT> inPlaneMirrors;
-                for(const PointT &mirror : incomingMirrors)
-                {
-                    if(mirror.z == 0 and seen.insert({mirror.x, mirror.y, mirror.z}).second)
-                    {
-                        inPlaneMirrors.push_back(mirror);
-                    }
-                }
-                this->BuildExtraTracked(inPlaneMirrors);
+                continue;
             }
-            else
+            if(seenMirrors.insert({mirror.x, mirror.y, mirror.z}).second)
             {
-                this->del_.BuildExtra(incomingMirrors);
+                uniqueMirrors.push_back(mirror);
             }
+        }
+    }
+    if(this->Norg_ > 0 && !uniqueMirrors.empty())
+    {
+        if(this->planeMesh_)
+        {
+            this->BuildExtraTracked(uniqueMirrors);
+        }
+        else
+        {
+            this->del_.BuildExtra(uniqueMirrors);
         }
     }
 #ifdef TIMING
