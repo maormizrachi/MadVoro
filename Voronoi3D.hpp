@@ -5180,7 +5180,20 @@ void Voronoi3D<PointT>::BuildPlaneFaces(void)
         {
             reach = std::max(reach, std::hypot(del_.points_[other].x - point.x, del_.points_[other].y - point.y));
         }
-        const double half = 10 * reach;
+        // In the plane mesh the cell's Voronoi vertices are the circumcentres of its triangles, and with flat triangles
+        // they are much farther than 10 neighbour distances (a nearly collinear row of generators at the hot slab edge,
+        // 2026-10-22: circumradius 0.026 next to neighbours 1.2e-3 away), so the rectangle covers them too
+        double vertexReach = 0;
+        if(this->planeMesh_)
+        {
+            for(const size_t &triangleIdx : PointTetras_[cell])
+            {
+                double cx = 0, cy = 0, radius = 0;
+                this->plane_.Circumcircle(triangleIdx, cx, cy, radius);
+                vertexReach = std::max(vertexReach, std::hypot(cx - point.x, cy - point.y));
+            }
+        }
+        const double half = std::max(10 * reach, 2 * vertexReach);
         polygon = {{point.x - half, 0}, {point.x + half, 0}, {point.x + half, point.y + half}, {point.x - half, point.y + half}};
         labels = {axisEdge, openEdge, openEdge, openEdge}; // labels[k]: what made the edge from polygon[k] to polygon[k + 1]
         for(const size_t &other : inPlane)
@@ -5236,6 +5249,33 @@ void Voronoi3D<PointT>::BuildPlaneFaces(void)
             eo.addEntry("Point", point);
             eo.addEntry("Polygon vertices", n);
             eo.addEntry("In-plane neighbors", inPlane.size());
+            // What surrounds the cell: its in-plane neighbors, the vertices of its triangles (super-triangle corners and
+            // labels past the point store are not neighbors) and the rectangle sides that survived the clipping
+            eo.addEntry("Norg", Norg_);
+            eo.addEntry("Point store size", del_.points_.size());
+            for(const size_t &other : inPlane)
+            {
+                eo.addEntry("neighbor " + std::to_string(other), del_.points_[other]);
+            }
+            if(this->planeMesh_)
+            {
+                for(const size_t &triangleIdx : PointTetras_[cell])
+                {
+                    double cx = 0, cy = 0, radius = 0;
+                    this->plane_.Circumcircle(triangleIdx, cx, cy, radius);
+                    std::string vertices;
+                    for(const size_t &vertex : this->plane_.Triangles()[triangleIdx].vertices)
+                    {
+                        vertices += (this->plane_.IsSuper(vertex) ? " super " : " ") + std::to_string(this->plane_.Label(vertex));
+                    }
+                    eo.addEntry("triangle " + std::to_string(triangleIdx) + " labels" + vertices + ", circumradius", radius);
+                }
+            }
+            for(size_t k = 0; k < n; ++k)
+            {
+                eo.addEntry("polygon " + std::to_string(k) + (labels[k] == openEdge ? " (open side) x" : " x"), polygon[k][0]);
+                eo.addEntry("polygon " + std::to_string(k) + " y", polygon[k][1]);
+            }
             throw eo;
         }
 
