@@ -41,6 +41,7 @@
 
 #include <optional>
 #include "VoronoiPayload.hpp"
+#include "PartialBuildTrace.hpp"
 #include "types.hpp"
 #include "elementary/Face3D.hpp"
 #include "delaunay/Delaunay3D.hpp"
@@ -139,6 +140,17 @@ private:
   std::size_t Norg_, bigtet_;
   std::array<double, 7> partialBuildStageSeconds_{};
   size_t lastGhostIterations_ = 0;
+  // Remote ghost batches the last BringGhostPointsToBuild skipped because the round's emptiness vote showed them empty
+  // on every rank: [0] big (closest-point) batches, [1] small (range) batches. The same on every rank.
+  std::array<size_t, 2> LastGhostSkippedBatches_{};
+  // Partial-build diagnostics (SetPartialBuildTraceLevel): the level, the record of the last BuildPartiallyParallel
+  // call, and the accumulators of the call in progress. Recording is active only inside BuildPartiallyParallel at a
+  // level above 0; it reads clocks and local state and never adds communication.
+  int PartialBuildTraceLevel_ = 0;
+  bool PartialBuildTraceActive_ = false;
+  PartialBuildTrace PartialBuildTrace_;
+  PartialBuildTraceDetail::PrepareRecord TracePrepare_{};
+  std::vector<PartialBuildTraceDetail::RoundRecord> TraceRounds_;
   // Diagnostic-only reductions in the ghost rounds: agreed at the parallel build entry (BuildPartiallyParallel);
   // in a local build the communicator is MPI_COMM_SELF, where either value is safe.
   bool detailedReductions_ = false;
@@ -198,7 +210,8 @@ private:
                               BigRangeAgent<PointT> &bigRangeAgent, SmallRangeAgent<PointT> &smallRangeAgent,
                               boost::container::flat_map<size_t, size_t> &numOfResultsForBigPoints,
                               boost::container::flat_map<size_t, size_t> &numOfResultsForSmallPoints,
-                              std::unordered_set<size_t> &selfIgnorePoints);
+                              std::unordered_set<size_t> &selfIgnorePoints,
+                              PartialBuildTraceDetail::RoundRecord *TraceRound = nullptr);
     
   #ifdef MADVORO_WITH_MPI
     void BringGhostPointsToBuild(const MPI_Comm &comm);
@@ -228,13 +241,21 @@ private:
     std::vector<PointT> PrepareToBuildParallel(const std::vector<PointT> &allPoints, const std::vector<double> &allWeights, const std::vector<size_t> &indicesToBuild, bool suppressRebalancing, bool suppressExchange);
     void FilterRealGhostPoints();
     void UpdateDuplicatedPoints(const std::vector<int> &sentProc, const std::vector<std::vector<size_t>> &sentPoints);
-    std::tuple<std::vector<PointT>, std::vector<std::vector<size_t>>, std::vector<std::vector<size_t>>> InitialGhostPointsExchange(const MPI_Comm &comm = MPI_COMM_WORLD) const;
+    std::tuple<std::vector<PointT>, std::vector<std::vector<size_t>>, std::vector<std::vector<size_t>>> InitialGhostPointsExchange(const MPI_Comm &comm = MPI_COMM_WORLD,
+        PartialBuildTraceDetail::PrepareRecord *TracePrepare = nullptr) const;
     void InitialExchange(const std::vector<PointT> &points, std::vector<int> &sentProc, std::vector<std::vector<size_t>> &sentPoints, const MPI_Comm &comm = MPI_COMM_WORLD);
     void SetGhostArray(const std::vector<int> &recvProc, const std::vector<std::vector<size_t>> &recvPoints);  
     void BringRemoteGhostPoints(const std::vector<BigRangeQueryData<PointT>> &bigQueries, const std::vector<SmallRangeQueryData<PointT>> &smallQueries,
                                       BigRangeAgent<PointT> &bigRangeAgent, SmallRangeAgent<PointT> &smallRangeAgent,
                                       boost::container::flat_map<size_t, size_t> &numOfResultsForBigPoints,
-                                      boost::container::flat_map<size_t, size_t> &numOfResultsForSmallPoints);
+                                      boost::container::flat_map<size_t, size_t> &numOfResultsForSmallPoints,
+                                      bool RunBigBatch = true, bool RunSmallBatch = true,
+                                      PartialBuildTraceDetail::RoundRecord *TraceRound = nullptr);
+    // Diagnostics: peer counts and the order digests of duplicatedprocs_, duplicated_points_ and Nghost_.
+    void RecordGhostDigests(PartialBuildTraceDetail::PrepareRecord &Prepare) const;
+    // Diagnostics: addresses of the environment agent and, for a distributed-oct agent, of its routing tree; returns
+    // whether the agent is a distributed-oct agent. Reads only.
+    bool ReadRoutingIdentity(const void *&Agent, const void *&Tree) const;
   #endif // MADVORO_WITH_MPI
 
   Delaunay3D<PointT> del_;
@@ -296,8 +317,10 @@ private:
   std::vector<size_t> allMyPointInputIndices;
 
 
+  // BarrierWaitSeconds (diagnostics only): when non-null, the seconds of the exchange's closing barrier are added.
   template<typename T>
-  void SyncPartialBuildData(std::vector<T> &partialBuildData, std::vector<T> &allBuildData) const;
+  void SyncPartialBuildData(std::vector<T> &partialBuildData, std::vector<T> &allBuildData,
+                            double *BarrierWaitSeconds = nullptr) const;
 
   size_t buildGeneration_ = 0;
 
@@ -352,6 +375,14 @@ public:
 
   size_t GetBuildGeneration(void) const { return buildGeneration_; }
 
+  // Diagnostics of BuildPartiallyParallel (PartialBuildTrace.hpp): 0 off (default), 1 aggregates, 2 detail. MadVoro
+  // records the same per-rank values at levels 1 and 2; the level only tells the caller how much to report. Recording
+  // adds no communication and no floating-point work to the build. The record is reset by every BuildPartiallyParallel
+  // call, which then leaves exactly one attempt in it (itself) when the level is above 0 and none otherwise.
+  void SetPartialBuildTraceLevel(int Level) { PartialBuildTraceLevel_ = Level; }
+  int GetPartialBuildTraceLevel(void) const { return PartialBuildTraceLevel_; }
+  PartialBuildTrace const& GetPartialBuildTrace() const { return PartialBuildTrace_; }
+
   void ReleaseMemory(void);
 
   void BuildPartially(const std::vector<PointT> &allPoints, const std::vector<size_t> &indicesToBuild);
@@ -395,6 +426,8 @@ public:
   // ghost-point rounds.  Diagnostics only.
   const std::array<double, 7> &GetPartialBuildStageSeconds(void) const { return partialBuildStageSeconds_; }
   size_t GetLastGhostIterations(void) const { return lastGhostIterations_; }
+  // Remote ghost batches skipped by the last ghost loop as globally empty: [0] big, [1] small (no communication).
+  const std::array<size_t, 2> &GetLastGhostSkippedBatches(void) const { return LastGhostSkippedBatches_; }
 
   std::vector<PointT> BuildPartiallyParallel(const std::vector<PointT> &allPoints, const std::vector<size_t> &indicesToBuild, bool suppressRebalancing = false, bool suppressExchange = false)
   {
@@ -1494,8 +1527,17 @@ inline void Voronoi3D<PointT>::SetImbalanceTolerance(double tolerance)
 
 template <typename PointT>
 std::tuple<std::vector<PointT>, std::vector<std::vector<size_t>>, std::vector<std::vector<size_t>>>
-    Voronoi3D<PointT>::InitialGhostPointsExchange(const MPI_Comm &comm) const
+    Voronoi3D<PointT>::InitialGhostPointsExchange(const MPI_Comm &comm,
+                                                  PartialBuildTraceDetail::PrepareRecord *TracePrepare) const
 {
+    // Diagnostics (TracePrepare non-null): clock reads only.
+    namespace Pbt = PartialBuildTraceDetail;
+    Pbt::Clock::time_point TraceMark;
+    if(TracePrepare != nullptr)
+    {
+        TraceMark = Pbt::Clock::now();
+    }
+
     int size;
     MPI_Comm_size(comm, &size);
 
@@ -1530,7 +1572,15 @@ std::tuple<std::vector<PointT>, std::vector<std::vector<size_t>>, std::vector<st
 
     int globalHasData = 0;
     int localHasData = hasAnythingToSend ? 1 : 0;
+    if(TracePrepare != nullptr)
+    {
+        (*TracePrepare)[Pbt::PrepareField::GhostSetupS] += Pbt::Lap(TraceMark);
+    }
     MPI_Allreduce(&localHasData, &globalHasData, 1, MPI_INT, MPI_MAX, comm);
+    if(TracePrepare != nullptr)
+    {
+        (*TracePrepare)[Pbt::PrepareField::GhostEntryVoteWaitS] += Pbt::Lap(TraceMark);
+    }
 
     if(globalHasData == 0)
     {
@@ -1556,6 +1606,12 @@ std::tuple<std::vector<PointT>, std::vector<std::vector<size_t>>, std::vector<st
             totalSize++;
         }
         ghostPoints.insert(ghostPoints.end(), receivedFromRank.begin(), receivedFromRank.end());
+    }
+
+    if(TracePrepare != nullptr)
+    {
+        (*TracePrepare)[Pbt::PrepareField::GhostInitialExchangeS] += Pbt::Lap(TraceMark);
+        (*TracePrepare)[Pbt::PrepareField::GhostInitialPoints] += static_cast<double>(ghostPoints.size());
     }
 
     return std::tuple(ghostPoints, sentPointsIndices, recvPointsIndices);
@@ -1856,6 +1912,16 @@ std::vector<PointT> Voronoi3D<PointT>::PrepareToBuildParallel(const std::vector<
 
     rank_t rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+    // Diagnostics (SetPartialBuildTraceLevel): clock reads and reads of local state only.
+    namespace Pbt = PartialBuildTraceDetail;
+    const bool Tracing = this->PartialBuildTraceActive_;
+    Pbt::PrepareRecord &TracePrepare = this->TracePrepare_;
+    Pbt::Clock::time_point TraceMark;
+    if(Tracing)
+    {
+        TraceMark = Pbt::Clock::now();
+    }
     
     int canDoRebalance = ((not suppressRebalancing) and (indicesToBuild.size() == allPoints.size()))? 1 : 0;
     MPI_Allreduce(MPI_IN_PLACE, &canDoRebalance, 1, MPI_INT, MPI_LAND, MPI_COMM_WORLD);
@@ -1865,6 +1931,14 @@ std::vector<PointT> Voronoi3D<PointT>::PrepareToBuildParallel(const std::vector<
     MPI_Allreduce(MPI_IN_PLACE, &canDoExchange, 1, MPI_INT, MPI_LAND, MPI_COMM_WORLD);
     bool allowExchange = (canDoExchange == 1);
 
+    if(Tracing)
+    {
+        TracePrepare[Pbt::PrepareField::PrepReduceWaitS] += Pbt::Lap(TraceMark);
+        TracePrepare[Pbt::PrepareField::PrepAllowRebalance] = allowRebalance ? 1 : 0;
+        TracePrepare[Pbt::PrepareField::PrepAllowExchange] = allowExchange ? 1 : 0;
+        TracePrepare[Pbt::PrepareField::PrepInputPoints] = static_cast<double>(allPoints.size());
+    }
+
     if(suppressExchange)
         this->allPointsWeights.resize(allPoints.size(), 1.0);
 
@@ -1872,7 +1946,31 @@ std::vector<PointT> Voronoi3D<PointT>::PrepareToBuildParallel(const std::vector<
     for(size_t i = 0; i < allPoints.size(); i++)
         payloads[i] = VoronoiPayload<PointT>(this->radiuses[i], this->all_CM[i]);
 
+    const void *TraceAgentBefore = nullptr;
+    const void *TraceTreeBefore = nullptr;
+    if(Tracing)
+    {
+        TracePrepare[Pbt::PrepareField::PrepPayloadPackS] += Pbt::Lap(TraceMark);
+        this->ReadRoutingIdentity(TraceAgentBefore, TraceTreeBefore);
+        TracePrepare[Pbt::PrepareField::TraceOverheadS] += Pbt::Lap(TraceMark);
+    }
+
     PointsExchangeResult<PointT, VoronoiPayload<PointT>> exchangeResult = this->pointsManager->update(allPoints, allowExchange? allWeights : this->allPointsWeights, payloads, indicesToBuild, allowRebalance, allowExchange);
+
+    if(Tracing)
+    {
+        // The routing refresh (DistributedOctEnvironmentAgent::onExchange) runs inside update(); it is seen here only
+        // through its result: the same agent and tree (reused) or a new agent or tree (rebuilt).
+        TracePrepare[Pbt::PrepareField::PrepPointsUpdateS] += Pbt::Lap(TraceMark);
+        const void *TraceAgentAfter = nullptr;
+        const void *TraceTreeAfter = nullptr;
+        const bool OctAgent = this->ReadRoutingIdentity(TraceAgentAfter, TraceTreeAfter);
+        const bool SameRouting = (TraceAgentAfter == TraceAgentBefore) and (TraceTreeAfter == TraceTreeBefore);
+        TracePrepare[Pbt::PrepareField::PrepRoutingOctAgent] = OctAgent ? 1 : 0;
+        TracePrepare[Pbt::PrepareField::PrepRoutingRebuilt] = SameRouting ? 0 : 1;
+        TracePrepare[Pbt::PrepareField::PrepRoutingReused] = (OctAgent and SameRouting) ? 1 : 0;
+        TracePrepare[Pbt::PrepareField::TraceOverheadS] += Pbt::Lap(TraceMark);
+    }
 
     const size_t exchangedPointsSize = exchangeResult.newPoints.size();
     if(exchangeResult.newWeights.size() != exchangedPointsSize ||
@@ -1952,10 +2050,109 @@ std::vector<PointT> Voronoi3D<PointT>::PrepareToBuildParallel(const std::vector<
             new_points.push_back(this->allMyPoints[pointIdx]);
         }
     }
+
+    if(Tracing)
+    {
+        TracePrepare[Pbt::PrepareField::PrepResultUnpackS] += Pbt::Lap(TraceMark);
+    }
     
     this->BuildInitialize(new_points.size());
 
+    if(Tracing)
+    {
+        TracePrepare[Pbt::PrepareField::PrepBuildInitializeS] += Pbt::Lap(TraceMark);
+        TracePrepare[Pbt::PrepareField::PrepOwnedPoints] = static_cast<double>(this->allMyPoints.size());
+        TracePrepare[Pbt::PrepareField::PrepTargetPoints] = static_cast<double>(new_points.size());
+    }
+
     return new_points;
+}
+
+template <typename PointT>
+bool Voronoi3D<PointT>::ReadRoutingIdentity(const void *&Agent, const void *&Tree) const
+{
+    // Addresses only. A rebuilt tree or a replacement agent is constructed while the old one is still owned, so an
+    // unchanged address across an update means the same object.
+    const std::shared_ptr<EnvironmentAgent<PointT>> EnvAgent = this->pointsManager->getEnvironmentAgent();
+    Agent = EnvAgent.get();
+    Tree = nullptr;
+    const DistributedOctEnvironmentAgent<PointT> *OctAgent =
+        dynamic_cast<const DistributedOctEnvironmentAgent<PointT> *>(EnvAgent.get());
+    if(OctAgent == nullptr)
+    {
+        return false;
+    }
+    Tree = OctAgent->getOctTree().get();
+    return true;
+}
+
+template <typename PointT>
+void Voronoi3D<PointT>::RecordGhostDigests(PartialBuildTraceDetail::PrepareRecord &Prepare) const
+{
+    // Peer j of duplicatedprocs_ is send-only when this rank received no ghost from it (Nghost_[j] empty; those peers
+    // are appended by UpdateDuplicatedPoints in SentPointsContainer order) and receive-only when it sent none
+    // (duplicated_points_[j] empty). Sent IDs index this rank's compact allMyPoints, received IDs are Delaunay indices.
+    namespace Pbt = PartialBuildTraceDetail;
+    std::uint64_t PeerOrder = 0;
+    std::uint64_t PeerList = 0;
+    std::uint64_t GhostIds = 0;
+    std::uint64_t SendIds = 0;
+    std::uint64_t RecvIds = 0;
+    // Sent (peer, owned index) pairs, independent of the order of arrival; received indices depend on it.
+    std::uint64_t GhostSet = 0;
+    size_t SendOnly = 0;
+    size_t RecvOnly = 0;
+    size_t PointsSent = 0;
+    size_t PointsReceived = 0;
+    const std::vector<size_t> NoIds;
+    const size_t Peers = this->duplicatedprocs_.size();
+    for(size_t Peer = 0; Peer < Peers; ++Peer)
+    {
+        const std::uint64_t PeerRank = static_cast<std::uint64_t>(this->duplicatedprocs_[Peer]);
+        const std::vector<size_t> &Sent =
+            (Peer < this->duplicated_points_.size()) ? this->duplicated_points_[Peer] : NoIds;
+        const std::vector<size_t> &Received = (Peer < this->Nghost_.size()) ? this->Nghost_[Peer] : NoIds;
+        const bool IsSendOnly = Received.empty();
+        SendOnly += IsSendOnly ? 1 : 0;
+        RecvOnly += Sent.empty() ? 1 : 0;
+        PointsSent += Sent.size();
+        PointsReceived += Received.size();
+        Pbt::DigestAdd(PeerList, PeerRank);
+        Pbt::DigestAdd(PeerList, IsSendOnly ? 1 : 0);
+        if(IsSendOnly)
+        {
+            Pbt::DigestAdd(PeerOrder, PeerRank);
+        }
+        Pbt::DigestAdd(GhostIds, PeerRank);
+        Pbt::DigestAdd(GhostIds, Sent.size());
+        Pbt::DigestAdd(SendIds, PeerRank);
+        Pbt::DigestAdd(SendIds, Sent.size());
+        for(const size_t Id : Sent)
+        {
+            Pbt::DigestAdd(GhostIds, Id);
+            Pbt::DigestAdd(SendIds, Id);
+            Pbt::SetDigestAdd(GhostSet, PeerRank, Id);
+        }
+        Pbt::DigestAdd(GhostIds, Received.size());
+        Pbt::DigestAdd(RecvIds, PeerRank);
+        Pbt::DigestAdd(RecvIds, Received.size());
+        for(const size_t Id : Received)
+        {
+            Pbt::DigestAdd(GhostIds, Id);
+            Pbt::DigestAdd(RecvIds, Id);
+        }
+    }
+    Prepare[Pbt::PrepareField::GhostPeers] = static_cast<double>(Peers);
+    Prepare[Pbt::PrepareField::GhostSendOnlyPeers] = static_cast<double>(SendOnly);
+    Prepare[Pbt::PrepareField::GhostRecvOnlyPeers] = static_cast<double>(RecvOnly);
+    Prepare[Pbt::PrepareField::GhostPointsReceived] = static_cast<double>(PointsReceived);
+    Prepare[Pbt::PrepareField::GhostPointsSent] = static_cast<double>(PointsSent);
+    Prepare[Pbt::PrepareField::PeerOrderDigest] = Pbt::DigestValue(PeerOrder);
+    Prepare[Pbt::PrepareField::GhostIdDigest] = Pbt::DigestValue(GhostIds);
+    Prepare[Pbt::PrepareField::PeerListDigest] = Pbt::DigestValue(PeerList);
+    Prepare[Pbt::PrepareField::GhostSendIdDigest] = Pbt::DigestValue(SendIds);
+    Prepare[Pbt::PrepareField::GhostRecvIdDigest] = Pbt::DigestValue(RecvIds);
+    Prepare[Pbt::PrepareField::GhostSetDigest] = Pbt::DigestValue(GhostSet);
 }
 
 /**
@@ -2035,6 +2232,12 @@ void Voronoi3D<PointT>::UpdatePointsTree(const std::vector<PointT> &activePoints
         this->allMyPointsTree->insert(IVec(point.x, point.y, point.z, pointIdx));
     }
 
+    std::chrono::high_resolution_clock::time_point TraceSplit; // diagnostics: end of the all-owned tree
+    if(this->PartialBuildTraceActive_)
+    {
+        TraceSplit = std::chrono::high_resolution_clock::now();
+    }
+
     if(this->allMyPoints.size() == activePoints.size())
     {
         // not a real parital build
@@ -2051,6 +2254,12 @@ void Voronoi3D<PointT>::UpdatePointsTree(const std::vector<PointT> &activePoints
         }
     }
     auto end = std::chrono::high_resolution_clock::now();
+    if(this->PartialBuildTraceActive_)
+    {
+        namespace Pbt = PartialBuildTraceDetail;
+        this->TracePrepare_[Pbt::PrepareField::TreeAllOwnedS] += Pbt::Seconds(TraceSplit - start);
+        this->TracePrepare_[Pbt::PrepareField::TreeTargetS] += Pbt::Seconds(end - TraceSplit);
+    }
 
     rank_t rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -2082,6 +2291,24 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
             eo.addEntry("Size", allPoints.size());
             throw eo;
         }
+    }
+
+    // Diagnostics (SetPartialBuildTraceLevel): the record is reset by every call. Recording reads clocks and local
+    // state only; it is active until this call returns, also when it throws.
+    namespace Pbt = PartialBuildTraceDetail;
+    this->PartialBuildTrace_.Attempts.clear();
+    this->PartialBuildTraceActive_ = (this->PartialBuildTraceLevel_ > 0);
+    struct TraceActiveReset
+    {
+        bool &Active;
+        ~TraceActiveReset() { Active = false; }
+    } TraceActiveGuard{this->PartialBuildTraceActive_};
+    const bool Tracing = this->PartialBuildTraceActive_;
+    Pbt::Clock::time_point TraceMark;
+    if(Tracing)
+    {
+        this->TracePrepare_.fill(0.0);
+        this->TraceRounds_.clear();
     }
 
     std::chrono::high_resolution_clock::time_point start, end;
@@ -2165,6 +2392,19 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
     this->UpdatePointsTree(activePoints);
     this->partialBuildStageSeconds_[2] = std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - start).count();
     
+    if(Tracing)
+    {
+        // Points about to get a radius seeded from the nearest-neighbour distance (UpdateRadiuses' radius <= 0 test).
+        TraceMark = Pbt::Clock::now();
+        size_t SeededRadii = 0;
+        for(const std::pair<size_t, size_t> &indices : this->indicesInAllMyPoints)
+        {
+            SeededRadii += (this->radiuses[indices.second] <= 0) ? 1 : 0;
+        }
+        this->TracePrepare_[Pbt::PrepareField::SeededRadii] = static_cast<double>(SeededRadii);
+        this->TracePrepare_[Pbt::PrepareField::TraceOverheadS] += Pbt::Lap(TraceMark);
+    }
+
     START_TIMER_PREEMPTIVE("Radiuses calculation");
     start = std::chrono::high_resolution_clock::now();
     this->UpdateRadiuses(activePoints);    
@@ -2194,6 +2434,13 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
     this->BringGhostPointsToBuild(MPI_COMM_WORLD);
     this->partialBuildStageSeconds_[5] = std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - start).count();
 
+    if(Tracing)
+    {
+        TraceMark = Pbt::Clock::now();
+        this->RecordGhostDigests(this->TracePrepare_);
+        this->TracePrepare_[Pbt::PrepareField::TraceOverheadS] += Pbt::Lap(TraceMark);
+    }
+
     START_TIMER_PREEMPTIVE("Building voronoi");
 
     start = std::chrono::high_resolution_clock::now();
@@ -2207,6 +2454,12 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
     {
         // Create Voronoi
         BuildVoronoi(order);
+    }
+
+    if(Tracing)
+    {
+        TraceMark = Pbt::Clock::now();
+        this->TracePrepare_[Pbt::PrepareField::VorBuildS] += Pbt::Seconds(TraceMark - start);
     }
 
 
@@ -2223,12 +2476,26 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
         // Sent-point indices come from the range finder and therefore index
         // allMyPoints.  Non-target supports have no constructed cell volume;
         // keep their compact all-point entries at zero.
+        if(Tracing)
+        {
+            TraceMark = Pbt::Clock::now();
+        }
         std::vector<double> allVolumes(this->GetAllPointsNo(), 0.0);
         for(size_t point = 0; point < this->Norg_; ++point)
             allVolumes[this->indicesInAllMyPoints.at(point)] =
                 this->volume_.at(point);
+        if(Tracing)
+        {
+            this->TracePrepare_[Pbt::PrepareField::VorVolumeFillS] += Pbt::Lap(TraceMark);
+        }
+        double *const TraceVolumeBarrier =
+            Tracing ? &this->TracePrepare_[Pbt::PrepareField::VorVolumeExchangeBarrierS] : nullptr;
         std::vector<std::vector<double>> exchange =
-            MPI_exchange_data_indexed(correspondents, allVolumes, indices);
+            MPI_exchange_data_indexed(correspondents, allVolumes, indices, 1, TraceVolumeBarrier);
+        if(Tracing)
+        {
+            this->TracePrepare_[Pbt::PrepareField::VorVolumeExchangeS] += Pbt::Lap(TraceMark);
+        }
         const std::vector<std::vector<size_t>> &ghost_indices = this->GetGhostIndeces();
         this->volume_.resize(this->GetTotalPointNumber(), 0.0);
         for(size_t i = 0; i < correspondents.size(); ++i)
@@ -2236,6 +2503,10 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
             const std::vector<double> &data = exchange[i];
             for(size_t j = 0; j < data.size(); ++j)
                 this->volume_.at(ghost_indices.at(i).at(j)) = data[j];
+        }
+        if(Tracing)
+        {
+            this->TracePrepare_[Pbt::PrepareField::VorVolumeScatterS] += Pbt::Lap(TraceMark);
         }
     }
 
@@ -2245,6 +2516,26 @@ std::vector<PointT> Voronoi3D<PointT>::BuildPartiallyParallel(const std::vector<
     if(rank == 0 && madvoro_runtime_log_detail::Detailed())
     {
         std::cout << "Time for build Voronoi from Delaunay: " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
+    }
+
+    if(Tracing)
+    {
+        // Converted to named values here, after every ghost round: nothing is assembled inside the rounds.
+        TraceMark = Pbt::Clock::now();
+        static_assert(Pbt::PrepareField::StageVoronoiS - Pbt::PrepareField::StagePrepareS + 1 == 7,
+                      "one stage field per partialBuildStageSeconds_ entry, in order");
+        for(size_t Stage = 0; Stage < this->partialBuildStageSeconds_.size(); ++Stage)
+        {
+            this->TracePrepare_[Pbt::PrepareField::StagePrepareS + Stage] = this->partialBuildStageSeconds_[Stage];
+        }
+        PartialBuildTraceAttempt &Attempt = this->PartialBuildTrace_.Attempts.emplace_back();
+        Attempt.Rounds.reserve(this->TraceRounds_.size());
+        for(const Pbt::RoundRecord &Round : this->TraceRounds_)
+        {
+            Attempt.Rounds.push_back(PartialBuildTraceRound{Pbt::NamedRound(Round)});
+        }
+        this->TracePrepare_[Pbt::PrepareField::TraceOverheadS] += Pbt::Lap(TraceMark);
+        Attempt.Prepare = Pbt::NamedPrepare(this->TracePrepare_);
     }
 
     // save the list of the real ghost points
@@ -2749,6 +3040,15 @@ void CheckToMirror(const Sphere<PointT> &sphere, const std::vector<Face3D<PointT
 template <typename PointT>
 void Voronoi3D<PointT>::UpdateCMs(void)
 {
+    // Diagnostics (inside a traced BuildPartiallyParallel): clock reads only.
+    namespace Pbt = PartialBuildTraceDetail;
+    const bool Tracing = this->PartialBuildTraceActive_;
+    Pbt::Clock::time_point TraceMark;
+    if(Tracing)
+    {
+        TraceMark = Pbt::Clock::now();
+    }
+
     // first, calculate CM for active local points
     this->CalcAllCM(); // Now this->CM_ calculates correct CM for all active points, and maybe for more
     size_t FaceNeighborsSize = FaceNeighbors_.size();
@@ -2760,7 +3060,17 @@ void Voronoi3D<PointT>::UpdateCMs(void)
         }
     }
 
-    this->SyncPartialBuildData(this->CM_, this->all_CM);
+    if(Tracing)
+    {
+        this->TracePrepare_[Pbt::PrepareField::VorCmS] += Pbt::Lap(TraceMark);
+    }
+    double *const TraceSyncBarrier =
+        Tracing ? &this->TracePrepare_[Pbt::PrepareField::VorCentroidSyncBarrierS] : nullptr;
+    this->SyncPartialBuildData(this->CM_, this->all_CM, TraceSyncBarrier);
+    if(Tracing)
+    {
+        this->TracePrepare_[Pbt::PrepareField::VorCentroidSyncS] += Pbt::Lap(TraceMark);
+    }
 }
 
 template <typename PointT>
@@ -2956,7 +3266,8 @@ void Voronoi3D<PointT>::BringSelfGhostPoints(const std::vector<BigRangeQueryData
                                         BigRangeAgent<PointT> &bigRangeAgent, SmallRangeAgent<PointT> &smallRangeAgent,
                                         boost::container::flat_map<size_t, size_t> &numOfResultsForBigPoints,
                                         boost::container::flat_map<size_t, size_t> &numOfResultsForSmallPoints,
-                                        std::unordered_set<size_t> &selfIgnorePoints)
+                                        std::unordered_set<size_t> &selfIgnorePoints,
+                                        PartialBuildTraceDetail::RoundRecord *TraceRound)
 {
     std::chrono::high_resolution_clock::time_point start1, end1, start2, end2, start3, end3;
 
@@ -3005,6 +3316,15 @@ void Voronoi3D<PointT>::BringSelfGhostPoints(const std::vector<BigRangeQueryData
     start3 = std::chrono::high_resolution_clock::now();
     this->del_.BuildExtra(newPoints);
     end3 = std::chrono::high_resolution_clock::now();
+    if(TraceRound != nullptr)
+    {
+        // Diagnostics: the timers above already run in every build; only their values are kept.
+        namespace Pbt = PartialBuildTraceDetail;
+        (*TraceRound)[Pbt::RoundField::SelfSmallSearchS] += Pbt::Seconds(end1 - start1);
+        (*TraceRound)[Pbt::RoundField::SelfBigSearchS] += Pbt::Seconds(end2 - start2);
+        (*TraceRound)[Pbt::RoundField::SelfInsertS] += Pbt::Seconds(end3 - start3);
+        (*TraceRound)[Pbt::RoundField::SelfPointsInserted] += static_cast<double>(newPoints.size());
+    }
     #ifdef TIMING
         #ifdef MADVORO_WITH_MPI
             rank_t rank;
@@ -3024,29 +3344,97 @@ template <typename PointT>
     void Voronoi3D<PointT>::BringRemoteGhostPoints(const std::vector<BigRangeQueryData<PointT>> &bigQueries, const std::vector<SmallRangeQueryData<PointT>> &smallQueries,
                                         BigRangeAgent<PointT> &bigRangeAgent, SmallRangeAgent<PointT> &smallRangeAgent,
                                         boost::container::flat_map<size_t, size_t> &numOfResultsForBigPoints,
-                                        boost::container::flat_map<size_t, size_t> &numOfResultsForSmallPoints)
+                                        boost::container::flat_map<size_t, size_t> &numOfResultsForSmallPoints,
+                                        bool RunBigBatch, bool RunSmallBatch,
+                                        PartialBuildTraceDetail::RoundRecord *TraceRound)
     {
         std::chrono::high_resolution_clock::time_point start1, end1, start2, end2;
+        // Diagnostics (TraceRound non-null): clock reads and the agents' batch records, added after each batch.
+        namespace Pbt = PartialBuildTraceDetail;
+        Pbt::Clock::time_point TraceBatchEnd, TracePeerMapStart, TracePeerMapEnd;
+
+        // A batch is skipped only when the caller's collective vote showed it empty on every rank, so every rank
+        // skips it together. An executed empty batch exchanges no data and leaves nothing behind: no answers, no
+        // result keys, no change to the sent-points container, and SetGhostArray/BuildExtra get only empty input.
+        if((!RunBigBatch and !bigQueries.empty()) or (!RunSmallBatch and !smallQueries.empty()))
+        {
+            MadVoro::Exception::MadVoroException eo("Voronoi3D::BringRemoteGhostPoints: skipping a batch that has local queries");
+            eo.addEntry("Local big queries", bigQueries.size());
+            eo.addEntry("Local small queries", smallQueries.size());
+            throw eo;
+        }
 
         std::vector<PointT> newPoints;
         // large points queries
+        if(RunBigBatch)
         {
             start1 = std::chrono::high_resolution_clock::now();
+            size_t TraceCacheBefore = 0;
+            size_t TraceOwnerEvalsBefore = 0;
+            size_t TraceLeafEvalsBefore = 0;
+            double TraceDistanceBefore = 0;
+            double TraceIndexBefore = 0;
+            if(TraceRound != nullptr)
+            {
+                TraceCacheBefore = bigRangeAgent.GetClosestRanksCacheSize();
+                TraceOwnerEvalsBefore = bigRangeAgent.GetTalkAgent().GetOwnerEvaluations();
+                TraceLeafEvalsBefore = bigRangeAgent.GetTalkAgent().GetLeafEvaluations();
+                TraceDistanceBefore = bigRangeAgent.GetTalkAgent().GetDistanceSeconds();
+                TraceIndexBefore = bigRangeAgent.GetTalkAgent().GetIndexBuildSeconds();
+            }
             QueryBatchInfo<BigRangeQueryData<PointT>, PointT> bigBatchInfo = bigRangeAgent.runBatch(bigQueries);
+            if(TraceRound != nullptr)
+            {
+                TraceBatchEnd = Pbt::Clock::now();
+            }
             newPoints.reserve(bigBatchInfo.result.size());
             for(const QueryInfo<BigRangeQueryData<PointT>, PointT> &ans : bigBatchInfo.queriesAnswers)
             {
                 numOfResultsForBigPoints[ans.data.pointIdx] += ans.finalResults.size();
             }
             newPoints.insert(newPoints.end(), bigBatchInfo.result.begin(), bigBatchInfo.result.end());
+            if(TraceRound != nullptr)
+            {
+                TracePeerMapStart = Pbt::Clock::now();
+            }
             this->SetGhostArray(bigRangeAgent.getRecvProc(), bigRangeAgent.getRecvPoints());
+            if(TraceRound != nullptr)
+            {
+                TracePeerMapEnd = Pbt::Clock::now();
+            }
             this->del_.BuildExtra(newPoints);
             end1 = std::chrono::high_resolution_clock::now();
+            if(TraceRound != nullptr)
+            {
+                Pbt::RoundRecord &Round = *TraceRound;
+                const size_t Base = Pbt::RoundField::BigBatchBase;
+                Round[Base + Pbt::BatchField::BatchS] += Pbt::Seconds(TraceBatchEnd - start1);
+                Round[Base + Pbt::BatchField::PeerMapS] += Pbt::Seconds(TracePeerMapEnd - TracePeerMapStart);
+                Round[Base + Pbt::BatchField::InsertS] +=
+                    Pbt::Seconds((TracePeerMapStart - TraceBatchEnd) + (end1 - TracePeerMapEnd));
+                Round[Pbt::RoundField::RemoteBigPointsInserted] += static_cast<double>(newPoints.size());
+                const size_t TraceCacheMisses = bigRangeAgent.GetClosestRanksCacheSize() - TraceCacheBefore;
+                Round[Pbt::RoundField::BigCacheMisses] += static_cast<double>(TraceCacheMisses);
+                const auto &TraceTalk = bigRangeAgent.GetTalkAgent();
+                Round[Pbt::RoundField::BigOwnerEvals] += static_cast<double>(TraceTalk.GetOwnerEvaluations() - TraceOwnerEvalsBefore);
+                Round[Pbt::RoundField::BigLeafEvals] += static_cast<double>(TraceTalk.GetLeafEvaluations() - TraceLeafEvalsBefore);
+                Round[Pbt::RoundField::BigDistanceS] += TraceTalk.GetDistanceSeconds() - TraceDistanceBefore;
+                Round[Pbt::RoundField::BigIndexBuildS] += TraceTalk.GetIndexBuildSeconds() - TraceIndexBefore;
+                if(bigRangeAgent.GetBatchTrace() != nullptr)
+                {
+                    Pbt::AddBatchTrace(Round, Base, *bigRangeAgent.GetBatchTrace());
+                }
+            }
         }
         // small points queries
-        {        
+        if(RunSmallBatch)
+        {
             start2 = std::chrono::high_resolution_clock::now();
             QueryBatchInfo<SmallRangeQueryData<PointT>, PointT> smallBatchInfo = smallRangeAgent.runBatch(smallQueries);
+            if(TraceRound != nullptr)
+            {
+                TraceBatchEnd = Pbt::Clock::now();
+            }
             for(const QueryInfo<SmallRangeQueryData<PointT>, PointT> &ans : smallBatchInfo.queriesAnswers)
             {
                 numOfResultsForSmallPoints[ans.data.pointIdx] += ans.finalResults.size();
@@ -3054,9 +3442,31 @@ template <typename PointT>
             newPoints.clear();
             newPoints.reserve(smallBatchInfo.result.size());
             newPoints.insert(newPoints.end(), smallBatchInfo.result.begin(), smallBatchInfo.result.end());
+            if(TraceRound != nullptr)
+            {
+                TracePeerMapStart = Pbt::Clock::now();
+            }
             this->SetGhostArray(smallRangeAgent.getRecvProc(), smallRangeAgent.getRecvPoints());
+            if(TraceRound != nullptr)
+            {
+                TracePeerMapEnd = Pbt::Clock::now();
+            }
             this->del_.BuildExtra(newPoints);
             end2 = std::chrono::high_resolution_clock::now();
+            if(TraceRound != nullptr)
+            {
+                Pbt::RoundRecord &Round = *TraceRound;
+                const size_t Base = Pbt::RoundField::SmallBatchBase;
+                Round[Base + Pbt::BatchField::BatchS] += Pbt::Seconds(TraceBatchEnd - start2);
+                Round[Base + Pbt::BatchField::PeerMapS] += Pbt::Seconds(TracePeerMapEnd - TracePeerMapStart);
+                Round[Base + Pbt::BatchField::InsertS] +=
+                    Pbt::Seconds((TracePeerMapStart - TraceBatchEnd) + (end2 - TracePeerMapEnd));
+                Round[Pbt::RoundField::RemoteSmallPointsInserted] += static_cast<double>(newPoints.size());
+                if(smallRangeAgent.GetBatchTrace() != nullptr)
+                {
+                    Pbt::AddBatchTrace(Round, Base, *smallRangeAgent.GetBatchTrace());
+                }
+            }
         }    
 
         #ifdef TIMING
@@ -3161,6 +3571,20 @@ template <typename PointT>
     }
     #endif // MADVORO_WITH_MPI
 
+    // Diagnostics (inside a traced BuildPartiallyParallel): clock reads and local counters. Rounds are kept as plain
+    // arrays and named only after the build; nothing is reduced, printed or sent for them.
+    namespace Pbt = PartialBuildTraceDetail;
+    #ifdef MADVORO_WITH_MPI
+    const bool Tracing = this->PartialBuildTraceActive_ and !serialMode;
+    #else // MADVORO_WITH_MPI
+    const bool Tracing = false;
+    #endif // MADVORO_WITH_MPI
+    Pbt::Clock::time_point TraceMark;
+    if(Tracing)
+    {
+        TraceMark = Pbt::Clock::now();
+    }
+
     std::vector<Face3D<PointT>> box;
     std::vector<PointT> normals;
     this->InitialBoxBuild(box, normals);
@@ -3193,7 +3617,16 @@ template <typename PointT>
     std::optional<SentPointsContainer> optPointsContainer;
     if (!serialMode)
     {
-        auto [ghostPointsFromLastBuild, alreadySentPoints1, alreadyRecvPoints1] = this->InitialGhostPointsExchange(comm);
+        if(Tracing)
+        {
+            this->TracePrepare_[Pbt::PrepareField::GhostSetupS] += Pbt::Lap(TraceMark);
+        }
+        auto [ghostPointsFromLastBuild, alreadySentPoints1, alreadyRecvPoints1] =
+            this->InitialGhostPointsExchange(comm, Tracing ? &this->TracePrepare_ : nullptr);
+        if(Tracing)
+        {
+            TraceMark = Pbt::Clock::now(); // the vote and the exchange were timed inside
+        }
         std::vector<int> alreadySentProcs;
         std::vector<std::vector<size_t>> alreadySentPoints2, alreadyRecvPoints2;
         for(rank_t _rank = 0; _rank < size; _rank++)
@@ -3217,6 +3650,10 @@ template <typename PointT>
         ContainerOps::conditional_shrink(this->tetra_centers_);
         this->bigtet_ = SetPointTetras();
         optPointsContainer.emplace(alreadySentProcs, alreadySentPoints2);
+        if(Tracing)
+        {
+            this->TracePrepare_[Pbt::PrepareField::GhostInitialInsertS] += Pbt::Lap(TraceMark);
+        }
     }
     else
     {
@@ -3228,8 +3665,17 @@ template <typename PointT>
     // which never fire since sendToSelf=false and size=1).
     const std::shared_ptr<EnvironmentAgent<PointT>> envAgent = serialMode ? nullptr : this->pointsManager->getEnvironmentAgent();
     const MPI_Comm &agentComm = serialMode ? MPI_COMM_SELF : comm;
+    // Batch records for the agents (diagnostics), allocated only when tracing and declared before the agents, which
+    // keep pointers to them until they are destroyed.
+    std::unique_ptr<QueryBatchTrace> BigBatchTrace = Tracing ? std::make_unique<QueryBatchTrace>() : nullptr;
+    std::unique_ptr<QueryBatchTrace> SmallBatchTrace = Tracing ? std::make_unique<QueryBatchTrace>() : nullptr;
     BigRangeAgent<PointT> bigRangeAgent(this->rangeFinder.get(), envAgent, pointsContainer, agentComm);
     SmallRangeAgent<PointT> smallRangeAgent(this->rangeFinder.get(), envAgent, pointsContainer, agentComm);
+    if(Tracing)
+    {
+        bigRangeAgent.SetBatchTrace(BigBatchTrace.get());
+        smallRangeAgent.SetBatchTrace(SmallBatchTrace.get());
+    }
 #else // MADVORO_WITH_MPI
     BigRangeAgent<PointT> bigRangeAgent(this->rangeFinder.get());
     SmallRangeAgent<PointT> smallRangeAgent(this->rangeFinder.get());
@@ -3237,10 +3683,14 @@ template <typename PointT>
 
 
     #ifdef MADVORO_WITH_MPI
-        MPI_Request finishedReq;
-        int I_finished = 0;
+        MPI_Request finishedReq = MPI_REQUEST_NULL;
+        // Per-round emptiness vote, summed over ranks: [0] ranks without small queries, [1] ranks without big queries.
+        // A count equal to `size` means that batch is empty on every rank; both equal means the loop is finished.
+        int LocalEmptyVote[2] = {0, 0};
+        int GlobalEmptyVote[2] = {0, 0};
     #endif // MADVORO_WITH_MPI
     int finished;
+    this->LastGhostSkippedBatches_ = {0, 0};
 
     // Use a set for O(1) lookup instead of O(n) linear search in the loop
     std::set<std::pair<size_t, size_t>> allMirroredSet;
@@ -3254,6 +3704,15 @@ template <typename PointT>
         selfIgnorePoints.insert(indices.second);
     }
 
+    // Per-round diagnostics: filled only when tracing (left unset otherwise), appended at the end of each round.
+    Pbt::RoundRecord TraceRound;
+    Pbt::RoundRecord *const RoundTrace = Tracing ? &TraceRound : nullptr;
+    boost::container::flat_map<size_t, size_t> TraceSelfSmallResults;
+    if(Tracing)
+    {
+        this->TracePrepare_[Pbt::PrepareField::GhostSetupS] += Pbt::Lap(TraceMark);
+    }
+
     auto start = std::chrono::high_resolution_clock::now();
     
     START_TIMER_PREEMPTIVE("Main Loop");
@@ -3264,6 +3723,17 @@ template <typename PointT>
         
         boost::container::flat_map<size_t, size_t> numOfResultsForSmallPoints;
         boost::container::flat_map<size_t, size_t> numOfResultsForBigPoints;
+
+        size_t TraceLiveTetras = 0;
+        Pbt::Clock::time_point TraceRoundMark;
+        if(Tracing)
+        {
+            TraceRound.fill(0.0);
+            TraceRound[Pbt::RoundField::RoundsAggregated] = 1;
+            TraceRound[Pbt::RoundField::SmallPoints] = static_cast<double>(smallPoints.size());
+            TraceRound[Pbt::RoundField::LargePoints] = static_cast<double>(largePoints.size());
+            TraceLiveTetras = this->del_.tetras_.size() - this->del_.empty_tetras_.size();
+        }
                 
         size_t smallPointsNum = smallPoints.size();
         size_t largePointsNum = largePoints.size();
@@ -3295,15 +3765,25 @@ template <typename PointT>
         std::vector<std::pair<size_t, size_t>> moreMirroredPoints = MirrorPoints(bigQueries, box, normals);
         mirroredPoints.insert(mirroredPoints.end(), moreMirroredPoints.begin(), moreMirroredPoints.end());
         VORONOI_TIMING(end1);
+        if(Tracing)
+        {
+            TraceRoundMark = Pbt::Clock::now();
+            TraceRound[Pbt::RoundField::CreateBatchesS] = Pbt::Seconds(TraceRoundMark - start_iter);
+            TraceRound[Pbt::RoundField::SmallQueries] = static_cast<double>(smallQueries.size());
+            TraceRound[Pbt::RoundField::BigQueries] = static_cast<double>(bigQueries.size());
+        }
 
         VORONOI_REPORT_TIMING("Creating batches and mirrors", start1, end1);
 
         #ifdef MADVORO_WITH_MPI
         if (!serialMode)
         {
-
-            I_finished = (smallQueries.empty() and bigQueries.empty())? 1 : 0;
-            MPI_Iallreduce(&I_finished, &finished, 1, MPI_INT, MPI_SUM, comm, &finishedReq);
+            // Same collective as the former finish vote (one non-blocking allreduce per round), now with the two
+            // batch types counted separately. It is completed before the remote batches (below) instead of at the
+            // end of the round, so every rank can skip a globally empty batch together.
+            LocalEmptyVote[0] = smallQueries.empty() ? 1 : 0;
+            LocalEmptyVote[1] = bigQueries.empty() ? 1 : 0;
+            MPI_Iallreduce(LocalEmptyVote, GlobalEmptyVote, 2, MPI_INT, MPI_SUM, comm, &finishedReq);
         }
         else
         {
@@ -3315,12 +3795,41 @@ template <typename PointT>
 
         if(considerOwnPoints)
         {
-            this->BringSelfGhostPoints(bigQueries, smallQueries, bigRangeAgent, smallRangeAgent, numOfResultsForBigPoints, numOfResultsForSmallPoints, selfIgnorePoints);
+            this->BringSelfGhostPoints(bigQueries, smallQueries, bigRangeAgent, smallRangeAgent, numOfResultsForBigPoints,
+                                       numOfResultsForSmallPoints, selfIgnorePoints, RoundTrace);
         }
 
         #ifdef MADVORO_WITH_MPI
         if (!serialMode)
-            this->BringRemoteGhostPoints(bigQueries, smallQueries, bigRangeAgent, smallRangeAgent, numOfResultsForBigPoints, numOfResultsForSmallPoints);
+        {
+            // The local self-ghost work above overlaps the vote. Every rank reads the same reduced counts, so the
+            // skip decisions below are identical on all ranks. Round 1 never has big queries (CreateBatches), so its
+            // big batch is always skipped; the terminating round skips both.
+            if(Tracing)
+            {
+                TraceRound[Pbt::RoundField::VoteOverlapS] = Pbt::Lap(TraceRoundMark);
+            }
+            MPI_Wait(&finishedReq, MPI_STATUS_IGNORE);
+            if(Tracing)
+            {
+                TraceRound[Pbt::RoundField::VoteWaitS] = Pbt::Lap(TraceRoundMark);
+                TraceSelfSmallResults = numOfResultsForSmallPoints; // self counts, before the remote batches add theirs
+                this->TracePrepare_[Pbt::PrepareField::TraceOverheadS] += Pbt::Lap(TraceRoundMark);
+            }
+            const bool SmallBatchGloballyEmpty = (GlobalEmptyVote[0] == size);
+            const bool BigBatchGloballyEmpty = (GlobalEmptyVote[1] == size);
+            finished = (SmallBatchGloballyEmpty and BigBatchGloballyEmpty) ? size : 0;
+            this->LastGhostSkippedBatches_[0] += BigBatchGloballyEmpty ? 1 : 0;
+            this->LastGhostSkippedBatches_[1] += SmallBatchGloballyEmpty ? 1 : 0;
+            if(Tracing)
+            {
+                TraceRound[Pbt::RoundField::SmallBatchRun] = SmallBatchGloballyEmpty ? 0 : 1;
+                TraceRound[Pbt::RoundField::BigBatchRun] = BigBatchGloballyEmpty ? 0 : 1;
+            }
+            this->BringRemoteGhostPoints(bigQueries, smallQueries, bigRangeAgent, smallRangeAgent, numOfResultsForBigPoints,
+                                         numOfResultsForSmallPoints, !BigBatchGloballyEmpty, !SmallBatchGloballyEmpty,
+                                         RoundTrace);
+        }
         #endif // MADVORO_WITH_MPI
 
         auto start2 = std::chrono::high_resolution_clock::now();
@@ -3355,6 +3864,12 @@ template <typename PointT>
         this->bigtet_ = SetPointTetras();
 
         auto end3 = std::chrono::high_resolution_clock::now();
+        if(Tracing)
+        {
+            TraceRound[Pbt::RoundField::MirrorsS] = Pbt::Seconds(end2 - start2);
+            TraceRound[Pbt::RoundField::MirrorPointsInserted] = static_cast<double>(newPoints.size());
+            TraceRound[Pbt::RoundField::PointTetrasS] = Pbt::Seconds(end3 - start3);
+        }
         
         #ifdef TIMING
         if(rank == 0)
@@ -3381,18 +3896,52 @@ template <typename PointT>
 
         if(rank == 0 && madvoro_runtime_log_detail::Detailed()) std::cout << "added new points: " << new_points << ", total time: " << std::chrono::duration<double>(end_iter - start_iter).count() << std::endl;
 
+        size_t TraceOverflows = 0;
+        if(Tracing)
+        {
+            // Small-query results above RANGE_MAX_POINTS_TO_GET (self and remote combined, the test of
+            // DetermineNextIterationPoints), and those whose remote part alone is within the limit.
+            TraceRoundMark = Pbt::Clock::now();
+            size_t TraceOverflowsSelfOnly = 0;
+            for(const std::pair<size_t, size_t> &PointResult : numOfResultsForSmallPoints)
+            {
+                if(PointResult.second <= RANGE_MAX_POINTS_TO_GET)
+                {
+                    continue;
+                }
+                ++TraceOverflows;
+                const auto SelfResult = TraceSelfSmallResults.find(PointResult.first);
+                const size_t SelfCount = (SelfResult == TraceSelfSmallResults.end()) ? 0 : SelfResult->second;
+                TraceOverflowsSelfOnly += (PointResult.second - SelfCount <= RANGE_MAX_POINTS_TO_GET) ? 1 : 0;
+            }
+            TraceRound[Pbt::RoundField::Overflows] = static_cast<double>(TraceOverflows);
+            TraceRound[Pbt::RoundField::OverflowsSelfOnly] = static_cast<double>(TraceOverflowsSelfOnly);
+            this->TracePrepare_[Pbt::PrepareField::TraceOverheadS] += Pbt::Lap(TraceRoundMark);
+        }
+
         std::tie(smallPoints, largePoints) = this->DetermineNextIterationPoints(iterations, firstLargeIteration, currentRadiuses, numOfResultsForSmallPoints, numOfResultsForBigPoints);
+
+        if(Tracing)
+        {
+            // A small point stays small exactly when its radius grows; the others overflowed or finished.
+            const Pbt::Clock::time_point TraceRoundEnd = Pbt::Clock::now();
+            const size_t LiveTetras = this->del_.tetras_.size() - this->del_.empty_tetras_.size();
+            TraceRound[Pbt::RoundField::DetermineNextS] = Pbt::Seconds(TraceRoundEnd - TraceRoundMark);
+            TraceRound[Pbt::RoundField::RoundS] = Pbt::Seconds(TraceRoundEnd - start_iter);
+            TraceRound[Pbt::RoundField::GrowthSteps] = static_cast<double>(smallPoints.size());
+            const size_t TraceFinished = numOfResultsForSmallPoints.size() - TraceOverflows - smallPoints.size();
+            TraceRound[Pbt::RoundField::FinishedPoints] = static_cast<double>(TraceFinished);
+            TraceRound[Pbt::RoundField::NetNewTetrahedra] =
+                static_cast<double>(LiveTetras) - static_cast<double>(TraceLiveTetras);
+            Pbt::AppendRound(this->TraceRounds_, TraceRound);
+        }
 
         // #ifdef MADVORO_WITH_MPI
         //     std::tie(smallPoints, largePoints) = this->DetermineNextIterationPoints(iterations, firstLargeIteration, currentRadiuses, selfSmallQueriesAnswers, selfBigQueriesAnswers, smallBatchInfo.queriesAnswers, bigBatchInfo.queriesAnswers);
         // #else // MADVORO_WITH_MPI
         // #endif // MADVORO_WITH_MPI
 
-        #ifdef MADVORO_WITH_MPI
-        if (!serialMode)
-            MPI_Wait(&finishedReq, MPI_STATUS_IGNORE);
-        #endif // MADVORO_WITH_MPI
-
+        // In MPI mode the vote was completed before the remote batches; `finished` is the same agreed value.
         if(finished == size)
         {
             break;
@@ -3400,6 +3949,44 @@ template <typename PointT>
     }
 
     auto end = std::chrono::high_resolution_clock::now();
+    #ifdef MADVORO_WITH_MPI
+    if(!serialMode and bigRangeAgent.GetTalkAgent().GetRestrictedMode() == 2)
+    {
+        // Mode 2 of the restricted closest-rank lookup: one reduction decides, and on a difference every rank throws.
+        unsigned long long VerifyMismatches = static_cast<unsigned long long>(bigRangeAgent.GetTalkAgent().GetVerifyMismatches());
+        unsigned long long VerifyLocal = VerifyMismatches;
+        MPI_Allreduce(MPI_IN_PLACE, &VerifyMismatches, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, comm);
+        if(VerifyMismatches != 0)
+        {
+            std::ostringstream VerifyText;
+            VerifyText << "MADVORO_CLOSEST_RANKS_VERIFY_MISMATCH total=" << VerifyMismatches << " rank=" << rank << " local=" << VerifyLocal;
+            if(VerifyLocal != 0)
+            {
+                VerifyText << " first: " << bigRangeAgent.GetTalkAgent().GetVerifyFirstMismatch();
+            }
+            // One example, from the lowest rank that found a difference.
+            int VerifyFirstRank = (VerifyLocal != 0) ? rank : size;
+            MPI_Allreduce(MPI_IN_PLACE, &VerifyFirstRank, 1, MPI_INT, MPI_MIN, comm);
+            if(rank == VerifyFirstRank)
+            {
+                std::cerr << VerifyText.str() << std::endl;
+            }
+            throw MadVoro::Exception::ClosestRanksVerifyError(VerifyText.str());
+        }
+    }
+    #endif // MADVORO_WITH_MPI
+    if(Tracing)
+    {
+        #ifdef MADVORO_WITH_MPI
+        this->TracePrepare_[Pbt::PrepareField::ClosestRanksMode] = static_cast<double>(bigRangeAgent.GetTalkAgent().GetRestrictedMode());
+        this->TracePrepare_[Pbt::PrepareField::RoutingLeaves] = static_cast<double>(bigRangeAgent.GetTalkAgent().GetIndexedLeafCount());
+        #endif // MADVORO_WITH_MPI
+        this->TracePrepare_[Pbt::PrepareField::GhostLoopS] += Pbt::Seconds(end - start);
+        this->TracePrepare_[Pbt::PrepareField::GhostRounds] += static_cast<double>(iterations);
+        const std::array<size_t, 2> &Skipped = this->LastGhostSkippedBatches_;
+        this->TracePrepare_[Pbt::PrepareField::GhostSmallBatchesSkipped] += static_cast<double>(Skipped[1]);
+        this->TracePrepare_[Pbt::PrepareField::GhostBigBatchesSkipped] += static_cast<double>(Skipped[0]);
+    }
     if(rank == 0 && madvoro_runtime_log_detail::Detailed())
     {
         std::cout << "Time for bringing ghosts: " << std::chrono::duration<double>(end - start).count() << " seconds" << std::endl;
@@ -3408,6 +3995,7 @@ template <typename PointT>
     if(rank == 0 && madvoro_runtime_log_detail::Detailed())
     {
         std::cout << "Total small queries: " << totalSmallQueries << ", total big queries: " << totalBigQueries << std::endl;
+        std::cout << "MADVORO_GHOST_BATCH_SKIPS rounds=" << iterations << " big_skipped=" << this->LastGhostSkippedBatches_[0] << " small_skipped=" << this->LastGhostSkippedBatches_[1] << std::endl;
     }
     
     START_TIMER_PREEMPTIVE("Organizing sent/recv and ghosts arrays");
@@ -3418,7 +4006,15 @@ template <typename PointT>
         const std::vector<int> &sentProc = pointsContainer.getSentProc();
 
         // calculate this->duplicated_points_
+        if(Tracing)
+        {
+            TraceMark = Pbt::Clock::now();
+        }
         this->UpdateDuplicatedPoints(sentProc, sentPoints);
+        if(Tracing)
+        {
+            this->TracePrepare_[Pbt::PrepareField::GhostFinalPeerMapS] += Pbt::Lap(TraceMark);
+        }
         // SetGhostArray() adds every receive peer and
         // UpdateDuplicatedPoints() adds every send peer.  Their union is
         // symmetric across ranks even when only one direction carries data.
@@ -4507,7 +5103,10 @@ Voronoi3D<PointT>::Voronoi3D(Voronoi3D<PointT> const &other) : ll_(other.ll_), u
                                                 indicesInAllMyPoints(other.indicesInAllMyPoints),
                                                 indicesInInputPoints(other.indicesInInputPoints),
                                                 allMyPointInputIndices(other.allMyPointInputIndices)
-                                                {}
+                                                {
+                                                    // A copy keeps the trace level; its record starts empty.
+                                                    this->PartialBuildTraceLevel_ = other.PartialBuildTraceLevel_;
+                                                }
 
 template <typename PointT>
 bool Voronoi3D<PointT>::NearBoundary(std::size_t index) const
@@ -5038,8 +5637,10 @@ const std::shared_ptr<EnvironmentAgent<PointT>> Voronoi3D<PointT>::GetEnvironmen
 
 template <typename PointT>
 template<typename T>
-void Voronoi3D<PointT>::SyncPartialBuildData(std::vector<T> &partialBuildData, std::vector<T> &allBuildData) const
+void Voronoi3D<PointT>::SyncPartialBuildData(std::vector<T> &partialBuildData, std::vector<T> &allBuildData,
+                                             double *BarrierWaitSeconds) const
 {
+  (void)BarrierWaitSeconds; // used only by the MPI exchange below
   size_t Norg = this->GetPointNo();
   if(partialBuildData.size() < Norg)
   {
@@ -5098,7 +5699,7 @@ void Voronoi3D<PointT>::SyncPartialBuildData(std::vector<T> &partialBuildData, s
       // allBuildData.  partialBuildData is instead indexed by Delaunay point.
       std::vector<std::vector<T>> incoming = MPI_exchange_data_indexed(
           this->GetDuplicatedProcs(), allBuildData,
-          this->GetDuplicatedPoints());
+          this->GetDuplicatedPoints(), 1, BarrierWaitSeconds);
       size_t incomingSize = incoming.size();
       const std::vector<std::vector<size_t>> &Nghost = this->GetGhostIndeces();
       assert(this->GetDuplicatedProcs().size() == Nghost.size());

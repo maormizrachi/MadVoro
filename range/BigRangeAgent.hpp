@@ -16,6 +16,13 @@
 #endif // MADVORO_WITH_MPI
 
 #include "RangeQueryData.h"
+#include "ClosestRanksMode.hpp"
+#include <chrono>
+#include <cstring>
+#include <sstream>
+#include <string>
+#include <boost/container/flat_map.hpp>
+#include <boost/container/flat_set.hpp>
 
 template <typename PointT>
 struct BigRangeQueryData : public RangeQueryData<PointT>
@@ -130,7 +137,7 @@ private:
                             #ifdef MADVORO_WITH_MPI
                                 const MPI_Comm &comm = MPI_COMM_WORLD
                             #endif // MADVORO_WITH_MPI
-                            ): envAgent(envAgent), supportsFurthestClosestRanks(false)
+                            ): envAgent(envAgent), supportsFurthestClosestRanks(false), restrictedMode(MadVoro::GetClosestRanksRestrictedMode())
             {
                 #ifdef MADVORO_WITH_MPI
                     MPI_Comm_rank(comm, &this->rank);
@@ -145,14 +152,35 @@ private:
                 {
                     this->supportsFurthestClosestRanks = true;
                     this->getFurthestClosestRanks = [distribuedOctEnvAgent](const PointT &point){return distribuedOctEnvAgent->getClosestFurthestPointsByRanks(point);};
+                    // The restricted lookup exists for the distributed oct tree only; the Hilbert tree agent keeps the
+                    // dense scan in every mode.
+                    this->octEnvAgent = distribuedOctEnvAgent;
                 }
                 const HilbertTreeEnvironmentAgent<PointT> *hilbertTreeEnvAgent = dynamic_cast<const HilbertTreeEnvironmentAgent<PointT>*>(this->envAgent.get());
                 if(hilbertTreeEnvAgent != nullptr)
                 {
                     this->supportsFurthestClosestRanks = true;
                     this->getFurthestClosestRanks = [hilbertTreeEnvAgent](const PointT &point){return hilbertTreeEnvAgent->getClosestFurthestPointsByRanks(point);};
+                    this->octEnvAgent = nullptr;
                 }
             };
+
+            // Diagnostics: distinct points that entered the closest-rank lookup in this build (one per point, in every
+            // mode; the count only grows).
+            inline size_t GetClosestRanksCacheSize() const{return (this->usesRestricted()) ? this->sparseCache.size() : this->resultCache.size();}
+            // Diagnostics of the restricted lookup (modes 1 and 2), cumulative over the agent's life: owner pairs
+            // evaluated, leaves visited, seconds in the lookup excluding the index build (only while timing), seconds
+            // building the per-owner leaf index, and the routing tree's leaf count.
+            inline size_t GetOwnerEvaluations() const{return this->ownerEvaluations;}
+            inline size_t GetLeafEvaluations() const{return this->leafEvaluations;}
+            inline double GetDistanceSeconds() const{return this->distanceSeconds;}
+            inline double GetIndexBuildSeconds() const{return this->indexBuildSeconds;}
+            inline size_t GetIndexedLeafCount() const{return this->indexedLeafCount;}
+            // Mode 2: owner pairs whose restricted and dense values differ in any bit, and the first such sample.
+            inline size_t GetVerifyMismatches() const{return this->verifyMismatches;}
+            inline const std::string &GetVerifyFirstMismatch() const{return this->verifyFirstMismatch;}
+            inline int GetRestrictedMode() const{return this->restrictedMode;}
+            inline void SetTiming(bool Timing){this->timing = Timing;}
 
             inline typename EnvironmentAgent<PointT>::RanksSet getTalkList(const BigRangeQueryData<PointT> &query) const override
             {
@@ -184,14 +212,133 @@ private:
                     return intersectingRanks;
                 }
 
-                auto it = this->resultCache.find(query.pointIdx);
-                if(it == this->resultCache.end())
+                if(not this->usesRestricted())
                 {
-                    this->resultCache.emplace(query.pointIdx, this->getFurthestClosestRanks(query.originalPoint));
-                    it = this->resultCache.find(query.pointIdx);
+                    auto it = this->resultCache.find(query.pointIdx);
+                    if(it == this->resultCache.end())
+                    {
+                        this->resultCache.emplace(query.pointIdx, this->getFurthestClosestRanks(query.originalPoint));
+                        it = this->resultCache.find(query.pointIdx);
+                    }
+                    const typename HilbertCurveEnvironmentAgent<PointT>::DistancesVector &distances = (*it).second;
+                    return this->selectCloseRanks(query, intersectingRanks, [&distances](int _rank) -> const std::pair<coord_type, coord_type>& {return distances[_rank];});
                 }
-                typename HilbertCurveEnvironmentAgent<PointT>::DistancesVector &distances = (*it).second;
-                
+
+                // Restricted (mode 1) or verify (mode 2). The entry of a point keeps the point of its first query, as
+                // the dense cache does, and gains the owners of later queries of the same point (other tetrahedra).
+                auto sit = this->sparseCache.find(query.pointIdx);
+                if(sit == this->sparseCache.end())
+                {
+                    SparseEntry newEntry;
+                    newEntry.point = query.originalPoint;
+                    sit = this->sparseCache.emplace(query.pointIdx, std::move(newEntry)).first;
+                }
+                SparseEntry &entry = (*sit).second;
+                this->fillOwners(entry, intersectingRanks);
+
+                if(this->restrictedMode == 2)
+                {
+                    auto it = this->resultCache.find(query.pointIdx);
+                    if(it == this->resultCache.end())
+                    {
+                        this->resultCache.emplace(query.pointIdx, this->getFurthestClosestRanks(entry.point));
+                        it = this->resultCache.find(query.pointIdx);
+                    }
+                    const typename HilbertCurveEnvironmentAgent<PointT>::DistancesVector &distances = (*it).second;
+                    for(const int &_rank : intersectingRanks)
+                    {
+                        auto checked = entry.verified.find(_rank);
+                        if(checked != entry.verified.end())
+                        {
+                            continue;
+                        }
+                        entry.verified.insert(_rank);
+                        const std::pair<coord_type, coord_type> &restricted = (*entry.owners.find(_rank)).second;
+                        const std::pair<coord_type, coord_type> &dense = distances[_rank];
+                        if(BigRangeTalkAgent::sameBits(restricted.first, dense.first) and BigRangeTalkAgent::sameBits(restricted.second, dense.second))
+                        {
+                            continue;
+                        }
+                        if(this->verifyMismatches == 0)
+                        {
+                            std::ostringstream sample;
+                            sample.precision(17);
+                            sample << "point " << query.pointIdx << " " << entry.point << " owner " << _rank << " restricted (" << restricted.first << ", " << restricted.second << ") dense (" << dense.first << ", " << dense.second << ")";
+                            this->verifyFirstMismatch = sample.str();
+                        }
+                        ++this->verifyMismatches;
+                    }
+                    // Mode 2 selects with the dense values, so its ghost exchange is that of mode 0.
+                    return this->selectCloseRanks(query, intersectingRanks, [&distances](int _rank) -> const std::pair<coord_type, coord_type>& {return distances[_rank];});
+                }
+                return this->selectCloseRanks(query, intersectingRanks, [&entry](int _rank) -> const std::pair<coord_type, coord_type>& {return (*entry.owners.find(_rank)).second;});
+            }
+
+        private:
+            struct SparseEntry
+            {
+                PointT point;
+                boost::container::flat_map<int, std::pair<coord_type, coord_type>> owners;
+                boost::container::flat_set<int> verified;
+            };
+
+            inline bool usesRestricted() const{return this->restrictedMode != 0 and this->octEnvAgent != nullptr;}
+
+            static inline bool sameBits(coord_type a, coord_type b)
+            {
+                return std::memcmp(&a, &b, sizeof(coord_type)) == 0;
+            }
+
+            // Evaluates the owners of `ranks` that the entry does not hold yet.
+            inline void fillOwners(SparseEntry &entry, const typename EnvironmentAgent<PointT>::RanksSet &ranks) const
+            {
+                bool missing = false;
+                for(const int &_rank : ranks)
+                {
+                    if(entry.owners.find(_rank) == entry.owners.end())
+                    {
+                        missing = true;
+                        break;
+                    }
+                }
+                if(not missing)
+                {
+                    return;
+                }
+                const auto &tree = this->octEnvAgent->getOctTree();
+                if(not tree->hasOwnerLeafIndex())
+                {
+                    const auto indexStart = std::chrono::steady_clock::now();
+                    tree->buildOwnerLeafIndex();
+                    this->indexBuildSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - indexStart).count();
+                }
+                this->indexedLeafCount = tree->getIndexedLeafCount();
+                std::chrono::steady_clock::time_point lookupStart;
+                if(this->timing)
+                {
+                    lookupStart = std::chrono::steady_clock::now();
+                }
+                for(const int &_rank : ranks)
+                {
+                    if(entry.owners.find(_rank) != entry.owners.end())
+                    {
+                        continue;
+                    }
+                    entry.owners.emplace(_rank, tree->getClosestFurthestPointOfRank(entry.point, _rank, this->leafEvaluations));
+                    ++this->ownerEvaluations;
+                }
+                if(this->timing)
+                {
+                    this->distanceSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - lookupStart).count();
+                }
+            }
+
+            // The selection of the closest ranks: the nearest non-self rank sets the threshold (its furthest distance),
+            // and every intersecting rank whose closest distance is within it is asked. `pairOf(rank)` returns the
+            // (closest, furthest) squared distances of a rank in `intersectingRanks`.
+            template<typename PairOf>
+            inline typename EnvironmentAgent<PointT>::RanksSet selectCloseRanks(const BigRangeQueryData<PointT> &query, const typename EnvironmentAgent<PointT>::RanksSet &intersectingRanks, const PairOf &pairOf) const
+            {
                 coord_type minDist = std::numeric_limits<coord_type>::max();
                 int minDistRank = std::numeric_limits<int>::max();
                 for(const int &_rank : intersectingRanks)
@@ -200,9 +347,9 @@ private:
                     {
                         continue;
                     }
-                    if(distances[_rank].first < minDist)
+                    if(pairOf(_rank).first < minDist)
                     {
-                        minDist = distances[_rank].first;
+                        minDist = pairOf(_rank).first;
                         minDistRank = _rank;
                     }
                 }
@@ -212,16 +359,16 @@ private:
                     eo.addEntry("Query", query);
                     eo.addEntry("minDistRank", minDistRank);
                     eo.addEntry("Size of intersectingRanks", intersectingRanks.size());
-                    eo.addEntry("Distances", distances);
+                    eo.addEntry("Distances", this->describePairs(intersectingRanks, pairOf));
                     throw eo;
                 }
-                coord_type closestDistThreshold = distances[minDistRank].second;
+                coord_type closestDistThreshold = pairOf(minDistRank).second;
 
                 constexpr coord_type eps = static_cast<coord_type>(1e-12);
                 typename EnvironmentAgent<PointT>::RanksSet result;
                 for(const int &_rank : intersectingRanks)
                 {
-                    if(distances[_rank].first <= (closestDistThreshold * (1 + eps)))
+                    if(pairOf(_rank).first <= (closestDistThreshold * (1 + eps)))
                     {
                         result.insert(_rank);
                     }
@@ -231,7 +378,7 @@ private:
                 {
                     MadVoro::Exception::MadVoroException eo("In BigRangeTalkAgent, should not reach here, since `result` must contain at least one additional rank");
                     eo.addEntry("Query", query);
-                    eo.addEntry("Distances", distances);
+                    eo.addEntry("Distances", this->describePairs(intersectingRanks, pairOf));
                     eo.addEntry("closestDistThreshold", closestDistThreshold);
                     eo.addEntry("Size of result", result.size());
                     eo.addEntry("Size of intersectingRanks", intersectingRanks.size());
@@ -240,11 +387,33 @@ private:
                 return result;
             }
 
-        private:
+            template<typename PairOf>
+            inline std::string describePairs(const typename EnvironmentAgent<PointT>::RanksSet &ranks, const PairOf &pairOf) const
+            {
+                std::ostringstream text;
+                text.precision(17);
+                for(const int &_rank : ranks)
+                {
+                    text << "[" << _rank << ": " << pairOf(_rank).first << ", " << pairOf(_rank).second << "] ";
+                }
+                return text.str();
+            }
+
             const std::shared_ptr<EnvironmentAgent<PointT>> envAgent;
             mutable _map<size_t, std::vector<std::pair<coord_type, coord_type>>> resultCache;
+            mutable _map<size_t, SparseEntry> sparseCache;
             int rank, size;
             bool supportsFurthestClosestRanks;
+            int restrictedMode;
+            const DistributedOctEnvironmentAgent<PointT> *octEnvAgent = nullptr;
+            bool timing = false;
+            mutable size_t ownerEvaluations = 0;
+            mutable size_t leafEvaluations = 0;
+            mutable double distanceSeconds = 0;
+            mutable double indexBuildSeconds = 0;
+            mutable size_t indexedLeafCount = 0;
+            mutable size_t verifyMismatches = 0;
+            mutable std::string verifyFirstMismatch;
             #ifdef MADVORO_WITH_MPI
                 std::function<typename HilbertCurveEnvironmentAgent<PointT>::DistancesVector(const PointT&)> getFurthestClosestRanks;
             #endif // MADVORO_WITH_MPI
@@ -303,6 +472,19 @@ public:
         inline std::vector<std::vector<std::size_t>> &getRecvPoints(){return this->queryAgent->getRecvData();};
         inline std::vector<int> &getSentProc(){return this->pointsContainer.getSentProc();};
         inline std::vector<int> &getRecvProc(){return this->queryAgent->getRecvProc();};
+
+        // Diagnostics only: per-batch record written by runBatch while non-null (see mpi_utils/BatchTrace.hpp).
+        inline void SetBatchTrace(QueryBatchTrace *Trace)
+        {
+            this->BatchTrace = Trace;
+            this->queryAgent->SetBatchTrace(Trace);
+            this->talkAgent->SetTiming(Trace != nullptr);
+        };
+        inline const QueryBatchTrace *GetBatchTrace() const{return this->BatchTrace;};
+        // Closest-rank computations done so far by the talk agent (its cache only grows): misses of the cache.
+        inline size_t GetClosestRanksCacheSize() const{return this->talkAgent->GetClosestRanksCacheSize();};
+        // Restricted closest-rank lookup diagnostics and the mode-2 verdict (see BigRangeTalkAgent).
+        inline const BigRangeTalkAgent &GetTalkAgent() const{return *this->talkAgent;};
     #endif // MADVORO_WITH_MPI
 
 private:
@@ -311,6 +493,7 @@ private:
         BigRangeTalkAgent *talkAgent;
         QueryAgent<BigRangeQueryData<PointT>, PointT> *queryAgent;
         SentPointsContainer &pointsContainer;
+        QueryBatchTrace *BatchTrace = nullptr;
     #endif // MADVORO_WITH_MPI
 };
 

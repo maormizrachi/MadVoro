@@ -214,6 +214,14 @@ public:
         inline std::vector<std::vector<std::size_t>> &getRecvPoints(){return this->queryAgent->getRecvData();};
         inline std::vector<int> &getSentProc(){return this->pointsContainer.getSentProc();};
         inline std::vector<int> &getRecvProc(){return this->queryAgent->getRecvProc();};
+
+        // Diagnostics only: per-batch record written by runBatch while non-null (see mpi_utils/BatchTrace.hpp).
+        inline void SetBatchTrace(QueryBatchTrace *Trace)
+        {
+            this->BatchTrace = Trace;
+            this->queryAgent->SetBatchTrace(Trace);
+        };
+        inline const QueryBatchTrace *GetBatchTrace() const{return this->BatchTrace;};
     #endif // MADVORO_WITH_MPI
 
 private:
@@ -222,6 +230,7 @@ private:
         QueryAgent<SmallRangeQueryData<PointT>, PointT> *queryAgent;
         SmallRangeTalkAgent *talkAgent;
         SentPointsContainer &pointsContainer;
+        QueryBatchTrace *BatchTrace = nullptr;
     #endif // MADVORO_WITH_MPI
 };
 
